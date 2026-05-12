@@ -1,0 +1,33 @@
+{
+  "id": "bank-reconcile",
+  "name": "Bank Reconciliation",
+  "description": "Bank statement scan and AI-extracted reconciliation. Imports statements from PDF or via SAM email service, matches transactions against Opera customers/suppliers/nominals using fuzzy matching and pattern learning, then posts to Opera as cashbook entries with full bank-statement reconciliation.",
+  "version": "1.0.0",
+  "author": "IntSys",
+  "category": "finance",
+  "type": "full-stack",
+  "minSamVersion": "1.0.0",
+  "frontend": {
+    "entryComponent": "BankReconcile",
+    "basePath": "/bank-reconcile",
+    "navLabel": "Bank Reconciliation",
+    "navIcon": "Banknote",
+    "requiredSharedDeps": ["react", "react-dom", "react-router-dom"]
+  },
+  "backend": {
+    "routePrefix": "/api/apps/bank-reconcile",
+    "requiresDatabase": true,
+    "databaseType": "opera-se",
+    "separateDatabase": true,
+    "internalApiPrefix": "/api"
+  },
+  "permissions": [
+    "opera:read",
+    "opera:write",
+    "sam:config:read"
+  ],
+  "consumes": {
+    "email-ingest": true,
+    "llm": true
+  }
+}

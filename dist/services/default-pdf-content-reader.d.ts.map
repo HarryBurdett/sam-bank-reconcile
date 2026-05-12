@@ -1,0 +1,1 @@
+{"version":3,"file":"default-pdf-content-reader.d.ts","sourceRoot":"","sources":["../../src/services/default-pdf-content-reader.ts"],"names":[],"mappings":"AAeA,OAAO,KAAK,EAAE,gBAAgB,EAAE,MAAM,qBAAqB,CAAC;AAE5D,UAAU,gBAAgB;IACxB,OAAO,CAAC,EAAE,MAAM,CAAC;CAClB;AAQD,wBAAgB,6BAA6B,CAC3C,OAAO,GAAE,gBAAqB,GAC7B,gBAAgB,CAqBlB"}

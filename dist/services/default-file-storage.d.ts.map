@@ -1,0 +1,1 @@
+{"version":3,"file":"default-file-storage.d.ts","sourceRoot":"","sources":["../../src/services/default-file-storage.ts"],"names":[],"mappings":"AAgBA,OAAO,KAAK,EACV,kBAAkB,EAEnB,MAAM,cAAc,CAAC;AAEtB,UAAU,kBAAkB;IAC1B,4DAA4D;IAC5D,OAAO,EAAE,MAAM,CAAC;IAChB,0EAA0E;IAC1E,UAAU,CAAC,EAAE,OAAO,CAAC;CACtB;AAmDD,wBAAgB,wBAAwB,CACtC,OAAO,EAAE,kBAAkB,GAC1B,kBAAkB,CA6EpB"}
