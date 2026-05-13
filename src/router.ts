@@ -3077,8 +3077,15 @@ export function createRouter(ctx: AppContext): Router {
     const mailbox =
       adapter.bankMailboxAdapter ?? builtinEmailIngest?.mailbox ?? null;
     const daysBack = req.query.days_back ? Number(req.query.days_back) : 30;
+    const validateBalances = req.query.validate_balances !== 'false';
+    const { scanAllBanksFaithful } = await import(
+      './services/scan-all-banks.js'
+    );
     res.json(
-      await scanAllBanks(operaDb, mailbox, appDb, { daysBack }),
+      await scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
+        daysBack,
+        validateBalances,
+      }),
     );
   });
 

@@ -50,7 +50,7 @@ import { getBankReconciliationStatus, getUnreconciledEntriesForBank, getStatemen
 import { recordDeferredTransaction, listDeferredItems, deleteDeferredItems, deleteIgnoredTransactionByRecordId, } from './services/deferred-items.js';
 import { listCashbookBankAccounts, createCashbookEntry, createBankTransfer, autoMatchStatementLines, } from './services/cashbook-create.js';
 import { archiveStatement, listArchivedStatements, restoreStatement, getArchivedStatementPdf, deleteArchivedStatement, manageStatements, } from './services/statement-archive.js';
-import { listCsvFiles, listPdfFiles, getPdfContent, scanFolder, fetchEmailsToFolder, scanAllBanks, rawPreviewFromPdf, previewMultiformat, validateCsv, getStatementReview, } from './services/misc-endpoints.js';
+import { listCsvFiles, listPdfFiles, getPdfContent, scanFolder, fetchEmailsToFolder, rawPreviewFromPdf, previewMultiformat, validateCsv, getStatementReview, } from './services/misc-endpoints.js';
 import { importBankStatementFromEmail, } from './services/bank-import-from-email.js';
 import { defaultMultiformatParser } from './services/default-multiformat-parser.js';
 import { createDefaultBankPdfExtractor } from './services/default-bank-pdf-extractor.js';
@@ -2625,7 +2625,12 @@ export function createRouter(ctx) {
         const adapter = ctx;
         const mailbox = adapter.bankMailboxAdapter ?? builtinEmailIngest?.mailbox ?? null;
         const daysBack = req.query.days_back ? Number(req.query.days_back) : 30;
-        res.json(await scanAllBanks(operaDb, mailbox, appDb, { daysBack }));
+        const validateBalances = req.query.validate_balances !== 'false';
+        const { scanAllBanksFaithful } = await import('./services/scan-all-banks.js');
+        res.json(await scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
+            daysBack,
+            validateBalances,
+        }));
     });
     /**
      * GET /api/bank-import/restore-check
