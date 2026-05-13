@@ -413,11 +413,24 @@ async function seedEmailProviderFromLegacy(
  * (repeat_entry_aliases, match_config, duplicate_overrides,
  * ai_suggestions).
  */
+/**
+ * Plan entries are addressed relative to a *sub-root* under the
+ * per-company legacy directory:
+ *   - `bank_reconcile/` holds aliases / patterns / deferred (split DBs)
+ *   - `core/` holds email_data.db, which doubles as the bank import
+ *     history store (`bank_statement_imports`, `bank_statement_transactions`,
+ *     `bank_import_drafts`, `ignored_bank_transactions`).
+ *
+ * Both sub-roots get walked; per-file probes are no-ops when the file
+ * is missing, so this works for partial deployments too.
+ */
 const LEGACY_TABLE_PLAN: ReadonlyArray<{
+  subdir: string;
   file: string;
   tables: LegacyTableSpec[];
 }> = [
   {
+    subdir: LEGACY_APP_SUBDIR, // 'bank_reconcile'
     file: 'bank_aliases.db',
     tables: [
       { name: 'bank_import_aliases', transform: transformBankImportAlias },
@@ -428,12 +441,28 @@ const LEGACY_TABLE_PLAN: ReadonlyArray<{
     ],
   },
   {
+    subdir: LEGACY_APP_SUBDIR,
     file: 'bank_patterns.db',
     tables: [{ name: 'bank_import_patterns', transform: transformBankImportPattern }],
   },
   {
+    subdir: LEGACY_APP_SUBDIR,
     file: 'deferred_transactions.db',
     tables: [{ name: 'deferred_transactions' }],
+  },
+  {
+    // Bank import history lives in core/email_data.db (the legacy
+    // shared email + import-history database). Without these tables
+    // the Hub's "Imported statements awaiting reconciliation" view
+    // is empty for any previously-imported statement.
+    subdir: 'core',
+    file: 'email_data.db',
+    tables: [
+      { name: 'bank_statement_imports', transform: transformBankStatementImport },
+      { name: 'bank_statement_transactions', transform: transformBankStatementTransaction },
+      { name: 'bank_import_drafts' },
+      { name: 'ignored_bank_transactions', transform: transformIgnoredBankTransaction },
+    ],
   },
 ];
 
@@ -513,6 +542,113 @@ function transformRepeatEntryAlias(
   };
 }
 
+/**
+ * Legacy `bank_statement_imports` (email_data.db) → new schema.
+ *
+ * Legacy: id, email_id, attachment_id, source, bank_code, filename,
+ *   total_receipts, total_payments, transactions_imported,
+ *   target_system, import_date, imported_by, is_reconciled,
+ *   reconciled_date, reconciled_count, pdf_hash, opening_balance,
+ *   closing_balance, statement_date, account_number, sort_code,
+ *   period_start, period_end, file_path, statement_number.
+ *
+ * New: bank_code, statement_date, opening_balance, closing_balance,
+ *   source, source_ref, imported_by, imported_at, is_reconciled,
+ *   reconciled_count, target_system, reconciled_at, filename,
+ *   transactions_imported, total_receipts, total_payments,
+ *   account_number, sort_code, period_start, period_end,
+ *   reconciled_by, archived_at, archived_by, records_imported.
+ *
+ * The legacy split of `email_id`+`attachment_id`+`file_path` collapses
+ * into a single `source_ref` in the new schema:
+ *   source='email' → source_ref = "<email_id>:<attachment_id>"
+ *   source='file'  → source_ref = file_path
+ * `pdf_hash` and `statement_number` are dropped (no destination).
+ */
+function transformBankStatementImport(
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const source = typeof row.source === 'string' ? row.source : 'file';
+  let sourceRef: string | null = null;
+  if (source === 'email') {
+    const eid = row.email_id == null ? '' : String(row.email_id);
+    const aid = row.attachment_id == null ? '' : String(row.attachment_id);
+    sourceRef = `${eid}:${aid}`;
+  } else if (typeof row.file_path === 'string' && row.file_path.length > 0) {
+    sourceRef = row.file_path;
+  } else if (typeof row.filename === 'string') {
+    sourceRef = row.filename;
+  }
+  return {
+    bank_code: row.bank_code,
+    statement_date: row.statement_date ?? null,
+    opening_balance: row.opening_balance ?? null,
+    closing_balance: row.closing_balance ?? null,
+    source,
+    source_ref: sourceRef,
+    imported_by: row.imported_by ?? null,
+    imported_at: row.import_date ?? null,
+    is_reconciled: row.is_reconciled ?? 0,
+    reconciled_count: row.reconciled_count ?? 0,
+    target_system: row.target_system ?? 'opera_se',
+    reconciled_at: row.reconciled_date ?? null,
+    filename: row.filename ?? null,
+    transactions_imported: row.transactions_imported ?? 0,
+    total_receipts: row.total_receipts ?? 0,
+    total_payments: row.total_payments ?? 0,
+    account_number: row.account_number ?? null,
+    sort_code: row.sort_code ?? null,
+    period_start: row.period_start ?? null,
+    period_end: row.period_end ?? null,
+  };
+}
+
+/**
+ * Legacy `bank_statement_transactions` → new schema.
+ * Only difference: legacy `date` → new `post_date`. Pass through
+ * everything else.
+ */
+function transformBankStatementTransaction(
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    import_id: row.import_id,
+    line_number: row.line_number,
+    post_date: row.date,
+    description: row.description ?? null,
+    amount: row.amount,
+    balance: row.balance ?? null,
+    transaction_type: row.transaction_type ?? null,
+    reference: row.reference ?? null,
+    matched_entry: row.matched_entry ?? null,
+    match_confidence: row.match_confidence ?? null,
+    match_type: row.match_type ?? null,
+    is_reconciled: row.is_reconciled ?? 0,
+    posted_entry_number: row.posted_entry_number ?? null,
+    posted_at: row.posted_at ?? null,
+  };
+}
+
+/**
+ * Legacy `ignored_bank_transactions` → new schema.
+ * Only difference: legacy `bank_account` → new `bank_code`. Pass
+ * through everything else.
+ */
+function transformIgnoredBankTransaction(
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    bank_code: row.bank_account,
+    transaction_date: row.transaction_date,
+    amount: row.amount,
+    description: row.description ?? null,
+    reference: row.reference ?? null,
+    reason: row.reason ?? null,
+    ignored_at: row.ignored_at ?? null,
+    ignored_by: row.ignored_by ?? null,
+  };
+}
+
 async function seedTablesFromLegacyDbs(
   appDb: Knex,
   legacyDataRoot: string | null,
@@ -520,11 +656,9 @@ async function seedTablesFromLegacyDbs(
   logger: AppLogger,
 ): Promise<void> {
   if (!legacyDataRoot) return;
-  const legacyAppDir = resolve(legacyDataRoot, code, LEGACY_APP_SUBDIR);
-  if (!existsSync(legacyAppDir)) return;
 
   for (const entry of LEGACY_TABLE_PLAN) {
-    const legacyFile = join(legacyAppDir, entry.file);
+    const legacyFile = resolve(legacyDataRoot, code, entry.subdir, entry.file);
     if (!existsSync(legacyFile)) continue;
 
     const legacyDb = knex({
