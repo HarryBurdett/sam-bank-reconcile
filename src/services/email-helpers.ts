@@ -291,12 +291,6 @@ export function isBankStatementAttachment(
   const subjectBankPatterns = ['bank statement', 'account statement', 'your statement'];
   const hasBankSubject = subjectBankPatterns.some((p) => subjectLower.includes(p));
   const hasBankInSubject = KNOWN_BANK_KEYWORDS.some((b) => subjectLower.includes(b));
-  // Legacy parity: many statements arrive forwarded with a generic
-  // bank-internal filename (e.g. "CLOU0012704.PDF") but the subject
-  // line carries the statement keyword ("Fw: Statement as at …",
-  // "FW: Stat monzo", "Statement 13-MAR-26"). Without this match
-  // those legitimate statements get silently filtered out.
-  const hasStatementInSubject = /\bstat(ement)?s?\b/.test(subjectLower);
 
   if (isFromBank) return true;
   if (hasStatementKeyword && (hasAccountNumber || hasSortCode)) return true;
@@ -304,7 +298,6 @@ export function isBankStatementAttachment(
   if (hasBankSubject) return true;
   if (hasStatementKeyword && ext === '.pdf') return true;
   if (hasBankInSubject && ext === '.pdf') return true;
-  if (hasStatementInSubject && ext === '.pdf') return true;
 
   return false;
 }
