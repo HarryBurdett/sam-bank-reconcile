@@ -648,8 +648,25 @@ export async function scanAllBanksFaithful(
           (stmt as unknown as Record<string, unknown>).is_imported =
             fileIsImportedNr;
 
-          // PDF cache lookup not yet wired; skip (matches legacy line
-          // 7361 fallthrough when validateBalances=true but no cache).
+          // Cached statement info (from bank_statement_imports). Legacy
+          // step 4 also queries the PDF extraction cache by hash — that
+          // path needs a cache adapter and is left for later. The
+          // tracking-data map keyed by filename gives us the same
+          // opening/closing/period balances when the statement has been
+          // imported before.
+          const cachedInfo = tracking.cached_stmt_info.get(filename);
+          if (cachedInfo && validateBalances) {
+            stmt.opening_balance = cachedInfo.opening_balance;
+            stmt.closing_balance = cachedInfo.closing_balance;
+            stmt.period_start = cachedInfo.period_start;
+            stmt.period_end = cachedInfo.period_end;
+            (stmt as unknown as Record<string, unknown>).sort_code =
+              cachedInfo.sort_code;
+            (stmt as unknown as Record<string, unknown>).account_number =
+              cachedInfo.account_number;
+            (stmt as unknown as Record<string, unknown>).extraction_status =
+              'cached';
+          }
 
           // Folder-name prefix match (legacy 7411).
           let matchedBankCode: string | null = null;
