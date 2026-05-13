@@ -216,11 +216,27 @@ export interface ScanAllBanksBank {
   statement_count: number;
 }
 
+/**
+ * Legacy response shape (routes.py:6688 / 6713): `banks` is a DICT
+ * keyed by `bank_code`, not an array. The Hub frontend uses dict
+ * access (`scanResult.banks[stmt.bank_code]`) so the array shape
+ * silently breaks all per-bank rendering. `non_current` is also
+ * required — the Hub's "Non-current statements" panel reads
+ * { already_processed, old_statements, not_classified, advanced }.
+ */
 export interface ScanAllBanksResponse {
   success: boolean;
-  banks: ScanAllBanksBank[];
+  banks: Record<string, ScanAllBanksBank>;
   /** Candidates whose bank couldn't be detected. */
   unidentified: ScanAllBanksStatementEntry[];
+  /** Pre-bucketed non-current statements (matches legacy shape). */
+  non_current: {
+    already_processed: ScanAllBanksStatementEntry[];
+    old_statements: ScanAllBanksStatementEntry[];
+    not_classified: ScanAllBanksStatementEntry[];
+    advanced: ScanAllBanksStatementEntry[];
+  };
+  non_current_count: number;
   total_statements: number;
   total_banks_with_statements: number;
   total_banks_loaded: number;
@@ -237,24 +253,25 @@ export interface ScanAllBanksResponse {
  * a customer typically has multiple accounts at the same bank.
  */
 function pickBank(
-  banks: ScanAllBanksBank[],
+  banks: Record<string, ScanAllBanksBank>,
   detectedBankName: string | null,
   filename: string,
   subject: string | null,
 ): ScanAllBanksBank | null {
+  const all = Object.values(banks);
   // 1. Account-number scan: extract any sequence of 6+ digits from
   //    filename/subject and prefer the exact match against nk_number.
   const digitGroups = `${filename} ${subject ?? ''}`.match(/\d{6,}/g) ?? [];
   if (digitGroups.length > 0) {
     for (const candidate of digitGroups) {
-      const hit = banks.find(
+      const hit = all.find(
         (b) => b.account_number && b.account_number === candidate,
       );
       if (hit) return hit;
       // Some statements pad to 10 digits, Opera may store unpadded:
       // also try comparing the last 8 digits.
       const tail8 = candidate.slice(-8);
-      const hit2 = banks.find(
+      const hit2 = all.find(
         (b) =>
           b.account_number &&
           b.account_number.replace(/\D+/g, '').endsWith(tail8),
@@ -265,7 +282,7 @@ function pickBank(
   // 2. Bank-name keyword match against description.
   if (detectedBankName) {
     const key = detectedBankName.toLowerCase();
-    const hit = banks.find((b) =>
+    const hit = all.find((b) =>
       (b.description ?? '').toLowerCase().includes(key),
     );
     if (hit) return hit;
@@ -350,8 +367,18 @@ export async function scanAllBanks(
   const daysBack = Number.isFinite(opts.daysBack) ? Number(opts.daysBack) : 30;
   const pageSize = Number.isFinite(opts.pageSize) ? Number(opts.pageSize) : 200;
 
-  // 1. Banks from Opera (always).
-  let banks: ScanAllBanksBank[];
+  const emptyNonCurrent = {
+    already_processed: [] as ScanAllBanksStatementEntry[],
+    old_statements: [] as ScanAllBanksStatementEntry[],
+    not_classified: [] as ScanAllBanksStatementEntry[],
+    advanced: [] as ScanAllBanksStatementEntry[],
+  };
+
+  // 1. Banks from Opera. Legacy stores as DICT keyed by bank_code
+  //    (routes.py:6688) — the Hub does scanResult.banks[stmt.bank_code]
+  //    so the dict shape is load-bearing.
+  const banks: Record<string, ScanAllBanksBank> = {};
+  let totalBanksLoaded = 0;
   try {
     const rows = (await operaDb.raw(
       `SELECT RTRIM(nk_acnt) AS bank_code,
@@ -359,7 +386,8 @@ export async function scanAllBanks(
               RTRIM(ISNULL(nk_sort, '')) AS sort_code,
               RTRIM(ISNULL(nk_number, '')) AS account_number,
               ISNULL(nk_recbal, 0) / 100.0 AS reconciled_balance,
-              ISNULL(nk_curbal, 0) / 100.0 AS current_balance
+              ISNULL(nk_curbal, 0) / 100.0 AS current_balance,
+              CASE WHEN nk_petty = 1 THEN 'Petty Cash' ELSE 'Bank Account' END AS type
        FROM nbank WITH (NOLOCK)
        ORDER BY nk_acnt`,
     )) as unknown as Array<{
@@ -369,18 +397,26 @@ export async function scanAllBanks(
       account_number: string;
       reconciled_balance: number | null;
       current_balance: number | null;
+      type: string | null;
     }>;
-    banks = (rows ?? []).map((r) => ({
-      ...r,
-      type: null,
-      statements: [] as ScanAllBanksStatementEntry[],
-      statement_count: 0,
-    }));
+    for (const r of rows ?? []) {
+      const code = (r.bank_code ?? '').trim();
+      if (!code) continue;
+      banks[code] = {
+        ...r,
+        bank_code: code,
+        statements: [],
+        statement_count: 0,
+      };
+      totalBanksLoaded += 1;
+    }
   } catch (err: any) {
     return {
       success: false,
-      banks: [],
+      banks: {},
       unidentified: [],
+      non_current: emptyNonCurrent,
+      non_current_count: 0,
       total_statements: 0,
       total_banks_with_statements: 0,
       total_banks_loaded: 0,
@@ -392,6 +428,7 @@ export async function scanAllBanks(
   }
 
   const unidentified: ScanAllBanksStatementEntry[] = [];
+  const nonCurrent = { ...emptyNonCurrent };
   let totalEmailsScanned = 0;
   let totalPdfsFound = 0;
 
@@ -437,6 +474,9 @@ export async function scanAllBanks(
             email.received_at instanceof Date
               ? email.received_at.toISOString()
               : (email.received_at ?? null) as string | null;
+          const alreadyProcessed =
+            (typeof email.id === 'number' && emailIds.has(email.id)) ||
+            filenames.has(att.filename ?? '');
           const entry: ScanAllBanksStatementEntry = {
             source: 'email',
             email_id: typeof email.id === 'number' ? email.id : Number(email.id),
@@ -452,25 +492,40 @@ export async function scanAllBanks(
             matched_account_number: matched?.account_number ?? null,
             statement_date: dateInfo.display_date,
             sort_key: dateInfo.sort_key,
-            already_processed:
-              (typeof email.id === 'number' && emailIds.has(email.id)) ||
-              filenames.has(att.filename ?? ''),
+            already_processed: alreadyProcessed,
             status: 'ready',
           };
+          // Legacy parity: already-processed entries move to the
+          // non_current.already_processed bucket and do NOT count
+          // against the bank's pending statements (so a fully-
+          // reconciled bank doesn't get re-rendered in the Hub).
+          if (alreadyProcessed) {
+            nonCurrent.already_processed.push(entry);
+            continue;
+          }
           if (matched) matched.statements.push(entry);
+          else if (detectedBankName)
+            nonCurrent.not_classified.push(entry);
           else unidentified.push(entry);
         }
       }
     } catch (err: any) {
-      // Surface as soft error: the bank list and any folder/identified
-      // candidates so far still go back to the caller.
+      const banksWithStatements = Object.values(banks).filter(
+        (b) => b.statement_count > 0,
+      ).length;
       return {
         success: false,
         banks,
         unidentified,
+        non_current: nonCurrent,
+        non_current_count:
+          nonCurrent.already_processed.length +
+          nonCurrent.old_statements.length +
+          nonCurrent.not_classified.length +
+          nonCurrent.advanced.length,
         total_statements: 0,
-        total_banks_with_statements: 0,
-        total_banks_loaded: banks.length,
+        total_banks_with_statements: banksWithStatements,
+        total_banks_loaded: totalBanksLoaded,
         total_emails_scanned: totalEmailsScanned,
         total_pdfs_found: totalPdfsFound,
         duplicates_archived: 0,
@@ -479,11 +534,10 @@ export async function scanAllBanks(
     }
   }
 
-  // 3. Sort each bank's statements newest-first (by sort_key) and
-  //    fill counts.
+  // 3. Sort each bank's statements newest-first + fill counts.
   let totalStatements = 0;
   let banksWithStatements = 0;
-  for (const b of banks) {
+  for (const b of Object.values(banks)) {
     b.statements.sort((a, c) => compareSortKeys(c.sort_key, a.sort_key));
     b.statement_count = b.statements.length;
     totalStatements += b.statement_count;
@@ -492,13 +546,21 @@ export async function scanAllBanks(
   unidentified.sort((a, b) => compareSortKeys(b.sort_key, a.sort_key));
   totalStatements += unidentified.length;
 
+  const nonCurrentCount =
+    nonCurrent.already_processed.length +
+    nonCurrent.old_statements.length +
+    nonCurrent.not_classified.length +
+    nonCurrent.advanced.length;
+
   return {
     success: true,
     banks,
     unidentified,
+    non_current: nonCurrent,
+    non_current_count: nonCurrentCount,
     total_statements: totalStatements,
     total_banks_with_statements: banksWithStatements,
-    total_banks_loaded: banks.length,
+    total_banks_loaded: totalBanksLoaded,
     total_emails_scanned: totalEmailsScanned,
     total_pdfs_found: totalPdfsFound,
     duplicates_archived: 0,

@@ -105,11 +105,27 @@ export interface ScanAllBanksBank {
     statements: ScanAllBanksStatementEntry[];
     statement_count: number;
 }
+/**
+ * Legacy response shape (routes.py:6688 / 6713): `banks` is a DICT
+ * keyed by `bank_code`, not an array. The Hub frontend uses dict
+ * access (`scanResult.banks[stmt.bank_code]`) so the array shape
+ * silently breaks all per-bank rendering. `non_current` is also
+ * required — the Hub's "Non-current statements" panel reads
+ * { already_processed, old_statements, not_classified, advanced }.
+ */
 export interface ScanAllBanksResponse {
     success: boolean;
-    banks: ScanAllBanksBank[];
+    banks: Record<string, ScanAllBanksBank>;
     /** Candidates whose bank couldn't be detected. */
     unidentified: ScanAllBanksStatementEntry[];
+    /** Pre-bucketed non-current statements (matches legacy shape). */
+    non_current: {
+        already_processed: ScanAllBanksStatementEntry[];
+        old_statements: ScanAllBanksStatementEntry[];
+        not_classified: ScanAllBanksStatementEntry[];
+        advanced: ScanAllBanksStatementEntry[];
+    };
+    non_current_count: number;
     total_statements: number;
     total_banks_with_statements: number;
     total_banks_loaded: number;
