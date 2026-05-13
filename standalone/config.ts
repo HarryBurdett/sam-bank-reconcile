@@ -54,6 +54,15 @@ export interface StandaloneConfig {
    * never applied.
    */
   trustProxy: string;
+  /**
+   * Google Gemini API key for the bank-statement PDF extractor.
+   * Matches legacy `config.ini [gemini] api_key`. When unset, the
+   * standalone host doesn't wire `ctx.bankPdfExtractor` and the
+   * plugin's preview/import-from-pdf routes return 503.
+   */
+  geminiApiKey: string | null;
+  /** Gemini model to use. Default matches legacy: `gemini-2.5-flash`. */
+  geminiModel: string;
 }
 
 export interface MssqlEnv {
@@ -120,6 +129,15 @@ export function loadConfig(opts: LoadConfigOptions = {}): StandaloneConfig {
       ? process.env.TRUST_PROXY
       : 'loopback, linklocal, uniquelocal';
 
+  const geminiApiKey =
+    process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 0
+      ? process.env.GEMINI_API_KEY
+      : null;
+  const geminiModel =
+    process.env.GEMINI_MODEL && process.env.GEMINI_MODEL.length > 0
+      ? process.env.GEMINI_MODEL
+      : 'gemini-2.5-flash';
+
   return {
     port,
     dataRoot,
@@ -132,6 +150,8 @@ export function loadConfig(opts: LoadConfigOptions = {}): StandaloneConfig {
     opera3,
     dataDir,
     trustProxy,
+    geminiApiKey,
+    geminiModel,
   };
 }
 

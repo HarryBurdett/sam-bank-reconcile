@@ -15,6 +15,7 @@
 import knex, { type Knex } from 'knex';
 import { buildOperaAwareImportLock } from './import-lock-mssql.js';
 import { buildImapAdapter } from './imap-mailbox-adapter.js';
+import { buildGeminiPdfExtractor } from './gemini-pdf-extractor.js';
 import {
   existsSync,
   mkdirSync,
@@ -53,6 +54,9 @@ export interface LoadOptions {
   operaAdapter: OperaAdapter;
   logger: AppLogger;
   factory: AppBackendFactory;
+  /** Gemini API key, if configured — wires the PDF extractor. */
+  geminiApiKey?: string | null;
+  geminiModel?: string;
 }
 
 /** Legacy data lives at <legacyDataRoot>/<code>/<LEGACY_APP_SUBDIR>/ */
@@ -229,6 +233,23 @@ export async function loadCompany(
     const imap = buildImapAdapter({ code, appDb, logger: opts.logger });
     (ctx as Record<string, unknown>).bankMailboxAdapter = imap.mailbox;
     (ctx as Record<string, unknown>).bankEmailAttachments = imap.attachments;
+
+    // Gemini-backed PDF extractor. The plugin uses `ctx.bankPdfExtractor`
+    // for both /api/bank-import/preview-from-pdf (Analyse) and
+    // /api/bank-import/import-from-pdf (full import). When unset, the
+    // plugin falls back to ctx.llm (Claude); legacy parity requires
+    // Gemini per sql_rag/statement_reconcile.py:84.
+    if (opts.geminiApiKey) {
+      (ctx as Record<string, unknown>).bankPdfExtractor =
+        buildGeminiPdfExtractor({
+          apiKey: opts.geminiApiKey,
+          model: opts.geminiModel ?? 'gemini-2.5-flash',
+          logger: opts.logger,
+        });
+      opts.logger.info(
+        `[${code}] Gemini PDF extractor wired (model=${opts.geminiModel ?? 'gemini-2.5-flash'})`,
+      );
+    }
 
     // Reconciled-key store: the plugin's /scan-emails route uses this
     // to mark already-processed candidates so the operator doesn't

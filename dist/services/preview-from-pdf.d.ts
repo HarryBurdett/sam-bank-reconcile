@@ -20,6 +20,7 @@
  * preview lands.
  */
 import type { Knex } from 'knex';
+import type { PdfExtractor } from './import-from-pdf.js';
 export interface LlmService {
     chat(req: {
         messages: Array<{
@@ -78,5 +79,5 @@ export interface PreviewResponse {
     selected_bank?: string;
     correct_bank_code?: string | null;
 }
-export declare function previewBankImportFromPdf(operaDb: Knex, llm: LlmService, input: PreviewFromPdfInput): Promise<PreviewResponse>;
+export declare function previewBankImportFromPdf(operaDb: Knex, llm: LlmService | null, input: PreviewFromPdfInput, extractor?: PdfExtractor | null): Promise<PreviewResponse>;
 //# sourceMappingURL=preview-from-pdf.d.ts.map

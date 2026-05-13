@@ -121,6 +121,8 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
         operaAdapter,
         logger: consoleLogger,
         factory: pluginMod.default,
+        geminiApiKey: config.geminiApiKey,
+        geminiModel: config.geminiModel,
       });
       companies.set(code, instance);
     }

@@ -2202,10 +2202,11 @@ export function createRouter(ctx) {
         if (!operaDb)
             return;
         const llm = ctx.llm ?? null;
-        if (!llm) {
+        const extractorAdapter = ctx.bankPdfExtractor ?? builtinPdfExtractor ?? null;
+        if (!llm && !extractorAdapter) {
             res.status(503).json({
                 success: false,
-                error: 'ctx.llm not configured. SAM team must enable the LLM service for this app (manifest.consumes.llm = true).',
+                error: 'Neither ctx.bankPdfExtractor nor ctx.llm is configured. Wire a PDF extractor (standalone: set GEMINI_API_KEY; SAM: enable LLM via manifest.consumes.llm).',
             });
             return;
         }
@@ -2215,7 +2216,7 @@ export function createRouter(ctx) {
                 filePath: String(req.query.file_path ?? body.file_path ?? '') || undefined,
                 bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
                 filename: body.filename ?? undefined,
-            });
+            }, extractorAdapter);
             res.json(result);
         }
         catch (err) {

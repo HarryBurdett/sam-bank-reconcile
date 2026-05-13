@@ -2503,21 +2503,29 @@ export function createRouter(ctx: AppContext): Router {
       const operaDb = getOperaDb(req, res);
       if (!operaDb) return;
       const llm = (ctx.llm as LlmService | undefined) ?? null;
-      if (!llm) {
+      const extractorAdapter = (ctx as unknown as {
+        bankPdfExtractor?: PdfExtractor;
+      }).bankPdfExtractor ?? builtinPdfExtractor ?? null;
+      if (!llm && !extractorAdapter) {
         res.status(503).json({
           success: false,
           error:
-            'ctx.llm not configured. SAM team must enable the LLM service for this app (manifest.consumes.llm = true).',
+            'Neither ctx.bankPdfExtractor nor ctx.llm is configured. Wire a PDF extractor (standalone: set GEMINI_API_KEY; SAM: enable LLM via manifest.consumes.llm).',
         });
         return;
       }
       try {
         const body = (req.body ?? {}) as Record<string, unknown>;
-        const result = await previewBankImportFromPdf(operaDb, llm, {
-          filePath: String(req.query.file_path ?? body.file_path ?? '') || undefined,
-          bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
-          filename: (body.filename as string) ?? undefined,
-        });
+        const result = await previewBankImportFromPdf(
+          operaDb,
+          llm,
+          {
+            filePath: String(req.query.file_path ?? body.file_path ?? '') || undefined,
+            bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
+            filename: (body.filename as string) ?? undefined,
+          },
+          extractorAdapter,
+        );
         res.json(result);
       } catch (err: any) {
         ctx.logger.error('preview-from-pdf failed', err);

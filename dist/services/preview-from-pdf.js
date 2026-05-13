@@ -130,12 +130,18 @@ async function callLlmForExtraction(llm, pdfPath, pdfBytes) {
 function normaliseBankNumber(s) {
     return (s ?? '').replace(/[\s-]/g, '').trim();
 }
-export async function previewBankImportFromPdf(operaDb, llm, input) {
+export async function previewBankImportFromPdf(operaDb, llm, input, extractor = null) {
     if (!input.bankCode) {
         return { success: false, error: 'bank_code is required' };
     }
     if (!input.filePath && !input.pdfBytes) {
         return { success: false, error: 'filePath or pdfBytes is required' };
+    }
+    if (!extractor && !llm) {
+        return {
+            success: false,
+            error: 'No PDF extractor configured. Standalone host needs GEMINI_API_KEY to wire ctx.bankPdfExtractor, or SAM must provide ctx.llm.',
+        };
     }
     const bank = await fetchBank(operaDb, input.bankCode);
     if (!bank) {
@@ -146,7 +152,19 @@ export async function previewBankImportFromPdf(operaDb, llm, input) {
     }
     let extracted;
     try {
-        extracted = await callLlmForExtraction(llm, input.filePath, input.pdfBytes);
+        if (extractor) {
+            // Preferred path: dedicated extractor (e.g. standalone host's
+            // Gemini-backed adapter matching legacy behaviour).
+            extracted = await extractor.extractFromPdf({
+                filePath: input.filePath,
+                bytes: input.pdfBytes,
+                filename: input.filename,
+            });
+        }
+        else {
+            // Fallback: SAM-plugged mode where only ctx.llm is wired.
+            extracted = await callLlmForExtraction(llm, input.filePath, input.pdfBytes);
+        }
     }
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
