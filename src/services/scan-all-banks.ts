@@ -561,11 +561,198 @@ export async function scanAllBanksFaithful(
   }
 
   timings.scan_emails = round1((Date.now() - t1) / 1000);
+  const t2 = Date.now();
 
-  // Folder scan (step 4) — not yet ported. Legacy reads bank statement
-  // PDFs from per-bank subfolders under `folder_settings.base_folder`.
-  // Skipping when folder scan isn't wired matches legacy line 7556
-  // (no files found because the folder doesn't exist).
+  // ---- Step 4: Scan local PDF folders ----
+  // Faithful port of routes.py:7306. Reads PDFs from
+  // `<folder_settings.base_folder>/<bank_code>-<slug>/*.pdf`.
+  // Folder-name prefix match (legacy line 7411) assigns the statement
+  // to the matching Opera bank even without PDF extraction.
+  // PDF cache lookup + Gemini extraction (legacy lines 7361-7457) are
+  // skipped when no PDF cache adapter is wired — matches legacy
+  // graceful-fallback at line 7405.
+  let basePath: string | null = null;
+  if (appDb) {
+    try {
+      const row = (await appDb('settings')
+        .where({ key: 'folder_settings' })
+        .first()) as { value?: string } | undefined;
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as { base_folder?: string };
+        if (parsed.base_folder && parsed.base_folder.length > 0) {
+          basePath = parsed.base_folder;
+        }
+      }
+    } catch {
+      // tolerated
+    }
+  }
+
+  if (basePath) {
+    const { existsSync, readdirSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const seenBankFilenames = new Map<string, [string, StatementCandidate]>();
+
+    if (existsSync(basePath)) {
+      let subdirs: string[];
+      try {
+        subdirs = readdirSync(basePath, { withFileTypes: true })
+          .filter((d) => d.isDirectory() && d.name !== 'archive')
+          .map((d) => d.name)
+          .sort();
+      } catch {
+        subdirs = [];
+      }
+
+      for (const folderName of subdirs) {
+        const folderPath = join(basePath, folderName);
+        if (!existsSync(folderPath)) continue;
+
+        let files: string[];
+        try {
+          files = readdirSync(folderPath, { withFileTypes: true })
+            .filter((d) => d.isFile() && d.name.toLowerCase().endsWith('.pdf'))
+            .map((d) => d.name);
+        } catch {
+          continue;
+        }
+
+        for (const filename of files) {
+          const fileIsImportedNr = tracking.imported_nr_filenames.has(filename);
+          const folderBaseClean = filename
+            .replace(/\.[^.]+$/, '')
+            .replace(/_\d+$/, '');
+          const isManaged =
+            tracking.managed_filenames.has(filename) ||
+            Array.from(tracking.managed_filenames).some((mf) =>
+              mf.startsWith(folderBaseClean),
+            );
+          if (isManaged) continue;
+          if (tracking.reconciled_filenames.has(filename)) continue;
+
+          totalPdfsFound += 1;
+          const fullPath = join(folderPath, filename);
+          const { sort_key: sortKey, display_date: statementDate } =
+            extractStatementNumberFromFilename(filename, '');
+
+          const stmt: StatementCandidate = {
+            source: 'pdf',
+            file_path: fullPath,
+            filename,
+            already_processed: false,
+            status: fileIsImportedNr ? 'imported' : 'pending',
+            sort_key: sortKey,
+            statement_date: statementDate,
+          };
+          (stmt as unknown as Record<string, unknown>).folder = folderName;
+          (stmt as unknown as Record<string, unknown>).is_imported =
+            fileIsImportedNr;
+
+          // PDF cache lookup not yet wired; skip (matches legacy line
+          // 7361 fallthrough when validateBalances=true but no cache).
+
+          // Folder-name prefix match (legacy 7411).
+          let matchedBankCode: string | null = null;
+          const folderPrefix = (folderName.includes('-')
+            ? folderName.split('-')[0]
+            : folderName
+          )!.toUpperCase();
+          if (allBanks[folderPrefix]) {
+            matchedBankCode = folderPrefix;
+            const b = allBanks[folderPrefix];
+            if (b) {
+              stmt.status = 'ready';
+              stmt.matched_bank_code = matchedBankCode;
+              stmt.matched_bank_description = b.description;
+              stmt.matched_sort_code = b.sort_code;
+              stmt.matched_account_number = b.account_number;
+              (stmt as unknown as Record<string, unknown>).sort_code =
+                b.sort_code;
+              (stmt as unknown as Record<string, unknown>).account_number =
+                b.account_number;
+              logger.info(
+                `Matched ${filename} to ${matchedBankCode} via folder name '${folderName}'`,
+              );
+            }
+          }
+
+          if (!matchedBankCode) {
+            logger.info(
+              `Skipping local PDF ${filename}: no matching Opera bank in current company`,
+            );
+            continue;
+          }
+
+          // Status preservation rule (legacy line 7494).
+          if (
+            stmt.status !== 'ready' &&
+            stmt.status !== 'imported' &&
+            stmt.status !== 'pending_extraction'
+          ) {
+            logger.info(
+              `Skipping ${filename} for ${matchedBankCode}: status=${stmt.status}`,
+            );
+            continue;
+          }
+
+          // Dedup by filename within bank (legacy line 7496).
+          const fnLower = filename.toLowerCase().trim();
+          const fnKey = `${matchedBankCode}|${fnLower}`;
+          let fileMtime = '';
+          try {
+            fileMtime = String(statSync(fullPath).mtimeMs);
+          } catch {
+            // tolerated
+          }
+          const prev = seenBankFilenames.get(fnKey);
+          if (prev) {
+            const [prevDate, prevEntry] = prev;
+            if (fileMtime > prevDate) {
+              const idx = allBanks[matchedBankCode]!.statements.indexOf(
+                prevEntry,
+              );
+              if (idx >= 0) {
+                allBanks[matchedBankCode]!.statements.splice(idx, 1);
+              }
+              seenBankFilenames.set(fnKey, [fileMtime, stmt]);
+            } else {
+              continue;
+            }
+          } else {
+            seenBankFilenames.set(fnKey, [fileMtime, stmt]);
+          }
+
+          allBanks[matchedBankCode]!.statements.push(stmt);
+        }
+      }
+    } else {
+      logger.info(`Folder scan: base_folder '${basePath}' does not exist`);
+    }
+  }
+  timings.scan_folder = round1((Date.now() - t2) / 1000);
+
+  // ---- Step 4a: Cross-source dedup ----
+  // Legacy avoids duplicates by saving email PDFs to the bank
+  // subfolder during step 3 then re-discovering them as source='pdf'
+  // in step 4. The save-to-folder bytes path requires IMAP download
+  // + write, which the SAM port can wire later. For now, post-scan
+  // dedupe by (bank_code, filename) preferring source='pdf' — same
+  // end result the operator sees in the Hub.
+  for (const bank of Object.values(allBanks)) {
+    const byName = new Map<string, StatementCandidate>();
+    for (const stmt of bank.statements) {
+      const key = stmt.filename.toLowerCase().trim();
+      const existing = byName.get(key);
+      if (!existing) {
+        byName.set(key, stmt);
+        continue;
+      }
+      // Prefer source='pdf' over source='email' (legacy end-state).
+      if (existing.source === 'pdf') continue;
+      if (stmt.source === 'pdf') byName.set(key, stmt);
+    }
+    bank.statements = Array.from(byName.values());
+  }
 
   // ---- Step 5: Sort + finalize each bank's statements ----
   // Legacy line 7615. fill_missing_balances_from_cache is a no-op
