@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bank Reconciliation</title>
+    <link rel="stylesheet" href="/api/apps/bank-reconcile/static/style.css" />
+    <style>
+      html, body, #app { height: 100%; margin: 0; }
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <!-- React vendored locally from node_modules/react/umd — no CDN dependency -->
+    <script src="/vendor/react.production.min.js"></script>
+    <script src="/vendor/react-dom.production.min.js"></script>
+    <script>
+      // Vite's lib mode leaves process.env.NODE_ENV references in the
+      // bundle for the consumer to substitute. SAM's AppLoader does this;
+      // we replicate it here. Without this, the plugin bundle throws
+      // "ReferenceError: process is not defined" at load time.
+      window.process = window.process || { env: { NODE_ENV: 'production' } };
+      window.__SAM_SHARED__ = { react: window.React, reactDom: window.ReactDOM };
+    </script>
+
+    <script src="/api/apps/bank-reconcile/static/index.js"></script>
+
+    <script>
+      (async function () {
+        const appEl = document.getElementById('app');
+        const entry = window.__SAM_APPS__ && window.__SAM_APPS__['bank-reconcile'];
+        if (!entry) {
+          appEl.innerText = 'Failed to load plugin bundle.';
+          return;
+        }
+
+        // Fetch the selected company from /auth/me so the SAM context's
+        // currentCompany is populated (the plugin's api-shim relays this
+        // as an X-Opera-Company header on every request).
+        let companyCode = null;
+        try {
+          const meRes = await fetch('/auth/me');
+          if (meRes.status === 401) {
+            location.href = '/login.html';
+            return;
+          }
+          const me = await meRes.json();
+          companyCode = me.company || null;
+        } catch (err) {
+          appEl.innerText = 'Could not read session: ' + (err.message || err);
+          return;
+        }
+
+        const BASE = '/api/apps/bank-reconcile';
+        async function samFetch(path, options) {
+          const url = path.startsWith('/') ? BASE + path : BASE + '/' + path;
+          const res = await fetch(url, options || {});
+          if (res.status === 401) {
+            location.href = '/login.html';
+            throw new Error('not authenticated');
+          }
+          const contentType = res.headers.get('content-type') || '';
+          const isJson = contentType.includes('application/json');
+          let parsed = null;
+          if (isJson) {
+            const text = await res.text();
+            if (text) {
+              try { parsed = JSON.parse(text); } catch { parsed = text; }
+            }
+          } else {
+            parsed = await res.text();
+          }
+          if (!res.ok) {
+            const msg =
+              (parsed && typeof parsed === 'object' && parsed.error) ||
+              (typeof parsed === 'string' && parsed) ||
+              ('HTTP ' + res.status);
+            throw new Error(msg);
+          }
+          return parsed;
+        }
+
+        const context = {
+          appId: 'bank-reconcile',
+          user: { userId: 'local', email: 'local@standalone', role: 'admin' },
+          token: null,
+          currentCompany: companyCode ? { code: companyCode, name: companyCode } : null,
+          api: { baseUrl: BASE, fetch: samFetch },
+          events: new EventTarget(),
+        };
+        const root = ReactDOM.createRoot(appEl);
+        root.render(React.createElement(entry.component, { context: context }));
+      })();
+    </script>
+  </body>
+</html>
