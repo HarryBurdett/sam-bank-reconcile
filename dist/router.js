@@ -2621,7 +2621,11 @@ export function createRouter(ctx) {
         const operaDb = getOperaDb(req, res);
         if (!operaDb)
             return;
-        res.json(await scanAllBanks(operaDb));
+        const appDb = ctx.db.app ?? null;
+        const adapter = ctx;
+        const mailbox = adapter.bankMailboxAdapter ?? builtinEmailIngest?.mailbox ?? null;
+        const daysBack = req.query.days_back ? Number(req.query.days_back) : 30;
+        res.json(await scanAllBanks(operaDb, mailbox, appDb, { daysBack }));
     });
     /**
      * GET /api/bank-import/restore-check

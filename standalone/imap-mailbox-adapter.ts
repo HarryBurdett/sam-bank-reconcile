@@ -156,7 +156,13 @@ export function buildImapAdapter(opts: {
       const since = fromDate instanceof Date ? fromDate : new Date(fromDate);
       try {
         return await withInbox(async (client) => {
-          const uids = await client.search({ since });
+          // CRITICAL: search() returns SEQUENCE NUMBERS by default;
+          // we MUST pass { uid: true } to get UIDs, otherwise the
+          // subsequent fetch(..., { uid: true }) treats sequence
+          // numbers as UIDs and silently returns only the
+          // overlapping few. This server has sequence 1-130 but
+          // UIDs going up to 810.
+          const uids = await client.search({ since }, { uid: true });
           if (!uids || uids.length === 0) return { emails: [] };
           // Newest first; cap at pageSize.
           const tail = uids.slice(-pageSize).reverse();

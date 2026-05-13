@@ -24,6 +24,8 @@ import type { Knex } from 'knex';
 import type { FileStorageAdapter } from './archive.js';
 import type { EmailAttachmentProvider } from './preview-from-email.js';
 import type { LlmService } from './preview-from-pdf.js';
+import type { BankMailboxAdapter } from './scan-emails.js';
+import { type StatementSortKey } from './email-helpers.js';
 export interface FileEntry {
     path: string;
     filename: string;
@@ -67,21 +69,87 @@ export declare function fetchEmailsToFolder(attachments: EmailAttachmentProvider
     downloaded: number;
     errors: string[];
 }>;
-export declare function scanAllBanks(operaDb: Knex): Promise<{
+export interface ScanAllBanksStatementEntry {
+    /** Where the statement candidate was found. */
+    source: 'email' | 'pdf';
+    /** IMAP UID when source='email', else undefined. */
+    email_id?: number;
+    /** MIME part identifier when source='email', else undefined. */
+    attachment_id?: string;
+    /** Full filesystem path when source='pdf', else undefined. */
+    full_path?: string;
+    filename: string;
+    subject?: string | null;
+    from_address?: string | null;
+    received_at?: string | null;
+    detected_bank_name?: string | null;
+    matched_bank_code?: string | null;
+    matched_bank_description?: string | null;
+    matched_sort_code?: string | null;
+    matched_account_number?: string | null;
+    statement_date?: string | null;
+    sort_key: StatementSortKey;
+    /** Already imported / fully reconciled — Hub greys these out. */
+    already_processed: boolean;
+    /** Legacy status; for plain scan-only candidates this is always 'ready'. */
+    status: 'ready';
+}
+export interface ScanAllBanksBank {
+    bank_code: string;
+    description: string;
+    sort_code: string;
+    account_number: string;
+    reconciled_balance: number | null;
+    current_balance: number | null;
+    type: string | null;
+    statements: ScanAllBanksStatementEntry[];
+    statement_count: number;
+}
+export interface ScanAllBanksResponse {
     success: boolean;
-    banks: Array<{
-        bank_code: string;
-        description: string;
-        sort_code: string;
-        account_number: string;
-        reconciled_balance: number | null;
-        current_balance: number | null;
-        type: string | null;
-        statements: unknown[];
-        statement_count: number;
-    }>;
+    banks: ScanAllBanksBank[];
+    /** Candidates whose bank couldn't be detected. */
+    unidentified: ScanAllBanksStatementEntry[];
+    total_statements: number;
+    total_banks_with_statements: number;
+    total_banks_loaded: number;
+    total_emails_scanned: number;
+    total_pdfs_found: number;
+    duplicates_archived: number;
     error?: string;
-}>;
+}
+/**
+ * Scan-all-banks orchestrator.
+ *
+ * Faithful behaviour port of `scan_emails_for_bank_statements`
+ * (apps/bank_reconcile/api/routes.py:6043-6800), structured for the
+ * SAM port's adapter contract:
+ *
+ *   - `operaDb`        — required, gives the bank list (nbank).
+ *   - `mailbox`        — optional. When wired (standalone IMAP
+ *                        adapter or SAM email-ingest), recent emails
+ *                        are scanned for statement-shaped attachments.
+ *   - `appDb`          — optional. Used to dedupe candidates against
+ *                        bank_statement_imports.
+ *
+ * Statement candidates from email are grouped by bank using
+ * `detectBankFromEmail` (sender + filename heuristics) and a
+ * `pickBank` resolver that prefers account-number matches. Unmatched
+ * candidates land in the response's `unidentified` array — the Hub
+ * surfaces them in its "Unidentified" section so the operator can
+ * manually assign them to a bank.
+ *
+ * Folder scan + PDF balance validation are deliberately left for a
+ * follow-up — they need `fileStorage` and `bankPdfExtractor`
+ * adapters respectively, both of which already have hooks in the
+ * router. Wiring them through `scanAllBanks` is mechanical once the
+ * operator decides which path they want (folder ingest vs email ingest).
+ */
+export interface ScanAllBanksOptions {
+    daysBack?: number;
+    pageSize?: number;
+}
+export declare function scanAllBanks(operaDb: Knex, mailbox?: BankMailboxAdapter | null, appDb?: Knex | null, opts?: ScanAllBanksOptions): Promise<ScanAllBanksResponse>;
 export declare function rawPreviewFromPdf(llm: LlmService | null, pdfBytes: Uint8Array | null, filePath: string | null): Promise<{
     success: boolean;
     text?: string;
