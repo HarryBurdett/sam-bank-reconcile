@@ -1375,12 +1375,21 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
           action,
           excludeEntryNumbers: consumedAtEntries,
           description: prepared.name || prepared.memo || '',
+          accountCode: matchedAccount,
         });
         if (dup.isDuplicate) {
           skipped += 1;
           errors.push(`Row ${i + 1}: Skipped - ${dup.reason}`);
           if (dup.entryNumber) consumedAtEntries.add(dup.entryNumber);
           continue;
+        }
+        // LEDGER_ALLOCATION_TARGET: informational. Caller still posts;
+        // surface the hint as a warning so the operator can see why
+        // auto-allocate may have a candidate.
+        if (dup.ledgerAllocationHint) {
+          warnings.push(
+            `Row ${i + 1}: ${dup.ledgerAllocationHint.reason}`,
+          );
         }
       } catch (dupErr) {
         // Don't block the post on dup-check failure; the legacy

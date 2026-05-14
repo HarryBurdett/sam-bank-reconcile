@@ -36,6 +36,17 @@ const AT_TYPE_FOR_ACTION: Record<string, number> = {
   bank_transfer: 8,
 };
 
+/**
+ * stran/ptran transaction-type for the LEDGER_ALLOCATION_TARGET
+ * advisory check. Only refund actions have a meaningful ledger
+ * counterpart (the credit-note row that this refund will allocate to).
+ * Matches ACTION_TYPE_MAP in sql_rag/duplicate_check.py:72.
+ */
+const REFUND_LEDGER_TYPE_FOR_ACTION: Record<string, { table: 'stran' | 'ptran'; trtype: string }> = {
+  sales_refund: { table: 'stran', trtype: 'F' },
+  purchase_refund: { table: 'ptran', trtype: 'F' },
+};
+
 export interface PrePostingDuplicateCheckArgs {
   operaDb: Knex;
   bankCode: string;
@@ -50,12 +61,30 @@ export interface PrePostingDuplicateCheckArgs {
    *  default in duplicate_check.py (14) is for offline analysis. */
   dateToleranceDays?: number;
   description?: string;
+  /** Customer/supplier code from the matcher. Required for the
+   *  LEDGER_ALLOCATION_TARGET branch — refunds against an unknown
+   *  account can't look up a credit-note target. */
+  accountCode?: string | null;
 }
 
 export interface PrePostingDuplicateCheckResult {
   isDuplicate: boolean;
   entryNumber: string | null;
   reason: string;
+  /**
+   * Informational hint surfaced for refund actions when the cashbook
+   * is clean but a matching credit-note row exists in stran/ptran.
+   * Caller still posts the refund — this row is the suggested
+   * allocation target, mirroring the legacy
+   * LEDGER_ALLOCATION_TARGET branch (duplicate_check.py:205-241).
+   */
+  ledgerAllocationHint?: {
+    table: 'stran' | 'ptran';
+    ref: string | null;
+    trtype: string;
+    value: number;
+    reason: string;
+  } | null;
 }
 
 function addDays(ymd: string, days: number): string {
@@ -153,11 +182,71 @@ export async function checkCashbookDuplicateBeforePosting(
     };
   }
 
+  // No cashbook duplicate. For refund actions, look for a credit-note
+  // row on the matched ledger account whose value matches — that's the
+  // suggested allocation target. Faithful port of
+  // duplicate_check.py:205-241 (LEDGER_ALLOCATION_TARGET branch).
+  // Informational only — caller still posts the refund.
+  const refundLedger = REFUND_LEDGER_TYPE_FOR_ACTION[action];
+  const accountCode = (args.accountCode ?? '').trim();
+  if (refundLedger && accountCode) {
+    try {
+      const table = refundLedger.table;
+      const trtype = refundLedger.trtype;
+      const refCol = table === 'stran' ? 'st_trref' : 'pt_trref';
+      const valCol = table === 'stran' ? 'st_trvalue' : 'pt_trvalue';
+      const dateCol = table === 'stran' ? 'st_trdate' : 'pt_trdate';
+      const acctCol = table === 'stran' ? 'st_account' : 'pt_account';
+      const typeCol = table === 'stran' ? 'st_trtype' : 'pt_trtype';
+
+      const rows = (await operaDb.raw(
+        `SELECT TOP 5 ${refCol} AS ref, ${valCol} AS val, ${typeCol} AS trtype
+         FROM ${table} WITH (NOLOCK)
+         WHERE RTRIM(${acctCol}) = ?
+           AND ${dateCol} BETWEEN ? AND ?
+           AND ABS(${valCol} - ?) < 0.01
+           AND ${typeCol} = ?`,
+        [accountCode, dateFrom, dateTo, signedAmountPounds, trtype],
+      )) as unknown as Array<{ ref?: string; val?: number; trtype?: string }>;
+
+      if (Array.isArray(rows) && rows.length > 0) {
+        const r = rows[0]!;
+        const ref = String(r.ref ?? '').trim() || null;
+        return {
+          isDuplicate: false,
+          entryNumber: null,
+          reason: `no cashbook match for ${action} on ${bankCode} (${signedAmountPounds.toFixed(
+            2,
+          )}, ${transactionDate})`,
+          ledgerAllocationHint: {
+            table,
+            ref,
+            trtype,
+            value: Number(r.val ?? 0),
+            reason:
+              `${table} row ${ref} (type=${trtype}, value=${r.val}) is an ` +
+              `allocation target for this refund — POST, then optionally allocate`,
+          },
+        };
+      }
+    } catch (advErr) {
+      // Advisory branch failures degrade silently — they're hints, not
+      // gates. The caller still posts the refund.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[bank-reconcile] ledger allocation hint failed: ${
+          advErr instanceof Error ? advErr.message : String(advErr)
+        }`,
+      );
+    }
+  }
+
   return {
     isDuplicate: false,
     entryNumber: null,
     reason: `no cashbook match for ${action} on ${bankCode} (${signedAmountPounds.toFixed(
       2,
     )}, ${transactionDate})`,
+    ledgerAllocationHint: null,
   };
 }
