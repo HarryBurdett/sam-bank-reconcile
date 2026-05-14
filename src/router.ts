@@ -2532,6 +2532,7 @@ export function createRouter(ctx: AppContext): Router {
             filename: (body.filename as string) ?? undefined,
           },
           extractorAdapter,
+          getAppDb(req, res) ?? null,
         );
         res.json(result);
       } catch (err: any) {

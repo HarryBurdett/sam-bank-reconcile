@@ -21,6 +21,7 @@
  */
 import type { Knex } from 'knex';
 import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
+import { lookupAlias } from './bank-aliases.js';
 import type {
   PdfExtractionResult,
   PdfExtractor,
@@ -93,6 +94,15 @@ export interface PreviewResponse {
      *  by the FE's duplicate-override modal and by the import loop's
      *  consumed-entries seeding. */
     matched_entry_number?: string | null;
+    /** Customer or supplier account code that the alias matcher
+     *  resolved this row to. Mirrors BankTransaction.matched_account
+     *  in bank_import.py:252. */
+    matched_account?: string | null;
+    /** Display name for the matched account, surfaced as the
+     *  "matched to" badge in the preview UI. */
+    matched_name?: string | null;
+    /** Confidence (0..1) of the alias match. */
+    match_confidence?: number | null;
   }>;
   bank?: PreviewBankInfo;
   warnings?: string[];
@@ -280,6 +290,7 @@ export async function previewBankImportFromPdf(
   llm: LlmService | null,
   input: PreviewFromPdfInput,
   extractor: PdfExtractor | null = null,
+  appDb: Knex | null = null,
 ): Promise<PreviewResponse> {
   if (!input.bankCode) {
     return { success: false, error: 'bank_code is required' };
@@ -423,6 +434,9 @@ export async function previewBankImportFromPdf(
       action?: string;
       skip_reason?: string | null;
       matched_entry_number?: string | null;
+      matched_account?: string | null;
+      matched_name?: string | null;
+      match_confidence?: number | null;
     }
   >;
   for (const txn of txnsForUi) {
@@ -458,6 +472,34 @@ export async function previewBankImportFromPdf(
         // Tolerate per-row probe errors — matches the JIT check's
         // policy of degrading to "not a duplicate" on lookup failure.
         break;
+      }
+    }
+  }
+
+  // Alias-matcher pass. Faithful port of _match_transaction
+  // (bank_import.py:1430-1650), narrowed to the alias-table lookup
+  // — the matching surface available in standalone today. For each
+  // non-duplicate row, look up by payee name with sign-derived
+  // ledger ('C' for receipts, 'S' for payments); when an alias hits,
+  // set matched_account/matched_name/action so the FE can render the
+  // green tick and pre-select the row.
+  if (appDb) {
+    for (const txn of txnsForUi) {
+      if (txn.is_duplicate) continue;
+      const payeeName = ((txn.name ?? txn.memo) ?? '').toString().trim();
+      if (!payeeName) continue;
+      const ledger = Number(txn.amount ?? 0) >= 0 ? 'C' : 'S';
+      try {
+        const alias = await lookupAlias(appDb, payeeName, ledger, bank.code);
+        if (alias && alias.account) {
+          txn.matched_account = alias.account;
+          txn.matched_name = payeeName;
+          txn.match_confidence = alias.confidence;
+          txn.action = ledger === 'C' ? 'sales_receipt' : 'purchase_payment';
+        }
+      } catch {
+        // Tolerate per-row lookup failures — the alias matcher is
+        // advisory at preview time. Operator can still pick manually.
       }
     }
   }

@@ -184,7 +184,13 @@ describe('importBankStatementFromPdf', () => {
       overlap,
     );
     expect(result.success).toBe(false);
-    expect(result.resume_import_id).toBe(42);
+    // Legacy returns the overlap error verbatim — resume_import_id is
+    // only meaningful on the same-filename branch, which the
+    // orchestrator handles internally and never surfaces to the
+    // client (routes.py:4108-4109). The error shape is the legacy
+    // contract; FE keys off success === false, not on a top-level
+    // resume_import_id.
+    expect(result.error).toMatch(/overlap/i);
     expect(executor.postBankImport).not.toHaveBeenCalled();
   });
 
