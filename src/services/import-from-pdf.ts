@@ -253,13 +253,58 @@ export async function importBankStatementFromPdf(
   }
 
   try {
+    // Resume-import skip: when the caller passes resume_import_id,
+    // legacy reads bank_statement_transactions for that import and
+    // skips any line whose posted_entry_number is already populated
+    // (routes.py:4151-4159, storage.get_posted_lines).
+    let alreadyPosted: Map<number, string> = new Map();
+    if (input.resumeImportId) {
+      try {
+        const rows = (await appDb('bank_statement_transactions')
+          .where({ import_id: input.resumeImportId })
+          .whereNotNull('posted_entry_number')
+          .select('line_number', 'posted_entry_number')) as Array<{
+          line_number: number;
+          posted_entry_number: string;
+        }>;
+        for (const r of rows) {
+          alreadyPosted.set(Number(r.line_number), String(r.posted_entry_number));
+        }
+        if (alreadyPosted.size > 0) {
+          // eslint-disable-next-line no-console
+          console.info(
+            `[bank-reconcile] resume import: ${alreadyPosted.size} line(s) already posted for import_id=${input.resumeImportId}`,
+          );
+        }
+      } catch (loadErr) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bank-reconcile] could not load posted lines for resume: ${
+            loadErr instanceof Error ? loadErr.message : String(loadErr)
+          }`,
+        );
+      }
+    }
+
+    // Build the effective selectedRows set. selectedRows uses 1-based
+    // line numbers (matches executor's i+1 convention). When the UI
+    // sends null we treat it as "post everything"; on resume we then
+    // subtract already-posted line numbers from a fully-populated list.
+    let effectiveSelected = input.selectedRows ?? null;
+    if (alreadyPosted.size > 0) {
+      const base =
+        effectiveSelected ??
+        Array.from({ length: extracted.transactions.length }, (_, i) => i + 1);
+      effectiveSelected = base.filter((n) => !alreadyPosted.has(n));
+    }
+
     const result = await executor.postBankImport({
       operaDb,
       bankCode,
       statementInfo: extracted,
       transactions: extracted.transactions,
       overrides: input.overrides ?? [],
-      selectedRows: input.selectedRows ?? null,
+      selectedRows: effectiveSelected,
       autoAllocate: !!input.autoAllocate,
       autoReconcile: !!input.autoReconcile,
     });
@@ -276,35 +321,81 @@ export async function importBankStatementFromPdf(
           if (line.amount > 0) totalReceipts += line.amount;
           else if (line.amount < 0) totalPayments += Math.abs(line.amount);
         }
-        const [insertedId] = (await appDb('bank_statement_imports')
-          .insert({
-            bank_code: bankCode,
-            source: 'file',
-            source_ref: input.filename ?? input.filePath,
-            // statement-info columns expected by statement-tracking.ts,
-            // bank-reconciliation-status.ts and the scan-all-banks
-            // gating chain. Faithful to legacy email/storage.py:1615.
-            statement_date: extracted.statement_date ?? null,
-            account_number: extracted.account_number ?? null,
-            sort_code: extracted.sort_code ?? null,
-            period_start: extracted.period_start ?? null,
-            period_end: extracted.period_end ?? null,
-            opening_balance: extracted.opening_balance,
-            closing_balance: extracted.closing_balance,
-            total_receipts: totalReceipts,
-            total_payments: totalPayments,
-            transactions_imported: result.records_imported,
-            imported_at: appDb.fn.now(),
-            import_status: 'imported',
-            records_imported: result.records_imported,
-            filename: input.filename ?? null,
-            imported_by: input.importedBy ?? 'system',
-          })
-          .returning('id')) as unknown as Array<{ id: number } | number>;
-        const importId =
-          typeof insertedId === 'number'
-            ? insertedId
-            : (insertedId as { id: number })?.id;
+
+        // Resume-import: UPDATE the existing bank_statement_imports row
+        // rather than INSERT a new one (legacy routes.py:4502-4526). The
+        // running totals accumulate so the audit reflects the full set
+        // of posted lines across all attempts.
+        let importId: number | undefined;
+        if (input.resumeImportId) {
+          try {
+            const existing = (await appDb('bank_statement_imports')
+              .where({ id: input.resumeImportId })
+              .first()) as
+              | {
+                  records_imported?: number | null;
+                  transactions_imported?: number | null;
+                  total_receipts?: number | null;
+                  total_payments?: number | null;
+                }
+              | undefined;
+            const prevImported = Number(existing?.records_imported ?? 0);
+            const prevTxImported = Number(existing?.transactions_imported ?? 0);
+            const prevReceipts = Number(existing?.total_receipts ?? 0);
+            const prevPayments = Number(existing?.total_payments ?? 0);
+            await appDb('bank_statement_imports')
+              .where({ id: input.resumeImportId })
+              .update({
+                closing_balance: extracted.closing_balance,
+                total_receipts: prevReceipts + totalReceipts,
+                total_payments: prevPayments + totalPayments,
+                transactions_imported: prevTxImported + result.records_imported,
+                records_imported: prevImported + result.records_imported,
+                import_status: 'imported',
+                imported_at: appDb.fn.now(),
+                imported_by: input.importedBy ?? 'system',
+              });
+            importId = input.resumeImportId;
+          } catch (resumeErr) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[bank-reconcile] resume UPDATE failed for import_id=${input.resumeImportId}: ${
+                resumeErr instanceof Error ? resumeErr.message : String(resumeErr)
+              } — falling back to fresh INSERT`,
+            );
+          }
+        }
+        if (!importId) {
+          const [insertedId] = (await appDb('bank_statement_imports')
+            .insert({
+              bank_code: bankCode,
+              source: 'file',
+              source_ref: input.filename ?? input.filePath,
+              // statement-info columns expected by statement-tracking.ts,
+              // bank-reconciliation-status.ts and the scan-all-banks
+              // gating chain. Faithful to legacy email/storage.py:1615.
+              statement_date: extracted.statement_date ?? null,
+              account_number: extracted.account_number ?? null,
+              sort_code: extracted.sort_code ?? null,
+              period_start: extracted.period_start ?? null,
+              period_end: extracted.period_end ?? null,
+              opening_balance: extracted.opening_balance,
+              closing_balance: extracted.closing_balance,
+              total_receipts: totalReceipts,
+              total_payments: totalPayments,
+              transactions_imported: result.records_imported,
+              imported_at: appDb.fn.now(),
+              import_status: 'imported',
+              records_imported: result.records_imported,
+              filename: input.filename ?? null,
+              imported_by: input.importedBy ?? 'system',
+            })
+            .returning('id')) as unknown as Array<{ id: number } | number>;
+          importId =
+            typeof insertedId === 'number'
+              ? insertedId
+              : (insertedId as { id: number })?.id;
+        }
 
         // Per-line tracking — write one row per posted statement
         // line so subsequent Opera-restore detection can verify the
