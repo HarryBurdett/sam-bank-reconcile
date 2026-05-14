@@ -369,6 +369,32 @@ export async function markEntriesReconciled(
               ? Number(verifyRows[0].nk_recbal ?? 0) / 100
               : null;
 
+          // Drift alert: legacy and this port advance nk_recbal by
+          // ACCUMULATION (current + total_value). If a prior
+          // statement was skipped, the new nk_recbal won't match the
+          // current statement's closing balance — drift = the
+          // skipped statement's value-delta. Surface this to the
+          // operator (legacy silently logged only). Audit pass-3
+          // out-of-sequence GAP-3.
+          const driftWarnings: string[] = [];
+          if (
+            !partial &&
+            closingPence !== null &&
+            verified !== null &&
+            Math.abs(verified * 100 - closingPence) > 1
+          ) {
+            const drift = (verified * 100 - closingPence) / 100;
+            const message =
+              `Reconciled balance drift: nk_recbal=${formatGbp(Math.trunc(verified * 100))} ` +
+              `vs statement closing=${formatGbp(closingPence)} ` +
+              `(off by ${drift >= 0 ? '+' : ''}${formatGbp(Math.trunc(drift * 100))}). ` +
+              `A previous statement may have been skipped — review the bank's reconciled balance ` +
+              `against the printed statements before processing further.`;
+            driftWarnings.push(message);
+            // eslint-disable-next-line no-console
+            console.warn(`[mark-reconciled] ${message}`);
+          }
+
           const totalPounds = totalValue / 100;
           const newRecPounds = newRecBalance / 100;
           const remainingPounds = (currentBalance - newRecBalance) / 100;
@@ -402,6 +428,7 @@ export async function markEntriesReconciled(
               `Remaining unreconciled: ${formatGbp(Math.trunc(remainingPounds * 100))}`,
               `Statement number: ${statementNumber}`,
               `Reconciliation batch: ${recBatchNumber}`,
+              ...driftWarnings,
             ],
           };
         }),
