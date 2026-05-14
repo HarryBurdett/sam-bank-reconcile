@@ -353,9 +353,124 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
             }
         }
     }
+    // Bucket transactions for the FE. Faithful port of
+    // routes.py:2663-2787. The FE's preview UI reads
+    // matched_receipts / matched_payments / matched_refunds /
+    // repeat_entries / unmatched / already_posted / skipped directly;
+    // it does not consume a flat transactions array. We keep the
+    // flat array on the response too (statement_transactions +
+    // transactions) for callers that need it.
+    const matchedReceipts = [];
+    const matchedPayments = [];
+    const matchedRefunds = [];
+    const repeatEntries = [];
+    const unmatched = [];
+    const alreadyPosted = [];
+    const skipped = [];
+    const flatTxns = txnsForUi.map((t, i) => {
+        const dateAny = t.date;
+        const dateStr = dateAny != null && typeof dateAny === 'object' && 'toISOString' in dateAny
+            ? dateAny.toISOString().slice(0, 10)
+            : String(dateAny ?? '').slice(0, 10) || null;
+        const tu = t;
+        return {
+            row: i + 1,
+            date: dateStr,
+            amount: Number(t.amount ?? 0),
+            name: (t.name ?? ''),
+            reference: tu.reference ?? null,
+            memo: (t.memo ?? ''),
+            fit_id: tu.fit_id ?? null,
+            account: tu.matched_account ?? null,
+            account_name: tu.matched_name ?? null,
+            match_score: tu.match_confidence != null ? Math.round(tu.match_confidence * 100) : 0,
+            match_source: null,
+            action: tu.action ?? null,
+            reason: tu.skip_reason ?? null,
+            is_duplicate: !!tu.is_duplicate,
+            duplicate_candidates: [],
+            refund_credit_note: null,
+            refund_credit_amount: null,
+            repeat_entry_ref: null,
+            repeat_entry_desc: null,
+            repeat_entry_next_date: null,
+            repeat_entry_posted: null,
+            repeat_entry_total: null,
+            repeat_entry_freq: null,
+            repeat_entry_every: null,
+            period_valid: true,
+            period_error: null,
+            original_date: dateStr,
+            type: t.type,
+            balance: (t.balance ?? null),
+            line_number: i + 1,
+            matched_entry_number: tu.matched_entry_number ?? null,
+        };
+    });
+    for (const t of flatTxns) {
+        if (t.is_duplicate) {
+            alreadyPosted.push(t);
+            continue;
+        }
+        switch (t.action) {
+            case 'sales_receipt':
+                matchedReceipts.push(t);
+                break;
+            case 'purchase_payment':
+                matchedPayments.push(t);
+                break;
+            case 'sales_refund':
+            case 'purchase_refund':
+                matchedRefunds.push(t);
+                break;
+            case 'repeat_entry':
+                repeatEntries.push(t);
+                break;
+            case 'skip':
+            case 'defer':
+                skipped.push(t);
+                break;
+            default:
+                // Anything unclassified (no action set, or unknown) goes to
+                // unmatched so the operator can assign manually. Matches
+                // legacy line 2785 "All non-matched, non-duplicate
+                // transactions go to unmatched".
+                unmatched.push(t);
+        }
+    }
     return {
         success: true,
         filename: input.filename ?? input.filePath?.split('/').pop() ?? undefined,
+        detected_format: 'PDF',
+        total_transactions: flatTxns.length,
+        matched_receipts: matchedReceipts,
+        matched_payments: matchedPayments,
+        matched_refunds: matchedRefunds,
+        repeat_entries: repeatEntries,
+        unmatched,
+        already_posted: alreadyPosted,
+        skipped,
+        summary: {
+            to_import: matchedReceipts.length + matchedPayments.length + matchedRefunds.length,
+            refund_count: matchedRefunds.length,
+            repeat_entry_count: repeatEntries.length,
+            unmatched_count: unmatched.length,
+            already_posted_count: alreadyPosted.length,
+            skipped_count: skipped.length,
+        },
+        errors: [],
+        statement_bank_info: {
+            bank_name: extracted.bank_name,
+            account_number: extracted.account_number,
+            sort_code: extracted.sort_code,
+            statement_date: extracted.statement_date,
+            period_start: extracted.period_start,
+            period_end: extracted.period_end,
+            opening_balance: extracted.opening_balance,
+            closing_balance: extracted.closing_balance,
+            matched_opera_bank: bank.code,
+        },
+        statement_transactions: flatTxns,
         statement_info: {
             bank_name: extracted.bank_name,
             account_number: extracted.account_number,
@@ -366,7 +481,7 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
             opening_balance: extracted.opening_balance,
             closing_balance: extracted.closing_balance,
         },
-        transactions: extracted.transactions,
+        transactions: flatTxns,
         bank: {
             code: bank.code,
             description: bank.description,

@@ -63,9 +63,81 @@ export interface PreviewBankInfo {
   reconciled_balance: number | null;
 }
 
+export interface PreviewTxn {
+  row: number;
+  date: string | null;
+  amount: number;
+  name: string | null;
+  reference: string | null;
+  memo: string | null;
+  fit_id: string | null;
+  account: string | null;
+  account_name: string | null;
+  match_score: number;
+  match_source: string | null;
+  action: string | null;
+  reason: string | null;
+  is_duplicate: boolean;
+  duplicate_candidates: unknown[];
+  refund_credit_note: unknown;
+  refund_credit_amount: number | null;
+  repeat_entry_ref: string | null;
+  repeat_entry_desc: string | null;
+  repeat_entry_next_date: string | null;
+  repeat_entry_posted: number | null;
+  repeat_entry_total: number | null;
+  repeat_entry_freq: string | null;
+  repeat_entry_every: number | null;
+  period_valid: boolean;
+  period_error: string | null;
+  original_date: string | null;
+  type?: string;
+  balance?: number | null;
+  line_number?: number;
+  matched_entry_number?: string | null;
+}
+
 export interface PreviewResponse {
   success: boolean;
   filename?: string;
+  detected_format?: string;
+  total_transactions?: number;
+  /** Bucketed transactions — legacy contract from routes.py:2787-2822.
+   *  The FE reads matched_receipts/payments/refunds/repeat_entries/
+   *  unmatched/already_posted/skipped directly into the preview UI.
+   *  A flat transactions array is also kept for callers that read it. */
+  matched_receipts?: PreviewTxn[];
+  matched_payments?: PreviewTxn[];
+  matched_refunds?: PreviewTxn[];
+  repeat_entries?: PreviewTxn[];
+  unmatched?: PreviewTxn[];
+  already_posted?: PreviewTxn[];
+  skipped?: PreviewTxn[];
+  summary?: {
+    to_import: number;
+    refund_count: number;
+    repeat_entry_count: number;
+    unmatched_count: number;
+    already_posted_count: number;
+    skipped_count: number;
+  };
+  errors?: string[];
+  /** Statement metadata (AI extraction). Used by the FE's Statement
+   *  Summary card. */
+  statement_bank_info?: {
+    bank_name: string | null;
+    account_number: string | null;
+    sort_code: string | null;
+    statement_date: string | null;
+    period_start: string | null;
+    period_end: string | null;
+    opening_balance: number | null;
+    closing_balance: number | null;
+    matched_opera_bank?: string | null;
+  };
+  /** Full extracted statement transactions (unbucketed) — used by the
+   *  reconcile screen to render the raw statement. */
+  statement_transactions?: PreviewTxn[];
   statement_info?: {
     bank_name: string | null;
     account_number: string | null;
@@ -76,42 +148,10 @@ export interface PreviewResponse {
     opening_balance: number | null;
     closing_balance: number | null;
   };
-  transactions?: Array<{
-    date: string | null;
-    name: string | null;
-    memo: string | null;
-    amount: number;
-    type: string;
-    balance?: number | null;
-    line_number?: number;
-    /** Set when the matcher's process_transactions pass found the row
-     *  already exists in Opera's cashbook. Faithful port of
-     *  bank_import.py:1946. The UI uses this to render the "already
-     *  posted" badge and pre-deselect the row. */
-    is_duplicate?: boolean;
-    /** Skip flag — when set, the import-from-pdf orchestration
-     *  shell will route this row through the executor's skip path
-     *  (no cashbook write). Set by the duplicate-detection pass at
-     *  preview time. */
-    action?: string;
-    /** Human-readable explanation for the skip, surfaced in the
-     *  preview UI alongside is_duplicate. Mirrors
-     *  BankTransaction.skip_reason in bank_import.py:252. */
-    skip_reason?: string | null;
-    /** The Opera entry_number that already holds this posting. Used
-     *  by the FE's duplicate-override modal and by the import loop's
-     *  consumed-entries seeding. */
-    matched_entry_number?: string | null;
-    /** Customer or supplier account code that the alias matcher
-     *  resolved this row to. Mirrors BankTransaction.matched_account
-     *  in bank_import.py:252. */
-    matched_account?: string | null;
-    /** Display name for the matched account, surfaced as the
-     *  "matched to" badge in the preview UI. */
-    matched_name?: string | null;
-    /** Confidence (0..1) of the alias match. */
-    match_confidence?: number | null;
-  }>;
+  /** Kept for backward-compat with code that still reads the flat
+   *  transactions array. The bucketed arrays above are the legacy
+   *  contract. */
+  transactions?: PreviewTxn[];
   bank?: PreviewBankInfo;
   warnings?: string[];
   error?: string;
@@ -551,9 +591,140 @@ export async function previewBankImportFromPdf(
     }
   }
 
+  // Bucket transactions for the FE. Faithful port of
+  // routes.py:2663-2787. The FE's preview UI reads
+  // matched_receipts / matched_payments / matched_refunds /
+  // repeat_entries / unmatched / already_posted / skipped directly;
+  // it does not consume a flat transactions array. We keep the
+  // flat array on the response too (statement_transactions +
+  // transactions) for callers that need it.
+  const matchedReceipts: PreviewTxn[] = [];
+  const matchedPayments: PreviewTxn[] = [];
+  const matchedRefunds: PreviewTxn[] = [];
+  const repeatEntries: PreviewTxn[] = [];
+  const unmatched: PreviewTxn[] = [];
+  const alreadyPosted: PreviewTxn[] = [];
+  const skipped: PreviewTxn[] = [];
+
+  const flatTxns: PreviewTxn[] = txnsForUi.map((t, i) => {
+    const dateAny: unknown = t.date;
+    const dateStr =
+      dateAny != null && typeof dateAny === 'object' && 'toISOString' in (dateAny as object)
+        ? (dateAny as Date).toISOString().slice(0, 10)
+        : String(dateAny ?? '').slice(0, 10) || null;
+    const tu = t as unknown as {
+      reference?: string | null;
+      fit_id?: string | null;
+      matched_account?: string | null;
+      matched_name?: string | null;
+      match_confidence?: number | null;
+      action?: string | null;
+      skip_reason?: string | null;
+      is_duplicate?: boolean;
+      matched_entry_number?: string | null;
+    };
+    return {
+      row: i + 1,
+      date: dateStr,
+      amount: Number(t.amount ?? 0),
+      name: (t.name ?? '') as string,
+      reference: tu.reference ?? null,
+      memo: (t.memo ?? '') as string,
+      fit_id: tu.fit_id ?? null,
+      account: tu.matched_account ?? null,
+      account_name: tu.matched_name ?? null,
+      match_score:
+        tu.match_confidence != null ? Math.round(tu.match_confidence * 100) : 0,
+      match_source: null,
+      action: tu.action ?? null,
+      reason: tu.skip_reason ?? null,
+      is_duplicate: !!tu.is_duplicate,
+      duplicate_candidates: [],
+      refund_credit_note: null,
+      refund_credit_amount: null,
+      repeat_entry_ref: null,
+      repeat_entry_desc: null,
+      repeat_entry_next_date: null,
+      repeat_entry_posted: null,
+      repeat_entry_total: null,
+      repeat_entry_freq: null,
+      repeat_entry_every: null,
+      period_valid: true,
+      period_error: null,
+      original_date: dateStr,
+      type: t.type as string | undefined,
+      balance: (t.balance ?? null) as number | null,
+      line_number: i + 1,
+      matched_entry_number: tu.matched_entry_number ?? null,
+    };
+  });
+
+  for (const t of flatTxns) {
+    if (t.is_duplicate) {
+      alreadyPosted.push(t);
+      continue;
+    }
+    switch (t.action) {
+      case 'sales_receipt':
+        matchedReceipts.push(t);
+        break;
+      case 'purchase_payment':
+        matchedPayments.push(t);
+        break;
+      case 'sales_refund':
+      case 'purchase_refund':
+        matchedRefunds.push(t);
+        break;
+      case 'repeat_entry':
+        repeatEntries.push(t);
+        break;
+      case 'skip':
+      case 'defer':
+        skipped.push(t);
+        break;
+      default:
+        // Anything unclassified (no action set, or unknown) goes to
+        // unmatched so the operator can assign manually. Matches
+        // legacy line 2785 "All non-matched, non-duplicate
+        // transactions go to unmatched".
+        unmatched.push(t);
+    }
+  }
+
   return {
     success: true,
     filename: input.filename ?? input.filePath?.split('/').pop() ?? undefined,
+    detected_format: 'PDF',
+    total_transactions: flatTxns.length,
+    matched_receipts: matchedReceipts,
+    matched_payments: matchedPayments,
+    matched_refunds: matchedRefunds,
+    repeat_entries: repeatEntries,
+    unmatched,
+    already_posted: alreadyPosted,
+    skipped,
+    summary: {
+      to_import:
+        matchedReceipts.length + matchedPayments.length + matchedRefunds.length,
+      refund_count: matchedRefunds.length,
+      repeat_entry_count: repeatEntries.length,
+      unmatched_count: unmatched.length,
+      already_posted_count: alreadyPosted.length,
+      skipped_count: skipped.length,
+    },
+    errors: [],
+    statement_bank_info: {
+      bank_name: extracted.bank_name,
+      account_number: extracted.account_number,
+      sort_code: extracted.sort_code,
+      statement_date: extracted.statement_date,
+      period_start: extracted.period_start,
+      period_end: extracted.period_end,
+      opening_balance: extracted.opening_balance,
+      closing_balance: extracted.closing_balance,
+      matched_opera_bank: bank.code,
+    },
+    statement_transactions: flatTxns,
     statement_info: {
       bank_name: extracted.bank_name,
       account_number: extracted.account_number,
@@ -564,7 +735,7 @@ export async function previewBankImportFromPdf(
       opening_balance: extracted.opening_balance,
       closing_balance: extracted.closing_balance,
     },
-    transactions: extracted.transactions,
+    transactions: flatTxns,
     bank: {
       code: bank.code,
       description: bank.description,

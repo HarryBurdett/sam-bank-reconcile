@@ -49,9 +49,80 @@ export interface PreviewBankInfo {
     account_number: string;
     reconciled_balance: number | null;
 }
+export interface PreviewTxn {
+    row: number;
+    date: string | null;
+    amount: number;
+    name: string | null;
+    reference: string | null;
+    memo: string | null;
+    fit_id: string | null;
+    account: string | null;
+    account_name: string | null;
+    match_score: number;
+    match_source: string | null;
+    action: string | null;
+    reason: string | null;
+    is_duplicate: boolean;
+    duplicate_candidates: unknown[];
+    refund_credit_note: unknown;
+    refund_credit_amount: number | null;
+    repeat_entry_ref: string | null;
+    repeat_entry_desc: string | null;
+    repeat_entry_next_date: string | null;
+    repeat_entry_posted: number | null;
+    repeat_entry_total: number | null;
+    repeat_entry_freq: string | null;
+    repeat_entry_every: number | null;
+    period_valid: boolean;
+    period_error: string | null;
+    original_date: string | null;
+    type?: string;
+    balance?: number | null;
+    line_number?: number;
+    matched_entry_number?: string | null;
+}
 export interface PreviewResponse {
     success: boolean;
     filename?: string;
+    detected_format?: string;
+    total_transactions?: number;
+    /** Bucketed transactions — legacy contract from routes.py:2787-2822.
+     *  The FE reads matched_receipts/payments/refunds/repeat_entries/
+     *  unmatched/already_posted/skipped directly into the preview UI.
+     *  A flat transactions array is also kept for callers that read it. */
+    matched_receipts?: PreviewTxn[];
+    matched_payments?: PreviewTxn[];
+    matched_refunds?: PreviewTxn[];
+    repeat_entries?: PreviewTxn[];
+    unmatched?: PreviewTxn[];
+    already_posted?: PreviewTxn[];
+    skipped?: PreviewTxn[];
+    summary?: {
+        to_import: number;
+        refund_count: number;
+        repeat_entry_count: number;
+        unmatched_count: number;
+        already_posted_count: number;
+        skipped_count: number;
+    };
+    errors?: string[];
+    /** Statement metadata (AI extraction). Used by the FE's Statement
+     *  Summary card. */
+    statement_bank_info?: {
+        bank_name: string | null;
+        account_number: string | null;
+        sort_code: string | null;
+        statement_date: string | null;
+        period_start: string | null;
+        period_end: string | null;
+        opening_balance: number | null;
+        closing_balance: number | null;
+        matched_opera_bank?: string | null;
+    };
+    /** Full extracted statement transactions (unbucketed) — used by the
+     *  reconcile screen to render the raw statement. */
+    statement_transactions?: PreviewTxn[];
     statement_info?: {
         bank_name: string | null;
         account_number: string | null;
@@ -62,42 +133,10 @@ export interface PreviewResponse {
         opening_balance: number | null;
         closing_balance: number | null;
     };
-    transactions?: Array<{
-        date: string | null;
-        name: string | null;
-        memo: string | null;
-        amount: number;
-        type: string;
-        balance?: number | null;
-        line_number?: number;
-        /** Set when the matcher's process_transactions pass found the row
-         *  already exists in Opera's cashbook. Faithful port of
-         *  bank_import.py:1946. The UI uses this to render the "already
-         *  posted" badge and pre-deselect the row. */
-        is_duplicate?: boolean;
-        /** Skip flag — when set, the import-from-pdf orchestration
-         *  shell will route this row through the executor's skip path
-         *  (no cashbook write). Set by the duplicate-detection pass at
-         *  preview time. */
-        action?: string;
-        /** Human-readable explanation for the skip, surfaced in the
-         *  preview UI alongside is_duplicate. Mirrors
-         *  BankTransaction.skip_reason in bank_import.py:252. */
-        skip_reason?: string | null;
-        /** The Opera entry_number that already holds this posting. Used
-         *  by the FE's duplicate-override modal and by the import loop's
-         *  consumed-entries seeding. */
-        matched_entry_number?: string | null;
-        /** Customer or supplier account code that the alias matcher
-         *  resolved this row to. Mirrors BankTransaction.matched_account
-         *  in bank_import.py:252. */
-        matched_account?: string | null;
-        /** Display name for the matched account, surfaced as the
-         *  "matched to" badge in the preview UI. */
-        matched_name?: string | null;
-        /** Confidence (0..1) of the alias match. */
-        match_confidence?: number | null;
-    }>;
+    /** Kept for backward-compat with code that still reads the flat
+     *  transactions array. The bucketed arrays above are the legacy
+     *  contract. */
+    transactions?: PreviewTxn[];
     bank?: PreviewBankInfo;
     warnings?: string[];
     error?: string;

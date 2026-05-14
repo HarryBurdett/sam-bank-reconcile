@@ -441,6 +441,7 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                     const { sort_key: sortKey, display_date: statementDate } = extractStatementNumberFromFilename(filename, '');
                     const stmt = {
                         source: 'pdf',
+                        full_path: fullPath,
                         file_path: fullPath,
                         filename,
                         already_processed: false,

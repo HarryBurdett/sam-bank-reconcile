@@ -9,6 +9,12 @@ export interface StatementCandidate {
     source: 'email' | 'pdf';
     email_id?: number;
     attachment_id?: string;
+    /** Filesystem path for source='pdf' statements. Legacy emits this
+     *  as `full_path` (routes.py:5648); FE BankStatementHub reads
+     *  `stmt.full_path` to wire the Process button into Imports. */
+    full_path?: string | null;
+    /** Kept as an alias for backward-compat with any older readers
+     *  still looking for `file_path`. */
     file_path?: string | null;
     filename: string;
     subject?: string | null;

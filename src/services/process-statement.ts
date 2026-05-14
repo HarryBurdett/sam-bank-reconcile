@@ -335,7 +335,7 @@ export async function processStatement(
       name: txn.name,
       memo: txn.memo,
       amount: txn.amount,
-      type: txn.type,
+      type: txn.type ?? 'credit',
       balance: txn.balance ?? null,
       line_number: txn.line_number,
       is_duplicate: isDup,

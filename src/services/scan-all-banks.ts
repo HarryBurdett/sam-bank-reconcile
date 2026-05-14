@@ -642,6 +642,7 @@ export async function scanAllBanksFaithful(
 
           const stmt: StatementCandidate = {
             source: 'pdf',
+            full_path: fullPath,
             file_path: fullPath,
             filename,
             already_processed: false,
