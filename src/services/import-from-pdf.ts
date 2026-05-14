@@ -135,6 +135,10 @@ export interface ImportFromPdfInput {
   dateOverrides?: unknown[];
   rejectedRefundRows?: number[];
   skipOverlapCheck?: boolean;
+  /** Operator username for the bank_statement_imports audit row.
+   *  Legacy threads `request.state.user.username` here
+   *  (routes.py:4502). When omitted, defaults to 'system'. */
+  importedBy?: string | null;
 }
 
 export interface ImportFromPdfResponse {
@@ -250,17 +254,39 @@ export async function importBankStatementFromPdf(
 
     if (result.success) {
       try {
+        // Aggregate signed posted_lines into the receipt/payment totals
+        // legacy persists (routes.py:4498-4508). Match legacy's
+        // convention: receipts = sum of credits (amount > 0), payments
+        // = sum of absolute debits (amount < 0).
+        let totalReceipts = 0;
+        let totalPayments = 0;
+        for (const line of result.posted_lines ?? []) {
+          if (line.amount > 0) totalReceipts += line.amount;
+          else if (line.amount < 0) totalPayments += Math.abs(line.amount);
+        }
         const [insertedId] = (await appDb('bank_statement_imports')
           .insert({
             bank_code: bankCode,
             source: 'file',
             source_ref: input.filename ?? input.filePath,
+            // statement-info columns expected by statement-tracking.ts,
+            // bank-reconciliation-status.ts and the scan-all-banks
+            // gating chain. Faithful to legacy email/storage.py:1615.
+            statement_date: extracted.statement_date ?? null,
+            account_number: extracted.account_number ?? null,
+            sort_code: extracted.sort_code ?? null,
+            period_start: extracted.period_start ?? null,
+            period_end: extracted.period_end ?? null,
             opening_balance: extracted.opening_balance,
             closing_balance: extracted.closing_balance,
+            total_receipts: totalReceipts,
+            total_payments: totalPayments,
+            transactions_imported: result.records_imported,
             imported_at: appDb.fn.now(),
             import_status: 'imported',
             records_imported: result.records_imported,
             filename: input.filename ?? null,
+            imported_by: input.importedBy ?? 'system',
           })
           .returning('id')) as unknown as Array<{ id: number } | number>;
         const importId =

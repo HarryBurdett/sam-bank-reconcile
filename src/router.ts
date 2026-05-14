@@ -2320,6 +2320,7 @@ export function createRouter(ctx: AppContext): Router {
               ? (body.rejected_refund_rows as number[])
               : [],
             skipOverlapCheck: body.skip_overlap_check === true,
+            importedBy: req.user?.userId ?? null,
           },
           extractor,
           executor,
