@@ -2848,7 +2848,18 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
       : needsImport;
     const duplicateCount = allItems.filter(t => !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && t.is_duplicate).length;
     if (bankRecOnly && (bankPreview.already_posted?.length || 0) > 0 && unmatchedWithAction.length === 0) {
-      return true;
+      // BUT only when there are no matched receipts/payments/refunds
+      // still waiting to import. The original early-return ignored
+      // these and skipped straight to Reconcile when ANY already-
+      // posted entry existed — operator couldn't import the other
+      // rows because the button label flipped to "Proceed to
+      // Reconcile". A real bank-statement run often has 1-2
+      // already-posted entries (e.g. GoCardless transfers already in
+      // Opera) AND many fresh transactions that still need posting.
+      const matchedNeedingImport = [...receipts, ...payments, ...refunds].filter(t =>
+        !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate
+      );
+      if (matchedNeedingImport.length === 0) return true;
     }
     return needsImportExcludingUnmatched.length === 0 && (duplicateCount > 0 || (bankPreview.already_posted?.length || 0) > 0);
   })();
