@@ -21,7 +21,15 @@
  */
 import type { Knex } from 'knex';
 import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
-import { lookupAlias } from './bank-aliases.js';
+import {
+  buildMatchContext,
+  matchTransaction,
+  type MatchContext,
+} from './match-transaction.js';
+import {
+  loadCustomerCandidates,
+  loadSupplierCandidates,
+} from './bank-matcher.js';
 import type {
   PdfExtractionResult,
   PdfExtractor,
@@ -476,30 +484,69 @@ export async function previewBankImportFromPdf(
     }
   }
 
-  // Alias-matcher pass. Faithful port of _match_transaction
-  // (bank_import.py:1430-1650), narrowed to the alias-table lookup
-  // — the matching surface available in standalone today. For each
-  // non-duplicate row, look up by payee name with sign-derived
-  // ledger ('C' for receipts, 'S' for payments); when an alias hits,
-  // set matched_account/matched_name/action so the FE can render the
-  // green tick and pre-select the row.
-  if (appDb) {
+  // Full _match_transaction pipeline. Faithful port of
+  // bank_import.py:1297-1495 (the function _match_transaction).
+  // Stages run in legacy order, each terminating on a successful match:
+  //
+  //   Stage 0    repeat-entry check (arhead/arline)
+  //   Stage 0.5  bank-transfer detection (other Opera banks)
+  //   Stage 1    alias lookup (per-bank → global)
+  //   Stage 2    fuzzy match (BankMatcher) with extract_payee_name
+  //              fallback
+  //   Stage 3    ambiguity resolution + credit-note refund detection
+  //   Stage 4    direction-based decision + alias learning at score
+  //              >= 0.85
+  //
+  // Reuses the same service `processStatement` calls so the matcher
+  // is consistent across both paths.
+  let matchCtx: MatchContext | null = null;
+  try {
+    const [customers, suppliers] = await Promise.all([
+      loadCustomerCandidates(operaDb),
+      loadSupplierCandidates(operaDb),
+    ]);
+    matchCtx = await buildMatchContext(operaDb, bank.code, {
+      customers,
+      suppliers,
+    });
+  } catch {
+    // Matcher unavailable (e.g. customer/supplier load failed) — we
+    // skip per-row matching but the preview still surfaces dup info
+    // and the operator can manually pick accounts.
+    matchCtx = null;
+  }
+
+  if (matchCtx) {
     for (const txn of txnsForUi) {
       if (txn.is_duplicate) continue;
-      const payeeName = ((txn.name ?? txn.memo) ?? '').toString().trim();
-      if (!payeeName) continue;
-      const ledger = Number(txn.amount ?? 0) >= 0 ? 'C' : 'S';
       try {
-        const alias = await lookupAlias(appDb, payeeName, ledger, bank.code);
-        if (alias && alias.account) {
-          txn.matched_account = alias.account;
-          txn.matched_name = payeeName;
-          txn.match_confidence = alias.confidence;
-          txn.action = ledger === 'C' ? 'sales_receipt' : 'purchase_payment';
+        const dateAny: unknown = txn.date;
+        const dateYmd =
+          dateAny != null && typeof dateAny === 'object' && 'toISOString' in (dateAny as object)
+            ? (dateAny as Date).toISOString().slice(0, 10)
+            : String(dateAny ?? '').slice(0, 10);
+        const res = await matchTransaction(operaDb, appDb, matchCtx, {
+          bankCode: bank.code,
+          date: dateYmd,
+          amount: Number(txn.amount ?? 0),
+          name: (txn.name ?? '').toString(),
+          memo: (txn.memo ?? '').toString(),
+          reference:
+            ((txn as unknown as { reference?: string | null }).reference ?? '') as string,
+          preDeferred: false,
+        });
+        if (res.matched_account) {
+          txn.matched_account = res.matched_account;
+          txn.matched_name = res.matched_name ?? null;
+          txn.match_confidence = res.match_score;
         }
+        if (res.action && res.action !== 'skip') {
+          txn.action = res.action;
+        }
+        if (res.skip_reason) txn.skip_reason = res.skip_reason;
       } catch {
-        // Tolerate per-row lookup failures — the alias matcher is
-        // advisory at preview time. Operator can still pick manually.
+        // Per-row matcher failures degrade silently — operator
+        // can pick manually.
       }
     }
   }
