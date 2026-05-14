@@ -28,6 +28,7 @@ import {
   validateBankCode,
   SqlInputValidationError,
 } from '../_shared/index.js';
+import { markEntriesReconciled } from './mark-reconciled.js';
 
 export interface PdfExtractionResult {
   bank_name: string | null;
@@ -152,6 +153,17 @@ export interface ImportFromPdfResponse {
   error?: string;
   resume_import_id?: number | null;
   import_id?: number | null;
+  /** Result of the post-import auto-reconciliation pass, populated
+   *  only when input.autoReconcile is true. Mirrors legacy
+   *  `result['reconciliation_result']` (routes.py:4680). */
+  reconciliation_result?: {
+    success: boolean;
+    entries_reconciled: number;
+    statement_number?: number;
+    statement_date?: string;
+    messages?: string[];
+  };
+  auto_reconcile_enabled?: boolean;
 }
 
 async function bankExists(operaDb: Knex, bankCode: string): Promise<boolean> {
@@ -323,6 +335,105 @@ export async function importBankStatementFromPdf(
           }`,
         );
       }
+
+      // Auto-reconcile pass. Faithful port of legacy routes.py:4609-4713.
+      // Runs only when the operator asked for it AND the import landed
+      // with at least one posted line and no errors.
+      let reconciliationResult: ImportFromPdfResponse['reconciliation_result'];
+      let autoReconcileEnabled = false;
+      if (
+        input.autoReconcile &&
+        Array.isArray(result.posted_lines) &&
+        result.posted_lines.length > 0 &&
+        result.records_failed === 0
+      ) {
+        autoReconcileEnabled = true;
+        try {
+          // Legacy convention: statement_line = original PDF row × 10
+          // (Opera reconcile screen expects increments of 10, with
+          // gaps preserved for unmatched/skipped rows). routes.py:4634.
+          const entries = result.posted_lines.map((line) => ({
+            entry_number: line.posted_entry_number,
+            statement_line: line.line_number * 10,
+          }));
+
+          let latestDate: string | null = null;
+          for (const line of result.posted_lines) {
+            if (line.post_date && (!latestDate || line.post_date > latestDate)) {
+              latestDate = line.post_date;
+            }
+          }
+          if (!latestDate) latestDate = new Date().toISOString().slice(0, 10);
+
+          // Statement number from nbank.nk_lststno + 1 — Opera's
+          // canonical next-statement counter. Falls back to a
+          // yymmdd-derived value only if the nbank read fails.
+          let statementNumber: number | null = null;
+          try {
+            const nbsnRows = (await operaDb.raw(
+              `SELECT nk_lststno FROM nbank WITH (NOLOCK) WHERE RTRIM(nk_acnt) = ?`,
+              [bankCode],
+            )) as unknown as Array<{ nk_lststno?: number | null }>;
+            const last = Array.isArray(nbsnRows) ? nbsnRows[0]?.nk_lststno : null;
+            if (last !== null && last !== undefined) {
+              statementNumber = Number(last) + 1;
+            }
+          } catch (nbsnErr) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[bank-reconcile] could not read nk_lststno for ${bankCode}: ${
+                nbsnErr instanceof Error ? nbsnErr.message : String(nbsnErr)
+              } — falling back to date-derived`,
+            );
+          }
+          if (statementNumber === null) {
+            // yymmdd
+            const d = new Date(latestDate);
+            statementNumber = Number(
+              `${String(d.getFullYear()).slice(2)}${String(
+                d.getMonth() + 1,
+              ).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`,
+            );
+          }
+
+          const reconRes = await markEntriesReconciled(appDb, operaDb, {
+            bankCode,
+            entries,
+            statementNumber,
+            statementDate: latestDate,
+            reconciliationDate: new Date().toISOString().slice(0, 10),
+          });
+
+          reconciliationResult = {
+            success: !!reconRes.success,
+            entries_reconciled: reconRes.success
+              ? reconRes.records_reconciled ?? entries.length
+              : 0,
+            statement_number: statementNumber,
+            statement_date: latestDate,
+            messages: reconRes.success
+              ? reconRes.details ?? []
+              : reconRes.errors ?? [reconRes.error ?? 'reconciliation failed'],
+          };
+        } catch (reconErr) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[bank-reconcile] PDF auto-reconciliation error: ${
+              reconErr instanceof Error ? reconErr.message : String(reconErr)
+            }`,
+          );
+          reconciliationResult = {
+            success: false,
+            entries_reconciled: 0,
+            messages: [
+              `Auto-reconciliation error: ${
+                reconErr instanceof Error ? reconErr.message : String(reconErr)
+              }`,
+            ],
+          };
+        }
+      }
+
       return {
         success: true,
         message: `Imported ${result.records_imported} transactions`,
@@ -332,6 +443,8 @@ export async function importBankStatementFromPdf(
         warnings: result.warnings,
         import_id: result.import_id ?? null,
         resume_import_id: overlap.resumeImportId,
+        ...(reconciliationResult ? { reconciliation_result: reconciliationResult } : {}),
+        ...(autoReconcileEnabled ? { auto_reconcile_enabled: true } : {}),
       };
     }
     return {
