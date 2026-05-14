@@ -2332,10 +2332,11 @@ export function createRouter(ctx: AppContext): Router {
           lock,
           overlapChecker,
         );
-        if (!result.success) {
-          res.status(400).json(result);
-          return;
-        }
+        // Legacy returns 200 with `success: false` on overlap /
+        // validation errors; only true server faults are non-200
+        // (caught below). Anything keyed off HTTP status will break
+        // otherwise — matches routes.py:4109 (return overlap_err) and
+        // 4438 ("success": …) where neither call sets a non-200 code.
         res.json(result);
       } catch (err: any) {
         ctx.logger.error('import-from-pdf failed', err);

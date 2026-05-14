@@ -34,6 +34,7 @@ import {
 } from '../_shared/opera/period-validation.js';
 import { markEntriesReconciled } from './mark-reconciled.js';
 import { learnPattern } from './bank-pattern-learner.js';
+import { recordDeferredTransaction } from './deferred-items.js';
 
 export interface PdfExtractionResult {
   bank_name: string | null;
@@ -159,6 +160,7 @@ export interface ImportFromPdfResponse {
   records_imported?: number;
   records_failed?: number;
   skipped_count?: number;
+  deferred_count?: number;
   warnings?: string[];
   errors?: string[];
   error?: string;
@@ -248,10 +250,12 @@ export async function importBankStatementFromPdf(
     skipOverlapCheck: !!input.skipOverlapCheck,
   });
   if (overlap.overlapError) {
-    return {
-      ...overlap.overlapError,
-      resume_import_id: overlap.resumeImportId,
-    };
+    // Legacy returns the overlap error verbatim (routes.py:4108-4109);
+    // resume_import_id is only meaningful on the same-filename branch,
+    // which the orchestrator handles internally (not surfaced to the
+    // client). The FE keys off the error shape exactly as legacy
+    // emitted it — no extra fields.
+    return overlap.overlapError;
   }
 
   const lockKey = `bank-import:${bankCode}`;
@@ -378,6 +382,48 @@ export async function importBankStatementFromPdf(
           }`,
         );
       }
+    }
+
+    // Audit deferred rows. Faithful port of routes.py:4119-4140.
+    // Operator-marked 'defer' rows must NOT post to Opera but MUST
+    // appear in deferred_transactions so Sequential Statement Gating
+    // surfaces 'imported' state on the next scan. Overrides from the
+    // UI carry transaction_type='defer'; we walk those first and
+    // record each one.
+    let deferredCount = 0;
+    try {
+      const deferredBy = input.importedBy ?? 'unknown';
+      for (const raw of input.overrides ?? []) {
+        const ov = (raw ?? {}) as { row?: number; transaction_type?: string | null };
+        if (ov.transaction_type !== 'defer' || !ov.row) continue;
+        const txn = extracted.transactions[Number(ov.row) - 1] as
+          | { date?: string | null; amount?: number; name?: string | null; memo?: string | null }
+          | undefined;
+        if (!txn) continue;
+        const statementDate = (txn.date ?? '').slice(0, 10);
+        const description = (txn.memo ?? txn.name ?? '').toString().slice(0, 255);
+        const recRes = await recordDeferredTransaction(appDb, {
+          bankCode,
+          statementDate,
+          amount: Number(txn.amount ?? 0),
+          description,
+          deferredBy,
+        });
+        if (recRes.success) deferredCount += 1;
+      }
+      if (deferredCount > 0) {
+        // eslint-disable-next-line no-console
+        console.info(
+          `[bank-reconcile] recorded ${deferredCount} deferred transaction(s) for ${bankCode}`,
+        );
+      }
+    } catch (defErr) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[bank-reconcile] deferred audit failed: ${
+          defErr instanceof Error ? defErr.message : String(defErr)
+        }`,
+      );
     }
 
     // Apply per-row overrides + date_overrides + rejected_refund_rows
@@ -794,10 +840,13 @@ export async function importBankStatementFromPdf(
 
       return {
         success: true,
-        message: `Imported ${result.records_imported} transactions`,
+        message: `Imported ${result.records_imported} transactions${
+          deferredCount > 0 ? ` (${deferredCount} deferred)` : ''
+        }`,
         records_imported: result.records_imported,
         records_failed: result.records_failed,
         skipped_count: result.skipped_count,
+        deferred_count: deferredCount,
         warnings: result.warnings,
         errors:
           closedYearErrors.length + periodErrors.length > 0

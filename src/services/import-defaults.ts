@@ -44,7 +44,6 @@ export function makeBankStatementOverlapChecker(
       resumeImportId,
       skipOverlapCheck,
     }) {
-      void filename;
       if (skipOverlapCheck || !periodStart || !periodEnd) {
         return { resumeImportId };
       }
@@ -71,6 +70,16 @@ export function makeBankStatementOverlapChecker(
             }
           | undefined;
         if (!row) return { resumeImportId };
+
+        // Same-filename re-import is a continuation, not a conflict
+        // — operator went back to add missed lines. Faithful port of
+        // import_orchestration.py:105-109. Returns the existing
+        // import_id so the orchestrator's resume path kicks in
+        // regardless of import_status.
+        if ((row.filename ?? '').trim() === (filename ?? '').trim() && row.id) {
+          return { resumeImportId: Number(row.id) };
+        }
+
         if (row.import_status === 'partial' && row.id) {
           // Resume the prior partial import instead of erroring.
           return { resumeImportId: Number(row.id) };
