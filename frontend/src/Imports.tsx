@@ -1401,11 +1401,15 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     }
   }, [pdfDirectory]);
 
-  // Fetch bank accounts using react-query (auto-refreshes on company switch)
+  // Fetch bank accounts using react-query (auto-refreshes on company switch).
+  // Endpoint moved to /api/cashbook/bank-accounts when the cashbook
+  // sub-routes were consolidated; the old /opera-sql/bank-accounts path
+  // 404s, leaving bankAccounts empty and the bank-transfer dropdown
+  // unsearchable.
   const { data: bankAccountsData } = useQuery({
     queryKey: ['bank-accounts'],
     queryFn: async () => {
-      const res = await authFetch(`${API_BASE}/opera-sql/bank-accounts`);
+      const res = await authFetch(`${API_BASE}/cashbook/bank-accounts`);
       return res.json();
     },
   });
@@ -1417,8 +1421,13 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
 
   // Update bank accounts state when data changes or company changes
   useEffect(() => {
-    if (bankAccountsData?.success && bankAccountsData.bank_accounts && currentCompanyId) {
-      const accounts = bankAccountsData.bank_accounts.map((b: any) => ({
+    // The cashbook endpoint returns the array under the key `banks`;
+    // older code expected `bank_accounts`. Accept either so a future
+    // BE change doesn't silently empty the dropdown again.
+    const banksFromResp =
+      bankAccountsData?.banks ?? bankAccountsData?.bank_accounts ?? null;
+    if (bankAccountsData?.success && Array.isArray(banksFromResp) && currentCompanyId) {
+      const accounts = banksFromResp.map((b: any) => ({
         code: b.code,
         description: b.description,
         sort_code: b.sort_code || '',
