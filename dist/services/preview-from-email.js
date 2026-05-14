@@ -1,5 +1,5 @@
 import { previewBankImportFromPdf, } from './preview-from-pdf.js';
-export async function previewBankImportFromEmail(operaDb, llm, attachments, input) {
+export async function previewBankImportFromEmail(operaDb, llm, attachments, input, extractor = null, appDb = null) {
     if (!Number.isFinite(input.emailId) || input.emailId <= 0) {
         return { success: false, error: 'email_id is required (positive number)' };
     }
@@ -27,6 +27,6 @@ export async function previewBankImportFromEmail(operaDb, llm, attachments, inpu
         pdfBytes: downloaded.bytes,
         filename: downloaded.filename,
         bankCode: input.bankCode,
-    });
+    }, extractor, appDb);
 }
 //# sourceMappingURL=preview-from-email.js.map

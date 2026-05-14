@@ -9,6 +9,7 @@
  */
 import type { Knex } from 'knex';
 import { type LlmService, type PreviewResponse } from './preview-from-pdf.js';
+import type { PdfExtractor } from './import-from-pdf.js';
 export interface EmailAttachmentProvider {
     fetchAttachment(opts: {
         emailId: number;
@@ -24,5 +25,5 @@ export interface PreviewFromEmailInput {
     attachmentId: string;
     bankCode: string;
 }
-export declare function previewBankImportFromEmail(operaDb: Knex, llm: LlmService, attachments: EmailAttachmentProvider, input: PreviewFromEmailInput): Promise<PreviewResponse>;
+export declare function previewBankImportFromEmail(operaDb: Knex, llm: LlmService | null, attachments: EmailAttachmentProvider, input: PreviewFromEmailInput, extractor?: PdfExtractor | null, appDb?: Knex | null): Promise<PreviewResponse>;
 //# sourceMappingURL=preview-from-email.d.ts.map

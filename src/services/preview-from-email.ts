@@ -13,6 +13,7 @@ import {
   type LlmService,
   type PreviewResponse,
 } from './preview-from-pdf.js';
+import type { PdfExtractor } from './import-from-pdf.js';
 
 export interface EmailAttachmentProvider {
   fetchAttachment(opts: {
@@ -33,9 +34,11 @@ export interface PreviewFromEmailInput {
 
 export async function previewBankImportFromEmail(
   operaDb: Knex,
-  llm: LlmService,
+  llm: LlmService | null,
   attachments: EmailAttachmentProvider,
   input: PreviewFromEmailInput,
+  extractor: PdfExtractor | null = null,
+  appDb: Knex | null = null,
 ): Promise<PreviewResponse> {
   if (!Number.isFinite(input.emailId) || input.emailId <= 0) {
     return { success: false, error: 'email_id is required (positive number)' };
@@ -62,9 +65,15 @@ export async function previewBankImportFromEmail(
     };
   }
 
-  return previewBankImportFromPdf(operaDb, llm, {
-    pdfBytes: downloaded.bytes,
-    filename: downloaded.filename,
-    bankCode: input.bankCode,
-  });
+  return previewBankImportFromPdf(
+    operaDb,
+    llm,
+    {
+      pdfBytes: downloaded.bytes,
+      filename: downloaded.filename,
+      bankCode: input.bankCode,
+    },
+    extractor,
+    appDb,
+  );
 }

@@ -2766,15 +2766,29 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const operaDb = getOperaDb(req, res);
       if (!operaDb) return;
+      const appDb = getAppDb(req, res) ?? null;
       const llm = (ctx.llm as LlmService | undefined) ?? null;
+      const extractor =
+        (ctx as unknown as { bankPdfExtractor?: PdfExtractor })
+          .bankPdfExtractor ?? builtinPdfExtractor ?? null;
       const attachments = (ctx as unknown as {
         bankEmailAttachments?: EmailAttachmentProvider;
       }).bankEmailAttachments;
-      if (!llm || !attachments) {
+      if (!attachments) {
         res.status(503).json({
           success: false,
           error:
-            'ctx.llm and ctx.bankEmailAttachments must both be configured. SAM team must enable the LLM and email-attachment fetcher.',
+            'ctx.bankEmailAttachments must be configured (standalone: ' +
+            'wired via the IMAP adapter; SAM: enable the email-attachment fetcher).',
+        });
+        return;
+      }
+      if (!llm && !extractor) {
+        res.status(503).json({
+          success: false,
+          error:
+            'No PDF extractor configured. Standalone needs GEMINI_API_KEY ' +
+            '(wires ctx.bankPdfExtractor); SAM must provide ctx.llm.',
         });
         return;
       }
@@ -2791,6 +2805,8 @@ export function createRouter(ctx: AppContext): Router {
             ),
             bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
           },
+          extractor,
+          appDb,
         );
         res.json(result);
       } catch (err: any) {
