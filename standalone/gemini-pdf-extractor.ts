@@ -6,10 +6,7 @@
  * by default) with the same extraction prompt as legacy, returns the same
  * shape the plugin's preview-from-pdf service expects.
  *
- * Not yet ported from legacy (deferred to follow-up sessions, but the
- * shim degrades gracefully without them):
- *   - PDF extraction cache (sql_rag/pdf_extraction_cache.py)
- *   - Throttle / 429 retry wrapper (sql_rag/gemini_throttle.py)
+ * Not yet ported from legacy (deferred to follow-up sessions):
  *   - JSON repair fallback (legacy uses _repair_json on parse failure)
  *
  * The standalone wires this as a `bankPdfExtractor` adapter on every
@@ -25,6 +22,7 @@ import type {
   PdfExtractionResult,
   PdfExtractor,
 } from '../src/services/import-from-pdf.js';
+import { callGeminiWithThrottle } from './gemini-throttle.js';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 
@@ -287,18 +285,30 @@ export function buildGeminiPdfExtractor(
 
       logger?.info(`[gemini] extracting ${name} (${pdfBytes.byteLength} bytes)`);
       const base64 = Buffer.from(pdfBytes).toString('base64');
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { inlineData: { mimeType: 'application/pdf', data: base64 } },
-              { text: EXTRACTION_PROMPT },
+      // Throttle + 429 retry wrapper, faithful port of
+      // sql_rag/gemini_throttle.py:call_gemini_with_throttle.
+      const response = await callGeminiWithThrottle(
+        () =>
+          ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { mimeType: 'application/pdf', data: base64 } },
+                  { text: EXTRACTION_PROMPT },
+                ],
+              },
             ],
+          }),
+        {
+          filename: name,
+          logger: {
+            warn: (m) => logger?.warn(m),
+            info: (m) => logger?.info(m),
           },
-        ],
-      });
+        },
+      );
 
       const text = response.text ?? '';
       logger?.info(`[gemini] response ${text.length} chars`);
