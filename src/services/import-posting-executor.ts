@@ -42,6 +42,7 @@ import type {
   PdfExtractionResult,
 } from './import-from-pdf.js';
 import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
+import { autoAllocateReceipt, autoAllocatePayment } from './auto-allocate.js';
 import {
   getControlAccounts,
   getNacntType,
@@ -1279,8 +1280,8 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
     transactions,
     overrides: _overrides, // applied upstream by the route layer
     selectedRows,
-    autoAllocate: _autoAllocate, // follow-up port
-    autoReconcile: _autoReconcile, // follow-up port
+    autoAllocate,
+    autoReconcile: _autoReconcile, // wired in import-from-pdf.ts post-success
   }) {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -1393,8 +1394,9 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
 
       try {
         let entryNumber: string | null = null;
+        let postedRef: string | null = null;
         await operaDb.transaction(async (trx) => {
-          let result: { entry_number: string };
+          let result: { entry_number: string; transaction_ref?: string };
           if (action === 'nominal_payment' || action === 'nominal_receipt') {
             result = await postNominalEntry({ trx, bankCode, txn: prepared, defaults });
           } else if (action === 'bank_transfer') {
@@ -1403,6 +1405,59 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
             result = await postOneTransaction({ trx, bankCode, txn: prepared, defaults });
           }
           entryNumber = result.entry_number;
+          postedRef = (result as { transaction_ref?: string }).transaction_ref ?? null;
+
+          // Auto-allocate within the same trx so the allocation rolls
+          // back together with the posting on any failure. Faithful
+          // port of routes.py:4369-4397: only fires for sales_receipt
+          // and purchase_payment, against the matched ledger account.
+          if (
+            autoAllocate &&
+            (action === 'sales_receipt' || action === 'purchase_payment') &&
+            prepared.matchedAccount
+          ) {
+            const txnRef =
+              postedRef ?? prepared.reference ?? prepared.name.slice(0, 20);
+            try {
+              if (action === 'sales_receipt') {
+                const allocRes = await autoAllocateReceipt({
+                  trx,
+                  customerAccount: prepared.matchedAccount,
+                  receiptRef: txnRef,
+                  receiptAmount: Math.abs(prepared.amount),
+                  allocationDate: prepared.date,
+                  bankAccount: bankCode,
+                  description: prepared.memo || prepared.name,
+                });
+                if (!allocRes.success && allocRes.message) {
+                  warnings.push(
+                    `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
+                  );
+                }
+              } else {
+                const allocRes = await autoAllocatePayment({
+                  trx,
+                  supplierAccount: prepared.matchedAccount,
+                  paymentRef: txnRef,
+                  paymentAmount: Math.abs(prepared.amount),
+                  allocationDate: prepared.date,
+                  bankAccount: bankCode,
+                  description: prepared.memo || prepared.name,
+                });
+                if (!allocRes.success && allocRes.message) {
+                  warnings.push(
+                    `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
+                  );
+                }
+              }
+            } catch (allocErr) {
+              warnings.push(
+                `Row ${i + 1}: auto-allocate threw: ${
+                  allocErr instanceof Error ? allocErr.message : String(allocErr)
+                }`,
+              );
+            }
+          }
         });
         imported += 1;
         // Capture per-line record for production-correct restore
