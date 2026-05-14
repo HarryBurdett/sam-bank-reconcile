@@ -17,7 +17,9 @@
  * ctx.llm, so this file is never imported in SAM mode.
  */
 import { GoogleGenAI } from '@google/genai';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import type { Knex } from 'knex';
 import type { AppLogger } from '../src/app-context.js';
 import type {
   PdfExtractionResult,
@@ -124,6 +126,123 @@ export interface GeminiExtractorOptions {
   apiKey: string;
   model?: string;
   logger?: AppLogger;
+  /**
+   * Optional per-company per-app DB; when provided, extraction
+   * results are cached in the `extraction_cache` table keyed by
+   * SHA256 of the PDF bytes. Matches legacy
+   * sql_rag/pdf_extraction_cache.py (singleton per company).
+   */
+  appDb?: Knex | null;
+}
+
+interface CachedExtraction {
+  statement_info: Record<string, unknown>;
+  transactions: Array<Record<string, unknown>>;
+  model_name?: string;
+  file_size?: number;
+  transaction_count?: number;
+  extracted_at?: string;
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+async function cacheGet(
+  appDb: Knex | null | undefined,
+  hash: string,
+  logger: AppLogger | undefined,
+): Promise<CachedExtraction | null> {
+  if (!appDb) return null;
+  try {
+    const row = (await appDb('extraction_cache')
+      .where({ content_hash: hash })
+      .first()) as { extraction_json?: string } | undefined;
+    if (!row?.extraction_json) return null;
+    const parsed = JSON.parse(row.extraction_json) as CachedExtraction;
+    const txCount = parsed.transactions?.length ?? 0;
+    logger?.info(`[gemini] cache HIT for ${hash.slice(0, 12)}… (${txCount} transactions)`);
+    return parsed;
+  } catch (err) {
+    logger?.warn(`[gemini] cache lookup error: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function cachePut(
+  appDb: Knex | null | undefined,
+  hash: string,
+  data: CachedExtraction,
+  logger: AppLogger | undefined,
+): Promise<void> {
+  if (!appDb) return;
+  try {
+    const value = JSON.stringify(data);
+    // INSERT OR REPLACE — legacy semantics.
+    await appDb.raw(
+      `INSERT INTO extraction_cache (content_hash, extraction_json, created_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(content_hash) DO UPDATE SET extraction_json = excluded.extraction_json, created_at = CURRENT_TIMESTAMP`,
+      [hash, value],
+    );
+    logger?.info(
+      `[gemini] cache STORE for ${hash.slice(0, 12)}… (${data.transactions?.length ?? 0} transactions)`,
+    );
+  } catch (err) {
+    logger?.warn(`[gemini] cache store error: ${(err as Error).message}`);
+  }
+}
+
+function parseResultJson(parsed: Record<string, unknown>): PdfExtractionResult {
+  const info = (parsed.statement_info ?? {}) as Record<string, unknown>;
+  const rawTransactions = Array.isArray(parsed.transactions)
+    ? (parsed.transactions as Array<Record<string, unknown>>)
+    : [];
+
+  const transactions = rawTransactions.map((t, i) => {
+    const moneyOut = typeof t.money_out === 'number' ? t.money_out : null;
+    const moneyIn = typeof t.money_in === 'number' ? t.money_in : null;
+    const amount =
+      moneyOut !== null && moneyOut !== 0
+        ? -Math.abs(moneyOut)
+        : moneyIn !== null
+          ? moneyIn
+          : 0;
+    const type =
+      moneyOut !== null && moneyOut !== 0
+        ? 'debit'
+        : moneyIn !== null && moneyIn !== 0
+          ? 'credit'
+          : typeof t.type === 'string'
+            ? t.type
+            : 'credit';
+    return {
+      date: typeof t.date === 'string' ? t.date : null,
+      name: typeof t.description === 'string' ? t.description : null,
+      memo: typeof t.description === 'string' ? t.description : null,
+      amount,
+      type,
+      balance: typeof t.balance === 'number' ? t.balance : null,
+      line_number: i + 1,
+    };
+  });
+
+  return {
+    bank_name: typeof info.bank_name === 'string' ? info.bank_name : null,
+    account_number:
+      typeof info.account_number === 'string' ? info.account_number : null,
+    sort_code: typeof info.sort_code === 'string' ? info.sort_code : null,
+    statement_date:
+      typeof info.statement_date === 'string' ? info.statement_date : null,
+    period_start:
+      typeof info.period_start === 'string' ? info.period_start : null,
+    period_end: typeof info.period_end === 'string' ? info.period_end : null,
+    opening_balance:
+      typeof info.opening_balance === 'number' ? info.opening_balance : null,
+    closing_balance:
+      typeof info.closing_balance === 'number' ? info.closing_balance : null,
+    transactions,
+  };
 }
 
 export function buildGeminiPdfExtractor(
@@ -132,6 +251,7 @@ export function buildGeminiPdfExtractor(
   const ai = new GoogleGenAI({ apiKey: opts.apiKey });
   const model = opts.model ?? DEFAULT_MODEL;
   const logger = opts.logger;
+  const appDb = opts.appDb ?? null;
 
   return {
     async extractFromPdf({ filePath, bytes, filename }) {
@@ -144,8 +264,28 @@ export function buildGeminiPdfExtractor(
       }
 
       const name = filename ?? filePath?.split('/').pop() ?? '<unnamed>.pdf';
-      logger?.info(`[gemini] extracting ${name} (${pdfBytes.byteLength} bytes)`);
+      const hash = sha256(pdfBytes);
 
+      // Cache lookup. Legacy invalidates entries with <5 transactions
+      // for PDFs > 50KB (suspected truncation). Mirror that here.
+      const cached = await cacheGet(appDb, hash, logger);
+      if (cached) {
+        const txCount = cached.transactions?.length ?? 0;
+        if (txCount >= 5 || pdfBytes.byteLength <= 50_000) {
+          return parseResultJson({
+            statement_info: cached.statement_info ?? {},
+            transactions: cached.transactions ?? [],
+          });
+        }
+        logger?.warn(
+          `[gemini] cache had ${txCount} transactions for ${pdfBytes.byteLength} byte PDF — invalidating and re-extracting`,
+        );
+        try {
+          if (appDb) await appDb('extraction_cache').where({ content_hash: hash }).delete();
+        } catch { /* tolerated */ }
+      }
+
+      logger?.info(`[gemini] extracting ${name} (${pdfBytes.byteLength} bytes)`);
       const base64 = Buffer.from(pdfBytes).toString('base64');
       const response = await ai.models.generateContent({
         model,
@@ -183,58 +323,26 @@ export function buildGeminiPdfExtractor(
         );
       }
 
-      // Map legacy's response shape onto the plugin's PdfExtractionResult.
-      const info = (parsed.statement_info ?? {}) as Record<string, unknown>;
-      const rawTransactions = Array.isArray(parsed.transactions)
-        ? (parsed.transactions as Array<Record<string, unknown>>)
-        : [];
+      const result = parseResultJson(parsed);
 
-      const transactions = rawTransactions.map((t, i) => {
-        const moneyOut = typeof t.money_out === 'number' ? t.money_out : null;
-        const moneyIn = typeof t.money_in === 'number' ? t.money_in : null;
-        // The SAM port's PdfExtractionResult uses SIGNED amounts —
-        // receipts positive, payments negative — for the balance chain
-        // walk in preview-from-pdf.ts. Gemini gives us split
-        // money_out / money_in, so fold them into a signed amount.
-        const amount =
-          moneyOut !== null && moneyOut !== 0
-            ? -Math.abs(moneyOut)
-            : moneyIn !== null
-              ? moneyIn
-              : 0;
-        const type =
-          moneyOut !== null && moneyOut !== 0
-            ? 'debit'
-            : moneyIn !== null && moneyIn !== 0
-              ? 'credit'
-              : (typeof t.type === 'string' ? t.type : 'credit');
-        return {
-          date: typeof t.date === 'string' ? t.date : null,
-          name: typeof t.description === 'string' ? t.description : null,
-          memo: typeof t.description === 'string' ? t.description : null,
-          amount,
-          type,
-          balance: typeof t.balance === 'number' ? t.balance : null,
-          line_number: i + 1,
-        };
-      });
-
-      const result: PdfExtractionResult = {
-        bank_name: typeof info.bank_name === 'string' ? info.bank_name : null,
-        account_number:
-          typeof info.account_number === 'string' ? info.account_number : null,
-        sort_code: typeof info.sort_code === 'string' ? info.sort_code : null,
-        statement_date:
-          typeof info.statement_date === 'string' ? info.statement_date : null,
-        period_start:
-          typeof info.period_start === 'string' ? info.period_start : null,
-        period_end: typeof info.period_end === 'string' ? info.period_end : null,
-        opening_balance:
-          typeof info.opening_balance === 'number' ? info.opening_balance : null,
-        closing_balance:
-          typeof info.closing_balance === 'number' ? info.closing_balance : null,
-        transactions,
-      };
+      // Persist to cache. Store the raw legacy shape so future SAM
+      // changes to parseResultJson() can re-derive without re-paying
+      // for the Gemini call.
+      await cachePut(
+        appDb,
+        hash,
+        {
+          statement_info: (parsed.statement_info ?? {}) as Record<string, unknown>,
+          transactions: Array.isArray(parsed.transactions)
+            ? (parsed.transactions as Array<Record<string, unknown>>)
+            : [],
+          model_name: model,
+          file_size: pdfBytes.byteLength,
+          transaction_count: result.transactions.length,
+          extracted_at: new Date().toISOString(),
+        },
+        logger,
+      );
       return result;
     },
   };

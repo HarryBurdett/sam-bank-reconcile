@@ -245,6 +245,11 @@ export async function loadCompany(
           apiKey: opts.geminiApiKey,
           model: opts.geminiModel ?? 'gemini-2.5-flash',
           logger: opts.logger,
+          // Per-company SQLite hosts the `extraction_cache` table
+          // (migration 001). Passing the handle here lets the
+          // extractor cache PDF results across re-uploads, matching
+          // legacy sql_rag/pdf_extraction_cache.py.
+          appDb,
         });
       opts.logger.info(
         `[${code}] Gemini PDF extractor wired (model=${opts.geminiModel ?? 'gemini-2.5-flash'})`,
