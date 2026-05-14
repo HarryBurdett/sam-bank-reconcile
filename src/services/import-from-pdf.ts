@@ -253,6 +253,53 @@ export async function importBankStatementFromPdf(
   }
 
   try {
+    // Closed-year guard: never create a new posting in a previous
+    // Opera nominal year. Faithful port of
+    // sql_rag/opera_config.get_open_year_start_date + the per-row check
+    // at routes.py:4189-4223. We materialise the error per-row and
+    // strip those rows from the effective selection so the executor
+    // never sees them.
+    let openYearStart: string | null = null;
+    try {
+      const rows = (await operaDb.raw(
+        `SELECT TOP 1 MIN(ncd_stdate) AS open_start
+         FROM nclndd WITH (NOLOCK)
+         WHERE ncd_year = (SELECT TOP 1 np_year FROM nparm WITH (NOLOCK))`,
+      )) as unknown as Array<{ open_start?: string | Date | null }>;
+      const raw = Array.isArray(rows) ? rows[0]?.open_start : null;
+      if (raw instanceof Date) {
+        openYearStart = raw.toISOString().slice(0, 10);
+      } else if (typeof raw === 'string' && raw.length >= 10) {
+        openYearStart = raw.slice(0, 10);
+      }
+    } catch (yrErr) {
+      // No nclndd / nparm available — treat as unconstrained. Legacy
+      // does the same (opera_config.py:592-595).
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[bank-reconcile] could not determine open-year start: ${
+          yrErr instanceof Error ? yrErr.message : String(yrErr)
+        } — closed-year guard skipped`,
+      );
+    }
+
+    const closedYearErrors: string[] = [];
+    const closedYearSkipSet = new Set<number>();
+    if (openYearStart) {
+      for (let i = 0; i < extracted.transactions.length; i++) {
+        const txn = extracted.transactions[i]!;
+        const txnDate = (txn.date ?? '').slice(0, 10);
+        if (!txnDate) continue;
+        if (txnDate < openYearStart) {
+          const rowNum = i + 1;
+          closedYearSkipSet.add(rowNum);
+          closedYearErrors.push(
+            `Row ${rowNum}: transaction date ${txnDate} is before the open nominal year start (${openYearStart}). Year-end has been performed; postings to closed years are not allowed. Edit the date or skip this row.`,
+          );
+        }
+      }
+    }
+
     // Resume-import skip: when the caller passes resume_import_id,
     // legacy reads bank_statement_transactions for that import and
     // skips any line whose posted_entry_number is already populated
@@ -288,14 +335,17 @@ export async function importBankStatementFromPdf(
 
     // Build the effective selectedRows set. selectedRows uses 1-based
     // line numbers (matches executor's i+1 convention). When the UI
-    // sends null we treat it as "post everything"; on resume we then
-    // subtract already-posted line numbers from a fully-populated list.
+    // sends null we treat it as "post everything"; on resume + closed-
+    // year exclusions we then subtract those line numbers from a
+    // fully-populated list.
     let effectiveSelected = input.selectedRows ?? null;
-    if (alreadyPosted.size > 0) {
+    if (alreadyPosted.size > 0 || closedYearSkipSet.size > 0) {
       const base =
         effectiveSelected ??
         Array.from({ length: extracted.transactions.length }, (_, i) => i + 1);
-      effectiveSelected = base.filter((n) => !alreadyPosted.has(n));
+      effectiveSelected = base.filter(
+        (n) => !alreadyPosted.has(n) && !closedYearSkipSet.has(n),
+      );
     }
 
     const result = await executor.postBankImport({
@@ -532,6 +582,7 @@ export async function importBankStatementFromPdf(
         records_failed: result.records_failed,
         skipped_count: result.skipped_count,
         warnings: result.warnings,
+        errors: closedYearErrors.length > 0 ? closedYearErrors : undefined,
         import_id: result.import_id ?? null,
         resume_import_id: overlap.resumeImportId,
         ...(reconciliationResult ? { reconciliation_result: reconciliationResult } : {}),
@@ -540,8 +591,9 @@ export async function importBankStatementFromPdf(
     }
     return {
       success: false,
-      error: result.errors.join('; ') || 'Import failed',
-      errors: result.errors,
+      error:
+        [...closedYearErrors, ...result.errors].join('; ') || 'Import failed',
+      errors: [...closedYearErrors, ...result.errors],
       warnings: result.warnings,
       resume_import_id: overlap.resumeImportId,
     };
