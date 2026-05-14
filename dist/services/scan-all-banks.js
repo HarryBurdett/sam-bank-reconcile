@@ -1,9 +1,99 @@
+/**
+ * scan_all_banks_for_statements — faithful TS port of
+ * apps/bank_reconcile/api/routes.py:6559 (1,375 lines).
+ *
+ * 8-step orchestration:
+ *   1. Bank discovery + lookup tables          (legacy: 6662-6712)
+ *   2. Email fetch (cached or live IMAP)       (legacy: 6714-6730)
+ *      + load statement tracking data         (legacy: 6720-6749)
+ *      + imported_pending_closings chain      (legacy: 6750-6789)
+ *   3. Email scan + classify + bucket          (legacy: 6873-7303)
+ *   4. Folder scan                             (legacy: 7306-7556)  — pending
+ *   4a. Cross-check by sort/acct               (legacy: 7557-7597)  — pending
+ *   4b. Sort statements                        (legacy: 7598-7605)
+ *   5. Sort + filter reconciled + finalize     (legacy: 7615-7905)
+ *      + draft annotation                     (legacy: 7647-7684)
+ *      + final cleanup                        (legacy: 7686-7805)
+ *      + per-bank extraction_status           (legacy: 7817-7861)
+ *      + sequential statement gating          (legacy: 7862-7906)
+ *
+ * Legacy uses six external dependencies the SAM port doesn't have yet:
+ *
+ *   - email_sync_manager.sync_all_providers()  — IMAP sync trigger.
+ *     SAM port reads IMAP live via the standalone IMAP adapter
+ *     (or SAM's ctx.emailIngest), no sync trigger needed.
+ *   - email_storage.get_emails_with_attachments() — cached emails.
+ *     SAM port reads live via mailbox.list(); same response shape.
+ *   - sql_rag.pdf_extraction_cache.get_extraction_cache()  — PDF
+ *     content cache. Without it the cached-info fast-path simply
+ *     does not fire; matches legacy's degraded behaviour when the
+ *     cache module is unavailable (try/except return).
+ *   - sql_rag.period_reconciliation.check_period_reconciled — used
+ *     in step 5 final cleanup. Same degradation: when the module
+ *     can't be imported, legacy line 7768 catches and continues.
+ *   - DeferredTransactionsDB.count_for_statement — used for
+ *     deferred_count. SAM port reads the migrated
+ *     deferred_transactions table directly (line ~565 below).
+ *   - email_storage.get_draft_statement_keys — read from migrated
+ *     bank_import_drafts table.
+ *
+ * Each of those gaps surfaces as a `logger.debug(...)` line in the
+ * legacy itself, so this port matches legacy behaviour when the
+ * dependency is absent.
+ */
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { detectBankFromEmail, extractStatementNumberFromFilename, isBankStatementAttachment, } from './email-helpers.js';
 import { getAllStatementTrackingData, } from './statement-tracking.js';
 import { sortStatementsByChain, filterFullyReconciledStatements, } from './scan-chain-ordering.js';
 import { buildOperaSePeriodReconciliationDs, checkPeriodReconciled, } from './period-reconciliation.js';
 import { markStatementReconciled } from './statement-files.js';
 import { autoCleanResolvedDefers } from './deferred-items.js';
+/**
+ * Read opening/closing/period balances from the per-PDF extraction
+ * cache when the bank_statement_imports tracking has no row for
+ * this filename yet. Hashes the PDF (SHA256), queries
+ * extraction_cache, parses statement_info from the cached
+ * extraction_json. Returns null when:
+ *   - the file isn't readable
+ *   - no cache row for the hash
+ *   - the JSON is malformed or missing opening/closing
+ *
+ * Faithful port of legacy step-4 fallback (routes.py:6440 which
+ * calls `pdf_extraction_cache.get_extraction_cache()` keyed by
+ * file hash). Means a statement that's been Analysed but not yet
+ * Imported still shows balances in the Bank Statements grid
+ * instead of being stuck at "Pending".
+ */
+async function readBalancesFromExtractionCache(appDb, filePath, logger) {
+    try {
+        const bytes = await readFile(filePath);
+        const hash = createHash('sha256').update(bytes).digest('hex');
+        const row = (await appDb('extraction_cache')
+            .where({ content_hash: hash })
+            .first());
+        if (!row?.extraction_json)
+            return null;
+        const parsed = JSON.parse(row.extraction_json);
+        const info = parsed.statement_info ?? {};
+        const opening = typeof info.opening_balance === 'number' ? info.opening_balance : null;
+        const closing = typeof info.closing_balance === 'number' ? info.closing_balance : null;
+        if (opening === null || closing === null)
+            return null;
+        return {
+            opening_balance: opening,
+            closing_balance: closing,
+            period_start: typeof info.period_start === 'string' ? info.period_start : null,
+            period_end: typeof info.period_end === 'string' ? info.period_end : null,
+            sort_code: typeof info.sort_code === 'string' ? info.sort_code : null,
+            account_number: typeof info.account_number === 'string' ? info.account_number : null,
+        };
+    }
+    catch (err) {
+        logger.debug(`extraction_cache fallback failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+    }
+}
 function normaliseSortAcct(value) {
     return (value ?? '').replace(/[-\s]/g, '').trim();
 }
@@ -453,12 +543,15 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                     stmt.folder = folderName;
                     stmt.is_imported =
                         fileIsImportedNr;
-                    // Cached statement info (from bank_statement_imports). Legacy
-                    // step 4 also queries the PDF extraction cache by hash — that
-                    // path needs a cache adapter and is left for later. The
+                    // Cached statement info (from bank_statement_imports). The
                     // tracking-data map keyed by filename gives us the same
-                    // opening/closing/period balances when the statement has been
-                    // imported before.
+                    // opening/closing/period balances when the statement has
+                    // been imported before. When that misses, fall back to the
+                    // PDF extraction cache (extraction_cache table, SHA256-
+                    // keyed) — faithful port of legacy step 4's `get_extraction_
+                    // _cache()` lookup at routes.py:6440. Lets the FE display
+                    // balances for statements that have been extracted via
+                    // Analyse but not yet successfully imported.
                     const cachedInfo = tracking.cached_stmt_info.get(filename);
                     if (cachedInfo && validateBalances) {
                         stmt.opening_balance = cachedInfo.opening_balance;
@@ -471,6 +564,21 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                             cachedInfo.account_number;
                         stmt.extraction_status =
                             'cached';
+                    }
+                    else if (validateBalances && appDb) {
+                        const extracted = await readBalancesFromExtractionCache(appDb, fullPath, logger);
+                        if (extracted) {
+                            stmt.opening_balance = extracted.opening_balance;
+                            stmt.closing_balance = extracted.closing_balance;
+                            stmt.period_start = extracted.period_start;
+                            stmt.period_end = extracted.period_end;
+                            stmt.sort_code =
+                                extracted.sort_code;
+                            stmt.account_number =
+                                extracted.account_number;
+                            stmt.extraction_status =
+                                'cached';
+                        }
                     }
                     // Folder-name prefix match (legacy 7411).
                     let matchedBankCode = null;
@@ -742,10 +850,23 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                 : statementsTotal > 0
                     ? 'incomplete'
                     : 'complete';
+        // Per-statement promotion only: a statement with cached balances
+        // (opening + closing both set) stays "ready" even when other
+        // statements on the same bank failed extraction. The legacy
+        // blanket promotion turned a folder full of stale PDFs into a
+        // wall of "Pending" rows that blocked the operator from
+        // processing the one current statement that DID extract. The
+        // pending_extraction signal now only fires for statements that
+        // are themselves missing balances.
         if (bank.extraction_status === 'incomplete') {
             for (const s of stmts) {
-                if (s.status === 'ready')
+                const hasBalances = s.opening_balance !== null &&
+                    s.opening_balance !== undefined &&
+                    s.closing_balance !== null &&
+                    s.closing_balance !== undefined;
+                if (s.status === 'ready' && !hasBalances) {
                     s.status = 'pending_extraction';
+                }
             }
         }
     }

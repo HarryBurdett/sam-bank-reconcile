@@ -164,18 +164,22 @@ export async function getAllStatementTrackingData(
     }
 
     // --- imported-not-reconciled keys / filenames ---
-    // Only classify as "imported but not reconciled" when the row
-    // actually persisted records. A bank_statement_imports stub with
-    // records_imported=0 AND transactions_imported=0 means an
-    // import attempt completed without writing anything to Opera —
-    // treating that as "imported" misleads the FE into hiding the
-    // statement under "already done". The row is still useful for
-    // the cached_stmt_info lookup (opening/closing) below, so we
-    // keep it in the result; we just don't flag it as imported.
-    const recordsImported = Number(row.records_imported ?? 0);
-    const txImported = Number(row.transactions_imported ?? 0);
-    const didImport = recordsImported > 0 || txImported > 0;
-    if (!isReconciled && !isManaged && didImport) {
+    // Faithful to legacy email/storage.py:1694 — any row whose
+    // target_system isn't archived/deleted AND is_reconciled=0 is
+    // classified as "imported but not reconciled". This drives the
+    // scan-all-banks "already processed" filter that keeps stale
+    // duplicate filenames out of the current statements list.
+    //
+    // NOTE: an EARLIER attempt to tighten this gate by requiring
+    // records_imported > 0 or transactions_imported > 0 broke the
+    // filtering of stub rows from prior test sessions (records=0
+    // stubs were correctly excluded from "imported" but they were
+    // also the only thing keeping their duplicate PDF filenames
+    // out of the current list, so the operator saw 42 statements
+    // instead of 1). The root cause — zero-record stubs being
+    // persisted at all — is fixed at the INSERT site in
+    // import-from-pdf.ts. New imports never write a stub row.
+    if (!isReconciled && !isManaged) {
       if (emailId !== null) {
         data.imported_nr_keys.add(ekey(emailId, attachmentId));
       }

@@ -41,6 +41,8 @@
  * legacy itself, so this port matches legacy behaviour when the
  * dependency is absent.
  */
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import type { Knex } from 'knex';
 import type { AppLogger as Logger } from '../app-context.js';
 import type { BankMailboxAdapter } from './scan-emails.js';
@@ -78,6 +80,73 @@ interface BankRow {
   reconciled_balance: number | null;
   current_balance: number | null;
   type: string | null;
+}
+
+/**
+ * Read opening/closing/period balances from the per-PDF extraction
+ * cache when the bank_statement_imports tracking has no row for
+ * this filename yet. Hashes the PDF (SHA256), queries
+ * extraction_cache, parses statement_info from the cached
+ * extraction_json. Returns null when:
+ *   - the file isn't readable
+ *   - no cache row for the hash
+ *   - the JSON is malformed or missing opening/closing
+ *
+ * Faithful port of legacy step-4 fallback (routes.py:6440 which
+ * calls `pdf_extraction_cache.get_extraction_cache()` keyed by
+ * file hash). Means a statement that's been Analysed but not yet
+ * Imported still shows balances in the Bank Statements grid
+ * instead of being stuck at "Pending".
+ */
+async function readBalancesFromExtractionCache(
+  appDb: Knex,
+  filePath: string,
+  logger: Logger,
+): Promise<{
+  opening_balance: number;
+  closing_balance: number;
+  period_start: string | null;
+  period_end: string | null;
+  sort_code: string | null;
+  account_number: string | null;
+} | null> {
+  try {
+    const bytes = await readFile(filePath);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    const row = (await appDb('extraction_cache')
+      .where({ content_hash: hash })
+      .first()) as { extraction_json?: string } | undefined;
+    if (!row?.extraction_json) return null;
+    const parsed = JSON.parse(row.extraction_json) as {
+      statement_info?: {
+        opening_balance?: number | null;
+        closing_balance?: number | null;
+        period_start?: string | null;
+        period_end?: string | null;
+        sort_code?: string | null;
+        account_number?: string | null;
+      };
+    };
+    const info = parsed.statement_info ?? {};
+    const opening = typeof info.opening_balance === 'number' ? info.opening_balance : null;
+    const closing = typeof info.closing_balance === 'number' ? info.closing_balance : null;
+    if (opening === null || closing === null) return null;
+    return {
+      opening_balance: opening,
+      closing_balance: closing,
+      period_start: typeof info.period_start === 'string' ? info.period_start : null,
+      period_end: typeof info.period_end === 'string' ? info.period_end : null,
+      sort_code: typeof info.sort_code === 'string' ? info.sort_code : null,
+      account_number: typeof info.account_number === 'string' ? info.account_number : null,
+    };
+  } catch (err) {
+    logger.debug(
+      `extraction_cache fallback failed for ${filePath}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
 }
 
 function normaliseSortAcct(value: string | null | undefined): string {
@@ -655,12 +724,15 @@ export async function scanAllBanksFaithful(
           (stmt as unknown as Record<string, unknown>).is_imported =
             fileIsImportedNr;
 
-          // Cached statement info (from bank_statement_imports). Legacy
-          // step 4 also queries the PDF extraction cache by hash — that
-          // path needs a cache adapter and is left for later. The
+          // Cached statement info (from bank_statement_imports). The
           // tracking-data map keyed by filename gives us the same
-          // opening/closing/period balances when the statement has been
-          // imported before.
+          // opening/closing/period balances when the statement has
+          // been imported before. When that misses, fall back to the
+          // PDF extraction cache (extraction_cache table, SHA256-
+          // keyed) — faithful port of legacy step 4's `get_extraction_
+          // _cache()` lookup at routes.py:6440. Lets the FE display
+          // balances for statements that have been extracted via
+          // Analyse but not yet successfully imported.
           const cachedInfo = tracking.cached_stmt_info.get(filename);
           if (cachedInfo && validateBalances) {
             stmt.opening_balance = cachedInfo.opening_balance;
@@ -673,6 +745,24 @@ export async function scanAllBanksFaithful(
               cachedInfo.account_number;
             (stmt as unknown as Record<string, unknown>).extraction_status =
               'cached';
+          } else if (validateBalances && appDb) {
+            const extracted = await readBalancesFromExtractionCache(
+              appDb,
+              fullPath,
+              logger,
+            );
+            if (extracted) {
+              stmt.opening_balance = extracted.opening_balance;
+              stmt.closing_balance = extracted.closing_balance;
+              stmt.period_start = extracted.period_start;
+              stmt.period_end = extracted.period_end;
+              (stmt as unknown as Record<string, unknown>).sort_code =
+                extracted.sort_code;
+              (stmt as unknown as Record<string, unknown>).account_number =
+                extracted.account_number;
+              (stmt as unknown as Record<string, unknown>).extraction_status =
+                'cached';
+            }
           }
 
           // Folder-name prefix match (legacy 7411).
@@ -992,9 +1082,24 @@ export async function scanAllBanksFaithful(
         : statementsTotal > 0
           ? 'incomplete'
           : 'complete';
+    // Per-statement promotion only: a statement with cached balances
+    // (opening + closing both set) stays "ready" even when other
+    // statements on the same bank failed extraction. The legacy
+    // blanket promotion turned a folder full of stale PDFs into a
+    // wall of "Pending" rows that blocked the operator from
+    // processing the one current statement that DID extract. The
+    // pending_extraction signal now only fires for statements that
+    // are themselves missing balances.
     if (bank.extraction_status === 'incomplete') {
       for (const s of stmts) {
-        if (s.status === 'ready') s.status = 'pending_extraction';
+        const hasBalances =
+          s.opening_balance !== null &&
+          s.opening_balance !== undefined &&
+          s.closing_balance !== null &&
+          s.closing_balance !== undefined;
+        if (s.status === 'ready' && !hasBalances) {
+          s.status = 'pending_extraction';
+        }
       }
     }
   }
