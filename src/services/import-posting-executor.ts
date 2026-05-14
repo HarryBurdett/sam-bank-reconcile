@@ -41,6 +41,7 @@ import type {
   ImportPostingExecutor,
   PdfExtractionResult,
 } from './import-from-pdf.js';
+import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
 import {
   getControlAccounts,
   getNacntType,
@@ -1319,6 +1320,12 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
 
     const selected = selectedRows ? new Set(selectedRows) : null;
 
+    // Aentries claimed earlier in this batch by the just-in-time
+    // duplicate check. Threaded across the loop so two identical-
+    // amount transactions on the same statement allocate to distinct
+    // existing aentries (matches legacy routes.py:4171-4180).
+    const consumedAtEntries = new Set<string>();
+
     for (let i = 0; i < transactions.length; i++) {
       const t = transactions[i]!;
       if (selected && !selected.has(i + 1) && !selected.has(i)) {
@@ -1354,6 +1361,35 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
         reference:
           (t as unknown as { reference?: string | null }).reference ?? null,
       };
+
+      // Just-in-time cashbook duplicate check. Faithful port of
+      // routes.py:4317-4348. Skipped for 'skip'/'defer' (handled
+      // above) — applied to every action that creates a new aentry.
+      try {
+        const dup = await checkCashbookDuplicateBeforePosting({
+          operaDb,
+          bankCode,
+          transactionDate: prepared.date,
+          signedAmountPounds: prepared.amount,
+          action,
+          excludeEntryNumbers: consumedAtEntries,
+          description: prepared.name || prepared.memo || '',
+        });
+        if (dup.isDuplicate) {
+          skipped += 1;
+          errors.push(`Row ${i + 1}: Skipped - ${dup.reason}`);
+          if (dup.entryNumber) consumedAtEntries.add(dup.entryNumber);
+          continue;
+        }
+      } catch (dupErr) {
+        // Don't block the post on dup-check failure; the legacy
+        // wrapper also logs and continues (routes.py:4347-4348).
+        warnings.push(
+          `Row ${i + 1}: pre-posting duplicate check failed: ${
+            dupErr instanceof Error ? dupErr.message : String(dupErr)
+          }`,
+        );
+      }
 
       try {
         let entryNumber: string | null = null;
