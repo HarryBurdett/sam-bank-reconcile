@@ -1,4 +1,4 @@
-import { checkCashbookDuplicateBeforePosting, checkTypeBlindAtranMatch, } from './pre-posting-duplicate-check.js';
+import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
 import { buildMatchContext, matchTransaction, } from './match-transaction.js';
 import { loadCustomerCandidates, loadSupplierCandidates, } from './bank-matcher.js';
 const EXTRACTION_PROMPT = `You are a bank-statement parser. Extract the
@@ -258,7 +258,6 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
         const candidateActions = txn.amount < 0
             ? ['purchase_payment', 'nominal_payment', 'sales_refund', 'bank_transfer']
             : ['sales_receipt', 'nominal_receipt', 'purchase_refund', 'bank_transfer'];
-        let probeHit = false;
         for (const probeAction of candidateActions) {
             try {
                 const dup = await checkCashbookDuplicateBeforePosting({
@@ -277,7 +276,6 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
                     txn.matched_entry_number = dup.entryNumber;
                     if (dup.entryNumber)
                         consumedEntries.add(dup.entryNumber);
-                    probeHit = true;
                     break;
                 }
             }
@@ -287,34 +285,17 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
                 break;
             }
         }
-        // Type-blind safety net: if NONE of the candidate at_types
-        // matched, do one type-blind atran probe over ±7 days. Catches
-        // posts that exist in Opera under an at_type the matcher would
-        // never have guessed (e.g. payee=supplier but Opera holds it as
-        // nominal_payment to that supplier's NL account). Faithful port
-        // of bank_import.py:1582 — invoked at preview time across the
-        // full transaction list.
-        if (!probeHit) {
-            try {
-                const blind = await checkTypeBlindAtranMatch({
-                    operaDb,
-                    bankCode: bank.code,
-                    transactionDate: String(txn.date).slice(0, 10),
-                    signedAmountPounds: Number(txn.amount),
-                    excludeEntryNumbers: consumedEntries,
-                });
-                if (blind.isDuplicate && blind.entryNumber) {
-                    txn.is_duplicate = true;
-                    txn.action = 'skip';
-                    txn.skip_reason = `Already posted: ${blind.reason}`;
-                    txn.matched_entry_number = blind.entryNumber;
-                    consumedEntries.add(blind.entryNumber);
-                }
-            }
-            catch {
-                /* tolerated */
-            }
-        }
+        // NOTE: No type-blind safety net at preview time. Legacy only
+        // runs `_is_already_posted_typeblind` inside the matcher's
+        // per-txn `_is_already_posted` after an action has been
+        // assigned (bank_import.py:1582). At preview time, running a
+        // ±7d sign-aware atran probe against every row was producing
+        // false positives — any unrelated same-amount entry in Opera
+        // within 14 days would flag a legitimate statement line as
+        // "Already posted" and block the operator. The pre-posting
+        // executor still calls the type-blind helper as a safety net
+        // at import time, where the action is known and the false-
+        // positive risk is lower.
     }
     // Full _match_transaction pipeline. Faithful port of
     // bank_import.py:1297-1495 (the function _match_transaction).
