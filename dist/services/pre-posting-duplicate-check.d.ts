@@ -63,5 +63,18 @@ export interface PrePostingDuplicateCheckResult {
         reason: string;
     } | null;
 }
+/**
+ * Public entry point for the type-blind check. Use directly when the
+ * matcher couldn't assign an action; the type-aware path calls it
+ * internally as a fallback after a no-match return.
+ */
+export declare function checkTypeBlindAtranMatch(args: {
+    operaDb: Knex;
+    bankCode: string;
+    transactionDate: string;
+    signedAmountPounds: number;
+    excludeEntryNumbers?: Iterable<string>;
+    dateToleranceDays?: number;
+}): Promise<PrePostingDuplicateCheckResult>;
 export declare function checkCashbookDuplicateBeforePosting(args: PrePostingDuplicateCheckArgs): Promise<PrePostingDuplicateCheckResult>;
 //# sourceMappingURL=pre-posting-duplicate-check.d.ts.map

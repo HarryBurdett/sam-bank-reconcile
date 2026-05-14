@@ -365,14 +365,48 @@ function calculateOpeningBalance(
   return openingA;
 }
 
+// Bank-statement summary lines Gemini sometimes returns as
+// transactions. They contain the start/end balance for the statement
+// period and would post as bogus £0 (or worse, the balance value)
+// transactions if not filtered. Faithful port of
+// statement_reconcile.py:1099 skip list.
+const BALANCE_LINE_DESCRIPTIONS = new Set([
+  'start balance',
+  'end balance',
+  'opening balance',
+  'closing balance',
+  'balance brought forward',
+  'balance carried forward',
+  'previous balance',
+  'balance b/f',
+  'balance c/f',
+]);
+
+function isBalanceOnlyLine(description: string | null | undefined): boolean {
+  if (!description) return false;
+  return BALANCE_LINE_DESCRIPTIONS.has(description.trim().toLowerCase());
+}
+
 function parseResultJson(
   parsed: Record<string, unknown>,
   logger?: AppLogger,
 ): PdfExtractionResult {
   const info = (parsed.statement_info ?? {}) as Record<string, unknown>;
-  const rawTransactions = Array.isArray(parsed.transactions)
+  const rawTransactionsAll = Array.isArray(parsed.transactions)
     ? (parsed.transactions as Array<Record<string, unknown>>)
     : [];
+
+  // Drop summary "Start Balance / End Balance / etc." rows before any
+  // further processing — balance-chain calc, fingerprinting, and
+  // bucketing all need real transactions only.
+  const rawTransactions = rawTransactionsAll.filter((t) => {
+    const desc = typeof t.description === 'string' ? t.description : '';
+    if (isBalanceOnlyLine(desc)) {
+      logger?.info(`[gemini] skipping balance-only line: ${desc.trim()}`);
+      return false;
+    }
+    return true;
+  });
 
   const transactions = rawTransactions.map((t, i) => {
     const moneyOut = typeof t.money_out === 'number' ? t.money_out : null;

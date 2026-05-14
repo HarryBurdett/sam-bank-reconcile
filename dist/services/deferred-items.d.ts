@@ -41,6 +41,25 @@ export declare function deleteDeferredItems(appDb: Knex, bankCode: string, ids?:
     deleted: number;
     error?: string;
 }>;
+/**
+ * Auto-clean defer audit rows whose transaction has since appeared
+ * in Opera atran for this bank — i.e. the operator entered the
+ * transaction manually after deferring it. Faithful port of
+ * `_auto_clean_resolved_defers` (apps/bank_reconcile/api/routes.py:133).
+ *
+ * Match criteria:
+ *   - same bank (at_acnt)
+ *   - signed amount in pence matches at_value (within ±1p, sign-aware
+ *     per audit F14 — ABS-on-ABS would auto-clean a deferred receipt
+ *     against an unrelated payment of the same magnitude)
+ *   - at_pstdate >= open nominal year start (you can't post to closed
+ *     years anyway). When the nclndd/nparm lookup fails, default to a
+ *     2-year lookback per legacy line 162.
+ *
+ * Idempotent and silent. Fire from any scan-style endpoint to keep
+ * deferred_count accurate. Returns number of rows cleaned.
+ */
+export declare function autoCleanResolvedDefers(appDb: Knex, operaDb: Knex | null, bankCode: string): Promise<number>;
 export declare function deleteIgnoredTransactionByRecordId(appDb: Knex, recordId: number): Promise<{
     success: boolean;
     deleted: number;

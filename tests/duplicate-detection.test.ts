@@ -120,6 +120,9 @@ function makeOperaDb(state: State): any {
         return builder;
       },
       andWhereRaw: (sql: string, params: any[]) => {
+        // Post-gap-2 signed-aware comparisons: ABS(col - target).
+        // Pre-gap-2 sign-blind comparisons: ABS(ABS(col) - mag).
+        // Both supported here so older tests + new tests pass.
         if (sql.includes('ABS(ABS(st_trvalue) - ?) <= ?')) {
           fuzzyAbs = params?.[0] ?? null;
           fuzzyTolerance = params?.[1] ?? null;
@@ -140,6 +143,25 @@ function makeOperaDb(state: State): any {
         } else if (sql.includes('ABS(st_trvalue + ?)')) {
           rawAmountValue = params?.[0] ?? null;
           rawAmountKind = 'add';
+        } else if (sql.includes('ABS(st_trvalue - ?) <= ?')) {
+          // Signed fuzzy stran (new SAM behaviour matching legacy).
+          rawAmountValue = params?.[0] ?? null;
+          rawAmountKind = 'fuzzy-signed-le';
+          fuzzyTolerance = params?.[1] ?? null;
+        } else if (sql.includes('ABS(st_trvalue - ?) > 0.01')) {
+          fuzzyExclude01 = params?.[0] ?? null;
+        } else if (sql.includes('ABS(st_trvalue - ?) < 0.01')) {
+          rawAmountValue = params?.[0] ?? null;
+          rawAmountKind = 'sub-signed-stran';
+        } else if (sql.includes('ABS(st_trvalue - ?)')) {
+          rawAmountValue = params?.[0] ?? null;
+          rawAmountKind = 'sub-signed-stran';
+        } else if (sql.includes('ABS(pt_trvalue - ?) <= ?')) {
+          rawAmountValue = params?.[0] ?? null;
+          rawAmountKind = 'fuzzy-signed-le-pt';
+          fuzzyTolerance = params?.[1] ?? null;
+        } else if (sql.includes('ABS(pt_trvalue - ?) > 0.01')) {
+          fuzzyExclude01 = params?.[0] ?? null;
         } else if (sql.includes('ABS(pt_trvalue - ?)')) {
           rawAmountValue = params?.[0] ?? null;
           rawAmountKind = 'sub';
@@ -211,6 +233,25 @@ function makeOperaDb(state: State): any {
               Math.abs(r.st_trvalue + rawAmountValue) >= 0.01
             )
               return false;
+            // New signed-aware fuzzy stran: ABS(st_trvalue - target) <= tol
+            // AND > 0.01.
+            if (
+              rawAmountKind === 'fuzzy-signed-le' &&
+              rawAmountValue !== null &&
+              fuzzyTolerance !== null
+            ) {
+              const diff = Math.abs(r.st_trvalue - rawAmountValue);
+              if (diff > fuzzyTolerance) return false;
+              if (fuzzyExclude01 !== null && diff <= 0.01) return false;
+            }
+            // New signed-aware exact stran: ABS(st_trvalue - target) < 0.01
+            if (
+              rawAmountKind === 'sub-signed-stran' &&
+              rawAmountValue !== null &&
+              fuzzyTolerance === null &&
+              Math.abs(r.st_trvalue - rawAmountValue) >= 0.01
+            )
+              return false;
             // Cross-period amount check: ABS(ABS(st_trvalue)-?)<0.01
             if (
               fuzzyAbs !== null &&
@@ -254,6 +295,16 @@ function makeOperaDb(state: State): any {
               Math.abs(r.pt_trvalue - rawAmountValue) >= 0.01
             )
               return false;
+            // New signed-aware fuzzy ptran.
+            if (
+              rawAmountKind === 'fuzzy-signed-le-pt' &&
+              rawAmountValue !== null &&
+              fuzzyTolerance !== null
+            ) {
+              const diff = Math.abs(r.pt_trvalue - rawAmountValue);
+              if (diff > fuzzyTolerance) return false;
+              if (fuzzyExclude01 !== null && diff <= 0.01) return false;
+            }
             if (
               fuzzyAbs !== null &&
               fuzzyTolerance === null &&

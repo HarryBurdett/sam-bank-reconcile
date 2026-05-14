@@ -22,6 +22,94 @@ function addDays(ymd, days) {
     d.setUTCDate(d.getUTCDate() + days);
     return d.toISOString().slice(0, 10);
 }
+/**
+ * Type-blind atran lookup fallback. Faithful port of
+ * `_is_already_posted_typeblind` (bank_import.py:1584). Looks for ANY
+ * atran row on the bank with matching signed amount within ±7 days,
+ * regardless of at_type. Catches:
+ *   - Statements whose matcher couldn't classify the row (no action),
+ *     so the type-aware check can't run at all.
+ *   - Statements where the matcher picked the wrong type (e.g. action=
+ *     purchase_payment / at_type=5 but Opera holds the entry as
+ *     at_type=1 nominal_payment to that supplier's NL account — real
+ *     example: Cloudsis BB005 April 2026 HISCOX DD P100000754).
+ *
+ * Sign-aware: signedPence carries the sign (negative = payment) and
+ * is compared exactly to atran.at_value. Open-for-rec rule applies
+ * (ae_reclnum = 0 AND ae_remove = 0).
+ */
+async function typeBlindAtranMatch(operaDb, bankCode, transactionDate, signedAmountPounds, excludeEntryNumbers = [], dateToleranceDays = 7) {
+    const signedPence = Math.round(signedAmountPounds * 100);
+    if (signedPence === 0)
+        return { entryNumber: null, atType: null, postedDate: null };
+    const dateFrom = addDays(transactionDate, -dateToleranceDays);
+    const dateTo = addDays(transactionDate, dateToleranceDays);
+    const excludeList = Array.from(excludeEntryNumbers)
+        .map((e) => String(e).trim())
+        .filter((e) => e.length > 0);
+    let query = `
+    SELECT TOP 1 t.at_entry AS ae_entry, t.at_pstdate AS pstdate, t.at_type AS at_type
+    FROM atran t WITH (NOLOCK)
+    JOIN aentry a WITH (NOLOCK)
+      ON a.ae_entry = t.at_entry AND a.ae_acnt = t.at_acnt
+    WHERE t.at_acnt = ?
+      AND t.at_value = ?
+      AND t.at_pstdate BETWEEN ? AND ?
+      AND a.ae_reclnum = 0
+      AND a.ae_remove = 0`;
+    const bindings = [bankCode, signedPence, dateFrom, dateTo];
+    if (excludeList.length > 0) {
+        const placeholders = excludeList.map(() => '?').join(',');
+        query += ` AND RTRIM(a.ae_entry) NOT IN (${placeholders})`;
+        bindings.push(...excludeList);
+    }
+    query += ` ORDER BY ABS(DATEDIFF(day, t.at_pstdate, ?))`;
+    bindings.push(transactionDate);
+    try {
+        const rows = (await operaDb.raw(query, bindings));
+        if (Array.isArray(rows) && rows.length > 0) {
+            const r = rows[0];
+            const postedDate = r.pstdate instanceof Date
+                ? r.pstdate.toISOString().slice(0, 10)
+                : typeof r.pstdate === 'string'
+                    ? r.pstdate.slice(0, 10)
+                    : null;
+            return {
+                entryNumber: String(r.ae_entry ?? '').trim() || null,
+                atType: r.at_type != null ? Number(r.at_type) : null,
+                postedDate,
+            };
+        }
+    }
+    catch {
+        // Tolerated — caller falls back to "no duplicate" on query failure.
+    }
+    return { entryNumber: null, atType: null, postedDate: null };
+}
+/**
+ * Public entry point for the type-blind check. Use directly when the
+ * matcher couldn't assign an action; the type-aware path calls it
+ * internally as a fallback after a no-match return.
+ */
+export async function checkTypeBlindAtranMatch(args) {
+    const hit = await typeBlindAtranMatch(args.operaDb, args.bankCode, args.transactionDate, args.signedAmountPounds, args.excludeEntryNumbers, args.dateToleranceDays ?? 7);
+    if (hit.entryNumber) {
+        return {
+            isDuplicate: true,
+            entryNumber: hit.entryNumber,
+            reason: `Already in Opera as ${hit.entryNumber} ` +
+                `(at_type=${hit.atType ?? '?'}, posted ${hit.postedDate ?? '?'}) ` +
+                `— type-blind match on ${args.bankCode} ` +
+                `${args.signedAmountPounds.toFixed(2)} ±${args.dateToleranceDays ?? 7}d`,
+        };
+    }
+    return {
+        isDuplicate: false,
+        entryNumber: null,
+        reason: `no type-blind cashbook match for ${args.bankCode} ` +
+            `(${args.signedAmountPounds.toFixed(2)}, ${args.transactionDate})`,
+    };
+}
 export async function checkCashbookDuplicateBeforePosting(args) {
     const { operaDb, bankCode, transactionDate, signedAmountPounds, action, excludeEntryNumbers, dateToleranceDays = 1, } = args;
     const expectedAtType = AT_TYPE_FOR_ACTION[action];
@@ -136,6 +224,22 @@ export async function checkCashbookDuplicateBeforePosting(args) {
             // eslint-disable-next-line no-console
             console.warn(`[bank-reconcile] ledger allocation hint failed: ${advErr instanceof Error ? advErr.message : String(advErr)}`);
         }
+    }
+    // Type-aware found nothing AND no ledger advisory. Fall through to
+    // the type-blind atran lookup as a safety net. Faithful port of
+    // bank_import.py:1572-1582. Catches the case where Opera holds the
+    // entry under a different at_type than the matcher assigned
+    // (HISCOX-as-supplier-but-posted-as-nominal class of bug). Uses
+    // ±7d window like legacy, sign-aware.
+    const blind = await typeBlindAtranMatch(operaDb, bankCode, transactionDate, signedAmountPounds, excludeEntryNumbers ?? [], 7);
+    if (blind.entryNumber) {
+        return {
+            isDuplicate: true,
+            entryNumber: blind.entryNumber,
+            reason: `Already in Opera as ${blind.entryNumber} ` +
+                `(at_type=${blind.atType ?? '?'}, posted ${blind.postedDate ?? '?'}) ` +
+                `— type-blind match (type-aware ${action} missed)`,
+        };
     }
     return {
         isDuplicate: false,

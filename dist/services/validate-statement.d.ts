@@ -21,6 +21,13 @@ export interface ValidateStatementInput {
     statementNumber?: number | null;
     /** ISO date string YYYY-MM-DD. */
     statementDate?: string | null;
+    /** Optional per-app DB. When provided, validate-statement consults
+     *  bank_statement_imports for closings of imports that are imported
+     *  but not yet reconciled — those closings chain forward virtually
+     *  so the next statement can be processed even though
+     *  nbank.nk_recbal hasn't been advanced yet. Faithful port of
+     *  routes.py:1504 imported_pending_closings. */
+    appDb?: Knex | null;
 }
 export interface ValidateStatementResponse {
     valid: boolean;

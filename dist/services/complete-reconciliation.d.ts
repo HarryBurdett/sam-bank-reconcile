@@ -41,6 +41,13 @@ export interface CompleteReconciliationInput {
     statementTransactions: Array<unknown>;
     /** Skip closing balance validation (operator-confirmed partial). */
     partial?: boolean;
+    /** Statement period bounds (YYYY-MM-DD). When both supplied, every
+     *  matched entry must have at_pstdate within the period or the
+     *  reconcile is refused. Faithful port of legacy F12 fix
+     *  (routes.py:10894 — uses atran.at_pstdate joined to aentry,
+     *  NOT ae_lstdate which is bumped by unrelated edits). */
+    periodStart?: string | null;
+    periodEnd?: string | null;
 }
 export interface CompleteReconciliationResponse extends MarkReconciledResponse {
     entries_reconciled?: number;

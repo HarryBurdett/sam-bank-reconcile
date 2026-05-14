@@ -1,6 +1,7 @@
 import { generateImportFingerprint, } from './duplicate-detection.js';
 import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
 import { autoAllocateReceipt, autoAllocatePayment } from './auto-allocate.js';
+import { executeWithDeadlockRetry, isRecordLocked } from '../_shared/index.js';
 import { getControlAccounts, getNacntType, getNextId, getNextJournal, getPeriodForDate, generateOperaUniqueId, incrementAtypeEntry, insertNjmemo, updateNacntBalance, updateNbankBalance, } from '../_shared/index.js';
 const AT_TYPE_FOR_ACTION = {
     sales_receipt: 4,
@@ -1080,10 +1081,47 @@ export const bankImportPostingExecutor = {
                 // wrapper also logs and continues (routes.py:4347-4348).
                 warnings.push(`Row ${i + 1}: pre-posting duplicate check failed: ${dupErr instanceof Error ? dupErr.message : String(dupErr)}`);
             }
+            // Pre-lock check on the customer/supplier master row. Faithful
+            // port of `check_record_locked` (opera_sql_import.py:cf9cbde).
+            // Catches the locked-by-another-user case BEFORE opening a
+            // multi-table posting transaction that would block mid-write.
+            // Skip for nominal_payment / nominal_receipt / bank_transfer —
+            // they don't update sname or pname.
+            if (prepared.matchedAccount &&
+                (action === 'sales_receipt' || action === 'sales_refund')) {
+                const locked = await isRecordLocked(operaDb, {
+                    table: 'sname',
+                    keyColumn: 'sn_account',
+                    keyValue: prepared.matchedAccount,
+                });
+                if (locked) {
+                    errors.push(`Row ${i + 1}: customer ${prepared.matchedAccount} is locked ` +
+                        `by another Opera user — try again in a moment`);
+                    failed += 1;
+                    continue;
+                }
+            }
+            else if (prepared.matchedAccount &&
+                (action === 'purchase_payment' || action === 'purchase_refund')) {
+                const locked = await isRecordLocked(operaDb, {
+                    table: 'pname',
+                    keyColumn: 'pn_account',
+                    keyValue: prepared.matchedAccount,
+                });
+                if (locked) {
+                    errors.push(`Row ${i + 1}: supplier ${prepared.matchedAccount} is locked ` +
+                        `by another Opera user — try again in a moment`);
+                    failed += 1;
+                    continue;
+                }
+            }
             try {
                 let entryNumber = null;
                 let postedRef = null;
-                await operaDb.transaction(async (trx) => {
+                // Deadlock retry: SQL Server 1205 victims get 3 retries with
+                // 100ms / 500ms / 1500ms backoff. Faithful port of
+                // execute_with_deadlock_retry (opera_sql_import.py:271).
+                await executeWithDeadlockRetry(operaDb, async (trx) => {
                     let result;
                     if (action === 'nominal_payment' || action === 'nominal_receipt') {
                         result = await postNominalEntry({ trx, bankCode, txn: prepared, defaults });
@@ -1148,7 +1186,7 @@ export const bankImportPostingExecutor = {
                             warnings.push(`Row ${i + 1}: auto-allocate threw: ${allocErr instanceof Error ? allocErr.message : String(allocErr)}`);
                         }
                     }
-                });
+                }, `import-row-${i + 1}-${action}`);
                 imported += 1;
                 // Capture per-line record for production-correct restore
                 // detection (bank_statement_transactions row written by the

@@ -1,4 +1,34 @@
 import { createHash } from 'crypto';
+/**
+ * stran trtype expected for a given matcher action.
+ *   sales_receipt → 'R'   (receipt against the customer)
+ *   sales_refund  → 'F'   (refund credit-note)
+ *   purchase_refund treated symmetrically against ptran below.
+ * Falls back to null when action is unknown — caller then uses the
+ * sign-derived default.
+ */
+const STRAN_TRTYPE_FOR_ACTION = {
+    sales_receipt: 'R',
+    sales_refund: 'F',
+};
+const PTRAN_TRTYPE_FOR_ACTION = {
+    purchase_payment: 'P',
+    purchase_refund: 'F',
+};
+function stranTrtype(action, amount) {
+    if (action && STRAN_TRTYPE_FOR_ACTION[action]) {
+        return STRAN_TRTYPE_FOR_ACTION[action];
+    }
+    // Sign-derived default (legacy SAM behaviour). Refunds aren't
+    // catchable without an explicit action; caller should pass it.
+    return amount >= 0 ? 'R' : 'F';
+}
+function ptranTrtype(action, amount) {
+    if (action && PTRAN_TRTYPE_FOR_ACTION[action]) {
+        return PTRAN_TRTYPE_FOR_ACTION[action];
+    }
+    return amount <= 0 ? 'P' : 'F';
+}
 function parseDate(input) {
     if (input instanceof Date) {
         if (Number.isNaN(input.getTime()))
@@ -120,7 +150,7 @@ async function fingerprintMatch(operaDb, name, amount, txnDate, bankCode) {
 // ---------------------------------------------------------------------
 // Strategy 2: exact match (date + amount + account)
 // ---------------------------------------------------------------------
-async function exactMatch(operaDb, amount, txnDate, account, bankCode) {
+async function exactMatch(operaDb, amount, txnDate, account, bankCode, action) {
     const candidates = [];
     const dateStr = dateIsoYmd(txnDate);
     if (bankCode) {
@@ -149,13 +179,32 @@ async function exactMatch(operaDb, amount, txnDate, account, bankCode) {
             // advisory
         }
     }
-    if (amount > 0) {
+    // Ledger probe routing:
+    //   When action is 'sales_*' / 'purchase_*', use the action-specific
+    //   trtype (R / F for stran, P / F for ptran). When action is
+    //   missing, fall back to a sign-derived default (legacy SAM
+    //   behaviour) — refunds won't be detected without an explicit
+    //   action, which is the legacy contract (duplicate_check.py only
+    //   probes ledger tables when action is a refund).
+    const isStranAction = action === 'sales_receipt' ||
+        action === 'sales_refund' ||
+        (!action && amount > 0);
+    const isPtranAction = action === 'purchase_payment' ||
+        action === 'purchase_refund' ||
+        (!action && amount < 0);
+    if (isStranAction) {
         try {
+            const trtype = stranTrtype(action, amount);
+            // Refunds (trtype='F') store st_trvalue as POSITIVE; receipts
+            // ('R') store it as NEGATIVE. Sign-aware comparison handles
+            // both: receipt amount > 0 should match negative st_trvalue;
+            // refund amount < 0 should match positive st_trvalue.
+            const target = trtype === 'F' ? Math.abs(amount) : -amount;
             const rows = (await operaDb('stran')
                 .whereRaw('RTRIM(st_account) = ?', [account])
                 .andWhere('st_trdate', dateStr)
-                .andWhereRaw('ABS(st_trvalue + ?) < 0.01', [amount])
-                .andWhere('st_trtype', 'R')
+                .andWhereRaw('ABS(st_trvalue - ?) < 0.01', [target])
+                .andWhere('st_trtype', trtype)
                 .select('st_unique', 'st_trdate', 'st_trvalue', 'st_trref', 'st_account'));
             for (const row of rows) {
                 candidates.push({
@@ -164,7 +213,7 @@ async function exactMatch(operaDb, amount, txnDate, account, bankCode) {
                     match_type: 'exact',
                     confidence: 0.9,
                     details: {
-                        matched_on: 'date+amount+customer',
+                        matched_on: `date+amount+customer+st_trtype=${trtype}`,
                         st_trdate: row.st_trdate ? String(row.st_trdate) : '',
                         st_trvalue: Number(row.st_trvalue ?? 0),
                     },
@@ -175,13 +224,17 @@ async function exactMatch(operaDb, amount, txnDate, account, bankCode) {
             // advisory
         }
     }
-    else {
+    if (isPtranAction) {
         try {
+            const trtype = ptranTrtype(action, amount);
+            // Refunds (trtype='F') store pt_trvalue as POSITIVE; payments
+            // ('P') store it as NEGATIVE. Sign-aware.
+            const target = trtype === 'F' ? Math.abs(amount) : amount;
             const rows = (await operaDb('ptran')
                 .whereRaw('RTRIM(pt_account) = ?', [account])
                 .andWhere('pt_trdate', dateStr)
-                .andWhereRaw('ABS(pt_trvalue - ?) < 0.01', [amount])
-                .andWhere('pt_trtype', 'P')
+                .andWhereRaw('ABS(pt_trvalue - ?) < 0.01', [target])
+                .andWhere('pt_trtype', trtype)
                 .select('pt_unique', 'pt_trdate', 'pt_trvalue', 'pt_trref', 'pt_account'));
             for (const row of rows) {
                 candidates.push({
@@ -190,7 +243,7 @@ async function exactMatch(operaDb, amount, txnDate, account, bankCode) {
                     match_type: 'exact',
                     confidence: 0.9,
                     details: {
-                        matched_on: 'date+amount+supplier',
+                        matched_on: `date+amount+supplier+pt_trtype=${trtype}`,
                         pt_trdate: row.pt_trdate ? String(row.pt_trdate) : '',
                         pt_trvalue: Number(row.pt_trvalue ?? 0),
                     },
@@ -239,21 +292,29 @@ async function fitIdMatch(operaDb, fitId) {
 // ---------------------------------------------------------------------
 // Strategy 3: fuzzy amount match (within tolerance, e.g. fees added)
 // ---------------------------------------------------------------------
-async function fuzzyAmountMatch(operaDb, amount, txnDate, account, tolerance) {
+async function fuzzyAmountMatch(operaDb, amount, txnDate, account, tolerance, action) {
     const candidates = [];
     const dateStr = dateIsoYmd(txnDate);
     const absAmount = Math.abs(amount);
     if (absAmount <= 0)
         return candidates;
     const toleranceAmount = absAmount * tolerance;
-    if (amount > 0) {
+    const isStranAction = action === 'sales_receipt' ||
+        action === 'sales_refund' ||
+        (!action && amount > 0);
+    const isPtranAction = action === 'purchase_payment' ||
+        action === 'purchase_refund' ||
+        (!action && amount < 0);
+    if (isStranAction) {
         try {
+            const trtype = stranTrtype(action, amount);
+            const target = trtype === 'F' ? Math.abs(amount) : -amount;
             const rows = (await operaDb('stran')
                 .whereRaw('RTRIM(st_account) = ?', [account])
                 .andWhere('st_trdate', dateStr)
-                .andWhereRaw('ABS(ABS(st_trvalue) - ?) <= ?', [absAmount, toleranceAmount])
-                .andWhereRaw('ABS(ABS(st_trvalue) - ?) > 0.01', [absAmount])
-                .andWhere('st_trtype', 'R')
+                .andWhereRaw('ABS(st_trvalue - ?) <= ?', [target, toleranceAmount])
+                .andWhereRaw('ABS(st_trvalue - ?) > 0.01', [target])
+                .andWhere('st_trtype', trtype)
                 .select('st_unique', 'st_trdate', 'st_trvalue', 'st_account'));
             for (const row of rows) {
                 const stValue = Math.abs(Number(row.st_trvalue ?? 0));
@@ -278,14 +339,16 @@ async function fuzzyAmountMatch(operaDb, amount, txnDate, account, tolerance) {
             // advisory
         }
     }
-    else {
+    if (isPtranAction) {
         try {
+            const trtype = ptranTrtype(action, amount);
+            const target = trtype === 'F' ? Math.abs(amount) : amount;
             const rows = (await operaDb('ptran')
                 .whereRaw('RTRIM(pt_account) = ?', [account])
                 .andWhere('pt_trdate', dateStr)
-                .andWhereRaw('ABS(ABS(pt_trvalue) - ?) <= ?', [absAmount, toleranceAmount])
-                .andWhereRaw('ABS(ABS(pt_trvalue) - ?) > 0.01', [absAmount])
-                .andWhere('pt_trtype', 'P')
+                .andWhereRaw('ABS(pt_trvalue - ?) <= ?', [target, toleranceAmount])
+                .andWhereRaw('ABS(pt_trvalue - ?) > 0.01', [target])
+                .andWhere('pt_trtype', trtype)
                 .select('pt_unique', 'pt_trdate', 'pt_trvalue', 'pt_account'));
             for (const row of rows) {
                 const ptValue = Math.abs(Number(row.pt_trvalue ?? 0));
@@ -384,7 +447,7 @@ function addDays(d, days) {
 function daysBetween(a, b) {
     return Math.abs(Math.round((a.getTime() - b.getTime()) / (24 * 60 * 60 * 1000)));
 }
-async function crossPeriodMatch(operaDb, amount, txnDate, account, days) {
+async function crossPeriodMatch(operaDb, amount, txnDate, account, days, action) {
     const candidates = [];
     const absAmount = Math.abs(amount);
     if (absAmount <= 0)
@@ -392,14 +455,22 @@ async function crossPeriodMatch(operaDb, amount, txnDate, account, days) {
     const startDate = dateIsoYmd(addDays(txnDate, -days));
     const endDate = dateIsoYmd(addDays(txnDate, days));
     const txnDateStr = dateIsoYmd(txnDate);
-    if (amount > 0) {
+    const isStranAction = action === 'sales_receipt' ||
+        action === 'sales_refund' ||
+        (!action && amount > 0);
+    const isPtranAction = action === 'purchase_payment' ||
+        action === 'purchase_refund' ||
+        (!action && amount < 0);
+    if (isStranAction) {
         try {
+            const trtype = stranTrtype(action, amount);
+            const target = trtype === 'F' ? Math.abs(amount) : -amount;
             const rows = (await operaDb('stran')
                 .whereRaw('RTRIM(st_account) = ?', [account])
                 .andWhereBetween('st_trdate', [startDate, endDate])
                 .andWhere('st_trdate', '!=', txnDateStr)
-                .andWhereRaw('ABS(ABS(st_trvalue) - ?) < 0.01', [absAmount])
-                .andWhere('st_trtype', 'R')
+                .andWhereRaw('ABS(st_trvalue - ?) < 0.01', [target])
+                .andWhere('st_trtype', trtype)
                 .select('st_unique', 'st_trdate', 'st_trvalue', 'st_account'));
             for (const row of rows) {
                 const postedDate = row.st_trdate ? new Date(row.st_trdate) : null;
@@ -424,14 +495,16 @@ async function crossPeriodMatch(operaDb, amount, txnDate, account, days) {
             // advisory
         }
     }
-    else {
+    if (isPtranAction) {
         try {
+            const trtype = ptranTrtype(action, amount);
+            const target = trtype === 'F' ? Math.abs(amount) : amount;
             const rows = (await operaDb('ptran')
                 .whereRaw('RTRIM(pt_account) = ?', [account])
                 .andWhereBetween('pt_trdate', [startDate, endDate])
                 .andWhere('pt_trdate', '!=', txnDateStr)
-                .andWhereRaw('ABS(ABS(pt_trvalue) - ?) < 0.01', [absAmount])
-                .andWhere('pt_trtype', 'P')
+                .andWhereRaw('ABS(pt_trvalue - ?) < 0.01', [target])
+                .andWhere('pt_trtype', trtype)
                 .select('pt_unique', 'pt_trdate', 'pt_trvalue', 'pt_account'));
             for (const row of rows) {
                 const postedDate = row.pt_trdate ? new Date(row.pt_trdate) : null;
@@ -516,16 +589,17 @@ export async function findDuplicates(operaDb, input) {
             candidates.push(...(await fitIdMatch(operaDb, input.fit_id)));
         }
         if (input.account) {
+            const action = input.action ?? null;
             // Strategy 2: exact (date+amount+account)
-            candidates.push(...(await exactMatch(operaDb, input.amount, txnDate, input.account, input.bank_code ?? null)));
+            candidates.push(...(await exactMatch(operaDb, input.amount, txnDate, input.account, input.bank_code ?? null, action)));
             // Strategy 3: fuzzy amount (within 5%)
-            candidates.push(...(await fuzzyAmountMatch(operaDb, input.amount, txnDate, input.account, 0.05)));
+            candidates.push(...(await fuzzyAmountMatch(operaDb, input.amount, txnDate, input.account, 0.05, action)));
             // Strategy 4: reference-based
             if (input.reference) {
                 candidates.push(...(await referenceMatch(operaDb, input.reference, input.account)));
             }
             // Strategy 5: cross-period (±7 days)
-            candidates.push(...(await crossPeriodMatch(operaDb, input.amount, txnDate, input.account, 7)));
+            candidates.push(...(await crossPeriodMatch(operaDb, input.amount, txnDate, input.account, 7, action)));
         }
         // Strategy 6: bank-level signed-amount (no account required)
         // Only runs when account-level strategies found nothing — catches

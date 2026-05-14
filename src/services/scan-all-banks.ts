@@ -64,6 +64,7 @@ import {
   checkPeriodReconciled,
 } from './period-reconciliation.js';
 import { markStatementReconciled } from './statement-files.js';
+import { autoCleanResolvedDefers } from './deferred-items.js';
 import type {
   BankWithStatements,
   StatementCandidate,
@@ -787,6 +788,17 @@ export async function scanAllBanksFaithful(
     extraction_status?: 'complete' | 'incomplete';
   }> = {};
   let totalStatements = 0;
+
+  // Auto-clean defer audit rows whose transaction has since been
+  // posted to Opera. Faithful port of `_auto_clean_resolved_defers`
+  // (routes.py:133). Runs once per scan, per bank, before computing
+  // deferred_count so the operator sees the corrected number. Silent
+  // and idempotent — no rows changed means no log noise.
+  if (appDb) {
+    for (const [code] of Object.entries(allBanks)) {
+      await autoCleanResolvedDefers(appDb, operaDb, code);
+    }
+  }
 
   for (const [code, bank] of Object.entries(allBanks)) {
     let stmts = bank.statements;

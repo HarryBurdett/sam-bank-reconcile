@@ -72,6 +72,57 @@ export async function completeReconciliation(operaDb, appDb, input) {
             error: 'Could not find entries to reconcile',
         };
     }
+    // Period-bound guard on at_pstdate. Faithful port of
+    // routes.py:10894 F12 — the canonical post date lives in
+    // atran.at_pstdate (joined to aentry via at_entry+at_acnt).
+    // ae_lstdate is bumped by ANY Opera operation so it's an
+    // inconsistent gate vs the matcher and duplicate-check (both use
+    // at_pstdate). Refuse to reconcile entries whose post date falls
+    // outside the supplied period.
+    if (input.periodStart && input.periodEnd) {
+        try {
+            const dateRows = (await operaDb.raw(`SELECT a.ae_entry AS ae_entry, MIN(t.at_pstdate) AS pstdate
+         FROM aentry a WITH (NOLOCK)
+         JOIN atran t WITH (NOLOCK)
+           ON a.ae_acnt = t.at_acnt AND a.ae_entry = t.at_entry
+         WHERE a.ae_acnt = ?
+           AND RTRIM(a.ae_entry) IN (${entryNumbers.map(() => '?').join(',')})
+         GROUP BY a.ae_entry`, [input.bankCode, ...entryNumbers]));
+            const dateByEntry = new Map();
+            if (Array.isArray(dateRows)) {
+                for (const r of dateRows) {
+                    const ent = (r.ae_entry ?? '').toString().trim();
+                    const d = r.pstdate instanceof Date
+                        ? r.pstdate.toISOString().slice(0, 10)
+                        : typeof r.pstdate === 'string'
+                            ? r.pstdate.slice(0, 10)
+                            : null;
+                    if (ent)
+                        dateByEntry.set(ent, d);
+                }
+            }
+            const outOfPeriod = [];
+            for (const ent of entryNumbers) {
+                const d = dateByEntry.get(ent);
+                if (!d)
+                    continue;
+                if (d < input.periodStart || d > input.periodEnd) {
+                    outOfPeriod.push(`${ent} (${d})`);
+                }
+            }
+            if (outOfPeriod.length > 0) {
+                const msg = `Entries outside statement period ${input.periodStart}..${input.periodEnd}: ` +
+                    outOfPeriod.join(', ');
+                return { success: false, errors: [msg], error: msg };
+            }
+        }
+        catch (err) {
+            // Tolerate query failures — matches legacy permissive behaviour
+            // when the join can't run.
+            // eslint-disable-next-line no-console
+            console.warn(`[bank-reconcile] period-bound check failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
     const totalValuePence = valueRows.reduce((sum, r) => sum + Number(r.ae_value ?? 0), 0);
     const totalValuePounds = totalValuePence / 100;
     const calculatedClosing = expectedOpening + totalValuePounds;

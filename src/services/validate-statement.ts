@@ -22,6 +22,13 @@ export interface ValidateStatementInput {
   statementNumber?: number | null;
   /** ISO date string YYYY-MM-DD. */
   statementDate?: string | null;
+  /** Optional per-app DB. When provided, validate-statement consults
+   *  bank_statement_imports for closings of imports that are imported
+   *  but not yet reconciled — those closings chain forward virtually
+   *  so the next statement can be processed even though
+   *  nbank.nk_recbal hasn't been advanced yet. Faithful port of
+   *  routes.py:1504 imported_pending_closings. */
+  appDb?: Knex | null;
 }
 
 export interface ValidateStatementResponse {
@@ -83,8 +90,42 @@ export async function validateStatementForReconciliation(
       input.statementNumber && Number.isFinite(input.statementNumber)
         ? Number(input.statementNumber)
         : lastStmtNo + 1;
-    const openingMatches =
+    let openingMatches =
       Math.abs(input.openingBalance - expectedOpening) < 0.01;
+
+    // Imported-pending tolerance: when the operator's prior statement
+    // was imported but not yet reconciled, nbank.nk_recbal still
+    // points at the OLD reconciled balance — but the next statement's
+    // opening should match the prior statement's CLOSING. Look up
+    // bank_statement_imports for any imports on this bank whose
+    // closing equals the supplied opening (within 1p). Faithful port
+    // of routes.py:1504 + _build_imported_pending_closings(92).
+    if (!openingMatches && input.appDb) {
+      try {
+        const rows = (await input.appDb('bank_statement_imports')
+          .where({ bank_code: bankAccount })
+          .andWhere('import_status', 'imported')
+          .andWhere((qb) => {
+            qb.where('is_reconciled', false)
+              .orWhereNull('is_reconciled')
+              .orWhere('is_reconciled', 0);
+          })
+          .whereNotNull('closing_balance')
+          .select('closing_balance')) as unknown as Array<{
+          closing_balance: number | string | null;
+        }>;
+        for (const r of rows) {
+          const closing = Number(r.closing_balance ?? 0);
+          if (Math.abs(closing - input.openingBalance) < 0.01) {
+            openingMatches = true;
+            break;
+          }
+        }
+      } catch {
+        /* lookup failure must not block — legacy parity */
+      }
+    }
+
     if (!openingMatches) {
       return {
         valid: false,

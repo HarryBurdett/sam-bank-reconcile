@@ -50,6 +50,14 @@ export interface CheckTransactionInput {
     fit_id?: string | null;
     /** Optional transaction reference. */
     reference?: string | null;
+    /** Optional matcher-derived action — when supplied, the stran/ptran
+     *  probes use the correct trtype filter (R/P for normal,
+     *  F for refunds). Without it, we fall back to a sign-derived
+     *  default that matches receipts/payments but NOT refunds — same
+     *  behaviour SAM has shipped, kept for backward-compat with callers
+     *  that don't classify rows. Faithful port of
+     *  duplicate_check.py:ACTION_TYPE_MAP. */
+    action?: string | null;
 }
 export declare function generateImportFingerprint(name: string, amount: number, txnDate: Date | string): string;
 export declare function extractHashFromFingerprint(fingerprint: string): string | null;

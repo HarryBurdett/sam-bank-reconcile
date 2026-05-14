@@ -20,7 +20,10 @@
  * preview lands.
  */
 import type { Knex } from 'knex';
-import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
+import {
+  checkCashbookDuplicateBeforePosting,
+  checkTypeBlindAtranMatch,
+} from './pre-posting-duplicate-check.js';
 import {
   buildMatchContext,
   matchTransaction,
@@ -497,6 +500,7 @@ export async function previewBankImportFromPdf(
       txn.amount < 0
         ? ['purchase_payment', 'nominal_payment', 'sales_refund', 'bank_transfer']
         : ['sales_receipt', 'nominal_receipt', 'purchase_refund', 'bank_transfer'];
+    let probeHit = false;
     for (const probeAction of candidateActions) {
       try {
         const dup = await checkCashbookDuplicateBeforePosting({
@@ -514,12 +518,40 @@ export async function previewBankImportFromPdf(
           txn.skip_reason = `Already posted: ${dup.reason}`;
           txn.matched_entry_number = dup.entryNumber;
           if (dup.entryNumber) consumedEntries.add(dup.entryNumber);
+          probeHit = true;
           break;
         }
       } catch {
         // Tolerate per-row probe errors — matches the JIT check's
         // policy of degrading to "not a duplicate" on lookup failure.
         break;
+      }
+    }
+    // Type-blind safety net: if NONE of the candidate at_types
+    // matched, do one type-blind atran probe over ±7 days. Catches
+    // posts that exist in Opera under an at_type the matcher would
+    // never have guessed (e.g. payee=supplier but Opera holds it as
+    // nominal_payment to that supplier's NL account). Faithful port
+    // of bank_import.py:1582 — invoked at preview time across the
+    // full transaction list.
+    if (!probeHit) {
+      try {
+        const blind = await checkTypeBlindAtranMatch({
+          operaDb,
+          bankCode: bank.code,
+          transactionDate: String(txn.date).slice(0, 10),
+          signedAmountPounds: Number(txn.amount),
+          excludeEntryNumbers: consumedEntries,
+        });
+        if (blind.isDuplicate && blind.entryNumber) {
+          txn.is_duplicate = true;
+          txn.action = 'skip';
+          txn.skip_reason = `Already posted: ${blind.reason}`;
+          txn.matched_entry_number = blind.entryNumber;
+          consumedEntries.add(blind.entryNumber);
+        }
+      } catch {
+        /* tolerated */
       }
     }
   }

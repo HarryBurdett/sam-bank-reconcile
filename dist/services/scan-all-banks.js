@@ -3,6 +3,7 @@ import { getAllStatementTrackingData, } from './statement-tracking.js';
 import { sortStatementsByChain, filterFullyReconciledStatements, } from './scan-chain-ordering.js';
 import { buildOperaSePeriodReconciliationDs, checkPeriodReconciled, } from './period-reconciliation.js';
 import { markStatementReconciled } from './statement-files.js';
+import { autoCleanResolvedDefers } from './deferred-items.js';
 function normaliseSortAcct(value) {
     return (value ?? '').replace(/[-\s]/g, '').trim();
 }
@@ -568,6 +569,16 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
     // without PDF cache (see scan-chain-ordering.ts).
     const banksWithStatements = {};
     let totalStatements = 0;
+    // Auto-clean defer audit rows whose transaction has since been
+    // posted to Opera. Faithful port of `_auto_clean_resolved_defers`
+    // (routes.py:133). Runs once per scan, per bank, before computing
+    // deferred_count so the operator sees the corrected number. Silent
+    // and idempotent — no rows changed means no log noise.
+    if (appDb) {
+        for (const [code] of Object.entries(allBanks)) {
+            await autoCleanResolvedDefers(appDb, operaDb, code);
+        }
+    }
     for (const [code, bank] of Object.entries(allBanks)) {
         let stmts = bank.statements;
         logger.info(`Step 5: bank ${code} has ${stmts.length} statements before filtering`);
