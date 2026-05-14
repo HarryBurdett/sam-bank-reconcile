@@ -19,7 +19,16 @@ export async function autoAllocateReceipt(args) {
         allocations: [],
         message: '',
     };
-    try {
+    // NB: do NOT wrap the body in try/catch. DB-level errors mid-
+    // allocation (salloc INSERT failure, deadlock, FK violation,
+    // ROWLOCK timeout) MUST propagate to abort the enclosing trx.
+    // Soft "no allocation target" answers below return success:false
+    // explicitly without throwing — those are the legitimate
+    // non-error outcomes. Audit 2026-05-15: pre-port TS wrapped the
+    // body in try/catch which converted DB errors into warnings and
+    // let the receipt commit without the allocation, decrementing
+    // sname.sn_currbal but leaving stran unallocated.
+    {
         // Locate the receipt row (st_trtype='R', open balance). Multiple
         // receipts can share a reference within a batch — pick the one
         // whose magnitude is closest to the expected amount (legacy
@@ -371,10 +380,6 @@ export async function autoAllocateReceipt(args) {
                     : `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) - clears account`;
         return result;
     }
-    catch (err) {
-        result.message = `Allocation failed: ${err instanceof Error ? err.message : String(err)}`;
-        return result;
-    }
 }
 /**
  * Allocate a posted supplier payment against outstanding supplier
@@ -390,7 +395,10 @@ export async function autoAllocatePayment(args) {
         allocations: [],
         message: '',
     };
-    try {
+    // See autoAllocateReceipt above — same atomicity reasoning. Soft
+    // "no allocation target" paths return success:false explicitly;
+    // DB-level errors propagate to abort the trx.
+    {
         const paymentRows = (await trx.raw(`SELECT id, pt_trref, pt_trvalue, pt_trbal, pt_paid, pt_supref, pt_unique
        FROM ptran WITH (NOLOCK)
        WHERE pt_account = ?
@@ -654,10 +662,6 @@ export async function autoAllocatePayment(args) {
             allocationMethod === 'invoice_reference'
                 ? `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) by reference`
                 : `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) - clears account`;
-        return result;
-    }
-    catch (err) {
-        result.message = `Allocation failed: ${err instanceof Error ? err.message : String(err)}`;
         return result;
     }
 }

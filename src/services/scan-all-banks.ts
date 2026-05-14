@@ -373,10 +373,14 @@ export async function scanAllBanksFaithful(
     if (pending && pending.has(target)) return true;
     return false;
   }
-  // openingUnblocksChain is used by the not-yet-ported step 4/5 chain
-  // check; kept here for parity with legacy. Reference once so the
-  // linter doesn't flag it.
-  void openingUnblocksChain;
+  // openingUnblocksChain is the chain-advance callback used by the
+  // chain-check at the bottom of this file. Lets the 3rd statement
+  // in a sequence through when the middle statement is imported-
+  // but-not-reconciled (`imported_pending_closings` contains its
+  // closing balance, which becomes the 3rd statement's expected
+  // opening). Legacy line 6774. Pre-port TS built the callback then
+  // discarded it with `void openingUnblocksChain` — audit 2026-05-15
+  // GAP-1.
 
   let totalEmailsScanned = 0;
   let totalPdfsFound = 0;
@@ -1264,6 +1268,15 @@ export async function scanAllBanksFaithful(
         effectiveReconciledBalance: effectiveRec,
         bankRecOpenings,
         filename: stmt.filename,
+        // Imported-but-not-reconciled chain advance: when an earlier
+        // statement has been imported (audit row exists) but not
+        // yet reconciled (Opera's nk_recbal hasn't moved), its
+        // closing balance virtually advances the chain so this
+        // statement can still process. Without this callback, the
+        // chain-check incorrectly classifies the next-in-line
+        // statement as `already_processed` and hides it.
+        openingUnblocksChain: (opening: number) =>
+          openingUnblocksChain(bank.bank_code, opening),
       });
       if (result.chainComplete) {
         stmt.status = 'already_processed';

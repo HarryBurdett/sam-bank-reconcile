@@ -2267,54 +2267,54 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
           ) {
             const txnRef =
               postedRef ?? prepared.reference ?? prepared.name.slice(0, 20);
-            try {
-              if (action === 'sales_receipt') {
-                // Extract a candidate gc_payment_id from the
-                // description. GoCardless payment IDs match the
-                // pattern PM<alphanumeric> (e.g. 'PM000ABCDEF12345'
-                // per opera_sql_import.py:7049). The lookup is a
-                // no-op when no candidate is present.
-                const descText = (prepared.memo || prepared.name) ?? '';
-                const gcMatch = descText.match(/\bPM[A-Z0-9]{6,}\b/);
-                const gcCandidate = gcMatch ? gcMatch[0] : null;
-                const allocRes = await autoAllocateReceipt({
-                  trx,
-                  customerAccount: prepared.matchedAccount,
-                  receiptRef: txnRef,
-                  receiptAmount: Math.abs(prepared.amount),
-                  allocationDate: prepared.date,
-                  bankAccount: bankCode,
-                  description: descText,
-                  gcPaymentId: gcCandidate,
-                  paymentRequestLookup: paymentRequestLookup ?? null,
-                });
-                if (!allocRes.success && allocRes.message) {
-                  warnings.push(
-                    `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
-                  );
-                }
-              } else {
-                const allocRes = await autoAllocatePayment({
-                  trx,
-                  supplierAccount: prepared.matchedAccount,
-                  paymentRef: txnRef,
-                  paymentAmount: Math.abs(prepared.amount),
-                  allocationDate: prepared.date,
-                  bankAccount: bankCode,
-                  description: prepared.memo || prepared.name,
-                });
-                if (!allocRes.success && allocRes.message) {
-                  warnings.push(
-                    `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
-                  );
-                }
+            // No outer try/catch — any DB-level allocation failure
+            // MUST abort the enclosing trx so the receipt/payment is
+            // rolled back together with the failed allocation. Soft
+            // "no allocation target" answers come back as
+            // {success:false, message:'...'} without throwing —
+            // those land as a warning and the trx commits the
+            // receipt as-is, which is correct (legacy behaviour).
+            // Audit 2026-05-15.
+            if (action === 'sales_receipt') {
+              // Extract a candidate gc_payment_id from the
+              // description. GoCardless payment IDs match the
+              // pattern PM<alphanumeric> (e.g. 'PM000ABCDEF12345'
+              // per opera_sql_import.py:7049). The lookup is a
+              // no-op when no candidate is present.
+              const descText = (prepared.memo || prepared.name) ?? '';
+              const gcMatch = descText.match(/\bPM[A-Z0-9]{6,}\b/);
+              const gcCandidate = gcMatch ? gcMatch[0] : null;
+              const allocRes = await autoAllocateReceipt({
+                trx,
+                customerAccount: prepared.matchedAccount,
+                receiptRef: txnRef,
+                receiptAmount: Math.abs(prepared.amount),
+                allocationDate: prepared.date,
+                bankAccount: bankCode,
+                description: descText,
+                gcPaymentId: gcCandidate,
+                paymentRequestLookup: paymentRequestLookup ?? null,
+              });
+              if (!allocRes.success && allocRes.message) {
+                warnings.push(
+                  `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
+                );
               }
-            } catch (allocErr) {
-              warnings.push(
-                `Row ${i + 1}: auto-allocate threw: ${
-                  allocErr instanceof Error ? allocErr.message : String(allocErr)
-                }`,
-              );
+            } else {
+              const allocRes = await autoAllocatePayment({
+                trx,
+                supplierAccount: prepared.matchedAccount,
+                paymentRef: txnRef,
+                paymentAmount: Math.abs(prepared.amount),
+                allocationDate: prepared.date,
+                bankAccount: bankCode,
+                description: prepared.memo || prepared.name,
+              });
+              if (!allocRes.success && allocRes.message) {
+                warnings.push(
+                  `Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`,
+                );
+              }
             }
           }
         }, `import-row-${i + 1}-${action}`);
