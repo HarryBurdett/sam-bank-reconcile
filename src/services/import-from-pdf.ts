@@ -28,6 +28,10 @@ import {
   validateBankCode,
   SqlInputValidationError,
 } from '../_shared/index.js';
+import {
+  validatePostingPeriod,
+  getLedgerTypeForTransaction,
+} from '../_shared/opera/period-validation.js';
 import { markEntriesReconciled } from './mark-reconciled.js';
 import { learnPattern } from './bank-pattern-learner.js';
 
@@ -307,6 +311,42 @@ export async function importBankStatementFromPdf(
       }
     }
 
+    // Belt-and-braces per-period status check. Faithful port of the
+    // routes.py:4226-4240 "secondary" guard — catches blocked /
+    // closed individual periods inside the open nominal year (i.e.
+    // the period exists in nclndd but has ncd_nlstat / ncd_slstat /
+    // ncd_plstat != 0). Uses the already-faithful
+    // validatePostingPeriod helper in _shared/opera/period-validation.ts.
+    const periodErrors: string[] = [];
+    const periodSkipSet = new Set<number>();
+    for (let i = 0; i < extracted.transactions.length; i++) {
+      const txn = extracted.transactions[i]!;
+      const rowNum = i + 1;
+      if (closedYearSkipSet.has(rowNum)) continue;
+      const action = (txn as unknown as { action?: string }).action ?? null;
+      if (!action || action === 'skip' || action === 'defer') continue;
+      const txnDate = (txn.date ?? '').slice(0, 10);
+      if (!txnDate) continue;
+      try {
+        const ledger = getLedgerTypeForTransaction(action);
+        const pv = await validatePostingPeriod(operaDb, txnDate, ledger);
+        if (!pv.is_valid) {
+          periodSkipSet.add(rowNum);
+          periodErrors.push(
+            `Row ${rowNum}: ${pv.error_message ?? 'Posting period not open'}`,
+          );
+        }
+      } catch (pvErr) {
+        // Tolerate per-row failures — match legacy line 4239-4240.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bank-reconcile] period validation skipped for row ${rowNum}: ${
+            pvErr instanceof Error ? pvErr.message : String(pvErr)
+          }`,
+        );
+      }
+    }
+
     // Resume-import skip: when the caller passes resume_import_id,
     // legacy reads bank_statement_transactions for that import and
     // skips any line whose posted_entry_number is already populated
@@ -420,6 +460,7 @@ export async function importBankStatementFromPdf(
     if (
       alreadyPosted.size > 0 ||
       closedYearSkipSet.size > 0 ||
+      periodSkipSet.size > 0 ||
       rejectedRefundSet.size > 0
     ) {
       const base =
@@ -429,6 +470,7 @@ export async function importBankStatementFromPdf(
         (n) =>
           !alreadyPosted.has(n) &&
           !closedYearSkipSet.has(n) &&
+          !periodSkipSet.has(n) &&
           !rejectedRefundSet.has(n),
       );
     }
@@ -724,7 +766,10 @@ export async function importBankStatementFromPdf(
         records_failed: result.records_failed,
         skipped_count: result.skipped_count,
         warnings: result.warnings,
-        errors: closedYearErrors.length > 0 ? closedYearErrors : undefined,
+        errors:
+          closedYearErrors.length + periodErrors.length > 0
+            ? [...closedYearErrors, ...periodErrors]
+            : undefined,
         import_id: result.import_id ?? null,
         resume_import_id: overlap.resumeImportId,
         ...(reconciliationResult ? { reconciliation_result: reconciliationResult } : {}),
@@ -734,8 +779,9 @@ export async function importBankStatementFromPdf(
     return {
       success: false,
       error:
-        [...closedYearErrors, ...result.errors].join('; ') || 'Import failed',
-      errors: [...closedYearErrors, ...result.errors],
+        [...closedYearErrors, ...periodErrors, ...result.errors].join('; ') ||
+        'Import failed',
+      errors: [...closedYearErrors, ...periodErrors, ...result.errors],
       warnings: result.warnings,
       resume_import_id: overlap.resumeImportId,
     };
