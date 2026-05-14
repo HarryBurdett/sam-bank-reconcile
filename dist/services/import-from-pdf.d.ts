@@ -112,6 +112,12 @@ export interface PeriodOverlapChecker {
         bankCode: string;
         periodStart: string | null;
         periodEnd: string | null;
+        /** Transaction dates from the extracted statement. Used as a
+         *  fallback when periodStart/periodEnd are absent — some PDFs
+         *  only print the statement date and we still need an effective
+         *  range to overlap-check against. Faithful port of legacy
+         *  import_orchestration.py:85-94. */
+        transactionDates?: ReadonlyArray<string | null>;
         filename: string;
         resumeImportId: number | null;
         skipOverlapCheck: boolean;

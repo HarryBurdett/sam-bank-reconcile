@@ -58,6 +58,7 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
         bankCode,
         periodStart: extracted.period_start,
         periodEnd: extracted.period_end,
+        transactionDates: extracted.transactions.map((t) => typeof t.date === 'string' ? t.date.slice(0, 10) : null),
         filename: input.filename ?? input.filePath.split('/').pop() ?? '',
         resumeImportId: input.resumeImportId ?? null,
         skipOverlapCheck: !!input.skipOverlapCheck,
@@ -342,15 +343,21 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
             paymentRequestLookup: input.paymentRequestLookup ?? null,
         });
         // Aggregate signed posted_lines into the receipt/payment totals
-        // legacy persists (routes.py:4498-4508). Declared at the outer
-        // scope so the success-branch's legacy result-shape keys can
-        // reference them without re-walking the array.
+        // legacy persists. Legacy filters strictly to the customer/
+        // supplier ledger postings:
+        //   total_receipts = sum where action == 'sales_receipt'
+        //   total_payments = sum where action == 'purchase_payment'
+        // routes.py:4411-4412. Pre-port TS bucketed every positive line as
+        // a receipt and every negative as a payment — inflating both
+        // totals with nominal/refund/transfer lines. The at_type provides
+        // the same discriminator: 4 = sales_receipt, 5 = purchase_payment.
+        // Audit 2026-05-14 HIGH.
         let totalReceipts = 0;
         let totalPayments = 0;
         for (const line of result.posted_lines ?? []) {
-            if (line.amount > 0)
+            if (line.at_type === 4 && line.amount > 0)
                 totalReceipts += line.amount;
-            else if (line.amount < 0)
+            else if (line.at_type === 5 && line.amount < 0)
                 totalPayments += Math.abs(line.amount);
         }
         // Faithful to legacy routes.py:4440 — only write the
@@ -560,14 +567,55 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
                     // Legacy convention: statement_line = original PDF row × 10
                     // (Opera reconcile screen expects increments of 10, with
                     // gaps preserved for unmatched/skipped rows). routes.py:4634.
-                    const entries = result.posted_lines.map((line) => ({
-                        entry_number: line.posted_entry_number,
-                        statement_line: line.line_number * 10,
-                    }));
+                    //
+                    // On resume-import, include the ALREADY-POSTED entries
+                    // from the prior batch so auto-reconcile marks the whole
+                    // statement, not just the latest sliver. Legacy at
+                    // routes.py:4243-4256 adds these into the `imported` list
+                    // (with `already_posted: true`) before the reconcile pass
+                    // at :4625-4634. Pre-port TS dropped already-posted lines
+                    // from `effectiveSelected` AND never re-added them for
+                    // reconcile, so resumed statements left earlier batches
+                    // unreconciled in Opera. Audit 2026-05-14 HIGH.
+                    const entries = [];
+                    const seenEntries = new Set();
+                    for (const line of result.posted_lines) {
+                        const key = String(line.posted_entry_number).trim();
+                        if (!key || seenEntries.has(key))
+                            continue;
+                        seenEntries.add(key);
+                        entries.push({
+                            entry_number: key,
+                            statement_line: line.line_number * 10,
+                        });
+                    }
+                    for (const [lineNumber, entryNumber] of alreadyPosted.entries()) {
+                        const key = String(entryNumber).trim();
+                        if (!key || seenEntries.has(key))
+                            continue;
+                        seenEntries.add(key);
+                        entries.push({
+                            entry_number: key,
+                            statement_line: lineNumber * 10,
+                        });
+                    }
                     let latestDate = null;
                     for (const line of result.posted_lines) {
                         if (line.post_date && (!latestDate || line.post_date > latestDate)) {
                             latestDate = line.post_date;
+                        }
+                    }
+                    // Also consider prior batches' dates when picking latestDate
+                    // so a final-line resume on an old statement uses the
+                    // earlier batch's most-recent date, not today's.
+                    if (alreadyPosted.size > 0) {
+                        for (let i = 0; i < extracted.transactions.length; i += 1) {
+                            const rowNum = i + 1;
+                            if (!alreadyPosted.has(rowNum))
+                                continue;
+                            const d = (extracted.transactions[i]?.date ?? '').slice(0, 10);
+                            if (d && (!latestDate || d > latestDate))
+                                latestDate = d;
                         }
                     }
                     if (!latestDate)

@@ -15,8 +15,29 @@ export const inMemoryImportLock = {
 };
 export function makeBankStatementOverlapChecker(appDb) {
     return {
-        async checkOverlap({ bankCode, periodStart, periodEnd, filename, resumeImportId, skipOverlapCheck, }) {
-            if (skipOverlapCheck || !periodStart || !periodEnd) {
+        async checkOverlap({ bankCode, periodStart, periodEnd, transactionDates, filename, resumeImportId, skipOverlapCheck, }) {
+            if (skipOverlapCheck) {
+                return { resumeImportId };
+            }
+            // Fall back to txn min/max dates when the statement has no
+            // explicit period_start / period_end. Some banks only print
+            // statement_date (not period range); without this fallback the
+            // overlap check would short-circuit entirely and operators
+            // could re-import the same statement under a renamed filename
+            // with no warning. Faithful port of import_orchestration.py:
+            // 85-94. Audit 2026-05-14 HIGH.
+            let effStart = periodStart;
+            let effEnd = periodEnd;
+            if ((!effStart || !effEnd) && transactionDates) {
+                const valid = transactionDates
+                    .filter((d) => typeof d === 'string' && d.length >= 10)
+                    .map((d) => d.slice(0, 10));
+                if (valid.length > 0) {
+                    effStart = effStart ?? valid.reduce((a, b) => (a < b ? a : b));
+                    effEnd = effEnd ?? valid.reduce((a, b) => (a > b ? a : b));
+                }
+            }
+            if (!effStart || !effEnd) {
                 return { resumeImportId };
             }
             try {
@@ -24,12 +45,18 @@ export function makeBankStatementOverlapChecker(appDb) {
                 // existence implies "imported". Earlier filter `.andWhereNot
                 // ({ import_status: 'failed' })` always errored and the catch
                 // swallowed the result, silently disabling overlap detection.
-                const row = (await appDb('bank_statement_imports')
+                // Exclude the current resume_import_id so a resume doesn't
+                // re-trigger overlap against itself. Audit 2026-05-14 HIGH.
+                const query = appDb('bank_statement_imports')
                     .where('bank_code', bankCode)
                     .andWhere(function overlap() {
                     // Two ranges overlap iff start <= other_end AND end >= other_start
-                    this.where('period_start', '<=', periodEnd).andWhere('period_end', '>=', periodStart);
-                })
+                    this.where('period_start', '<=', effEnd).andWhere('period_end', '>=', effStart);
+                });
+                if (resumeImportId != null) {
+                    query.andWhereNot('id', Number(resumeImportId));
+                }
+                const row = (await query
                     .orderBy('imported_at', 'desc')
                     .first());
                 if (!row)
@@ -44,7 +71,7 @@ export function makeBankStatementOverlapChecker(appDb) {
                 return {
                     overlapError: {
                         success: false,
-                        error: `Statement period ${periodStart}–${periodEnd} overlaps with ` +
+                        error: `Statement period ${effStart}–${effEnd} overlaps with ` +
                             `previously imported statement (id=${row.id ?? 'n/a'}, ` +
                             `${row.filename ?? 'unknown'}, ${row.period_start ?? '?'}–${row.period_end ?? '?'}). ` +
                             `Pass skip_overlap_check=true if intentional.`,

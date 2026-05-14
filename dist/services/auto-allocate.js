@@ -582,12 +582,19 @@ export async function autoAllocatePayment(args) {
                     ? row.pt_trdate.slice(0, 10)
                     : allocDateStr;
             const invPaid = newInvBal < 0.01 ? 'P' : ' ';
-            const setLastpay = newInvBal < 0.01 ? `, pt_lastpay = ?` : '';
+            // pt_lastpay: legacy sets this UNCONDITIONALLY on every
+            // allocation (full or partial). Pre-port TS only set it on full
+            // payment, so partially-allocated supplier invoices kept a stale
+            // pt_lastpay and Opera's aged-creditor reports lost the latest
+            // pay date. Audit 2026-05-14 HIGH.
+            // Source: opera_sql_import.py:7694 (`pt_lastpay_clause =
+            // f", pt_lastpay = '{inv_date}'"` — no full-paid gate).
             await trx.raw(`UPDATE ptran WITH (ROWLOCK)
          SET pt_trbal = ?,
              pt_paid = ?,
              pt_payday = ${newInvBal < 0.01 ? '?' : 'NULL'},
-             pt_payflag = ?${setLastpay},
+             pt_payflag = ?,
+             pt_lastpay = ?,
              datemodified = ?
          WHERE pt_account = ?
            AND RTRIM(pt_trref) = ?
@@ -606,6 +613,7 @@ export async function autoAllocatePayment(args) {
                     newInvBal,
                     invPaid,
                     nextPayflag,
+                    invDate,
                     nowStr,
                     supplierAccount,
                     alloc.ref,
