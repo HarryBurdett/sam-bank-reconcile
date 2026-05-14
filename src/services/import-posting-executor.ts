@@ -45,6 +45,13 @@ import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-che
 import { autoAllocateReceipt, autoAllocatePayment } from './auto-allocate.js';
 import { executeWithDeadlockRetry, isRecordLocked } from '../_shared/index.js';
 import {
+  assertAentryAtran,
+  assertLedgerRow,
+  assertBalancedPair,
+  verifyAentryCommitted,
+  PostingVerificationError,
+} from '../_shared/post-write-verify.js';
+import {
   getControlAccounts,
   getNacntType,
   getNextId,
@@ -152,22 +159,55 @@ interface PartyInfo {
   controlAccount: string;
 }
 
+function describeDbError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const e = err as Error & {
+    code?: string | number;
+    number?: number;
+    state?: number;
+    originalError?: { message?: string; info?: { message?: string } };
+  };
+  const parts: string[] = [];
+  if (e.message) parts.push(e.message);
+  if (e.code != null) parts.push(`code=${e.code}`);
+  if (e.number != null) parts.push(`sql#=${e.number}`);
+  if (e.state != null) parts.push(`state=${e.state}`);
+  const orig = e.originalError;
+  if (orig) {
+    const om = orig.message ?? orig.info?.message;
+    if (om) parts.push(`orig="${om}"`);
+  }
+  return parts.filter(Boolean).join(' | ') || `<no message> (${e.name ?? 'Error'})`;
+}
+
 async function loadCustomerInfo(
   trx: Knex,
   customerAccount: string,
   defaultControl: string,
 ): Promise<PartyInfo> {
-  const rows = (await trx.raw(
-    `SELECT TOP 1 sn_name, sn_region, sn_terrtry, sn_custype
-     FROM sname WITH (NOLOCK)
-     WHERE RTRIM(sn_account) = ?`,
-    [customerAccount],
-  )) as unknown as Array<{
+  let rows: Array<{
     sn_name: string | null;
     sn_region: string | null;
     sn_terrtry: string | null;
     sn_custype: string | null;
   }>;
+  try {
+    rows = (await trx.raw(
+      `SELECT TOP 1 sn_name, sn_region, sn_terrtry, sn_custype
+       FROM sname WITH (NOLOCK)
+       WHERE RTRIM(sn_account) = ?`,
+      [customerAccount],
+    )) as unknown as Array<{
+      sn_name: string | null;
+      sn_region: string | null;
+      sn_terrtry: string | null;
+      sn_custype: string | null;
+    }>;
+  } catch (err) {
+    throw new Error(
+      `sname lookup failed for customer '${customerAccount}': ${describeDbError(err)}`,
+    );
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error(`Customer account '${customerAccount}' not found in sname`);
   }
@@ -203,17 +243,29 @@ async function loadSupplierInfo(
   supplierAccount: string,
   defaultControl: string,
 ): Promise<PartyInfo> {
-  const rows = (await trx.raw(
-    `SELECT TOP 1 pn_name, pn_region, pn_terrtry, pn_custype
-     FROM pname WITH (NOLOCK)
-     WHERE RTRIM(pn_account) = ?`,
-    [supplierAccount],
-  )) as unknown as Array<{
+  let rows: Array<{
     pn_name: string | null;
     pn_region: string | null;
     pn_terrtry: string | null;
     pn_custype: string | null;
   }>;
+  try {
+    rows = (await trx.raw(
+      `SELECT TOP 1 pn_name, pn_region, pn_terrtry, pn_custype
+       FROM pname WITH (NOLOCK)
+       WHERE RTRIM(pn_account) = ?`,
+      [supplierAccount],
+    )) as unknown as Array<{
+      pn_name: string | null;
+      pn_region: string | null;
+      pn_terrtry: string | null;
+      pn_custype: string | null;
+    }>;
+  } catch (err) {
+    throw new Error(
+      `pname lookup failed for supplier '${supplierAccount}': ${describeDbError(err)}`,
+    );
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error(`Supplier account '${supplierAccount}' not found in pname`);
   }
@@ -324,7 +376,7 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       ?, ?, '    ', ?, ?, 0,
       ?, 0, 0, 0, ?,
       ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMPORT', ?,
+      0, ?, ?, 'BANK_IMP', ?,
       0, 0, '  ', ?, ?, 1
     )`,
     [
@@ -670,6 +722,39 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
     ],
   );
 
+  // --- Phase A verification (in-trx, NOLOCK reads of our own writes) ---
+  // Throws PostingVerificationError on mismatch → trx rolls back.
+  await assertAentryAtran(trx, {
+    entryNumber,
+    bankAccount: bankCode,
+    expectedSignedPence: signedPence,
+    expectedAtType: at_type,
+    expectedDate: txn.date,
+    expectedReferPrefix: fingerprint.slice(0, 20),
+  });
+  await assertLedgerRow(trx, {
+    ledger: dir.ledger,
+    entryNumber,
+    cbtype,
+    account: party.account,
+    expectedValuePounds:
+      dir.ledger === 'sales'
+        ? dir.direction === 'in' ? -absAmount : absAmount
+        : dir.direction === 'out' ? absAmount : -absAmount,
+  });
+  await assertBalancedPair(trx, {
+    table: 'ntran',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber,
+  });
+  await assertBalancedPair(trx, {
+    table: 'anoml',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber,
+  });
+
   return { entry_number: entryNumber, fingerprint };
 }
 
@@ -719,7 +804,7 @@ async function postNominalEntry(args: PostOneArgs): Promise<{
       ?, ?, '    ', ?, ?, 0,
       ?, 0, 0, 0, ?,
       ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMPORT', ?,
+      0, ?, ?, 'BANK_IMP', ?,
       0, 0, '  ', ?, ?, 1
     )`,
     [
@@ -934,6 +1019,27 @@ async function postNominalEntry(args: PostOneArgs): Promise<{
     ],
   );
 
+  // --- Phase A verification (in-trx) ---
+  await assertAentryAtran(trx, {
+    entryNumber,
+    bankAccount: bankCode,
+    expectedSignedPence: signedPence,
+    expectedAtType: at_type,
+    expectedDate: txn.date,
+    expectedReferPrefix: fingerprint.slice(0, 20),
+  });
+  await assertBalancedPair(trx, {
+    table: 'ntran',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber,
+  });
+  await assertBalancedPair(trx, {
+    table: 'anoml',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber,
+  });
   return { entry_number: entryNumber, fingerprint };
 }
 
@@ -984,7 +1090,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       ?, ?, '    ', ?, ?, 0,
       ?, 0, 0, 0, ?,
       ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMPORT', 'Bank transfer',
+      0, ?, ?, 'BANK_IMP', 'Bank transfer',
       0, 0, '  ', ?, ?, 1
     )`,
     [
@@ -1059,7 +1165,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       ?, ?, '    ', ?, ?, 0,
       ?, 0, 0, 0, ?,
       ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMPORT', 'Bank transfer',
+      0, ?, ?, 'BANK_IMP', 'Bank transfer',
       0, 0, '  ', ?, ?, 1
     )`,
     [
@@ -1265,6 +1371,37 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       now.iso,
     ],
   );
+
+  // --- Phase A verification (in-trx) ---
+  // Both legs of the transfer: source (negative) and dest (positive).
+  await assertAentryAtran(trx, {
+    entryNumber: entryOut,
+    bankAccount: sourceBank,
+    expectedSignedPence: -pence(absAmount),
+    expectedAtType: 8,
+    expectedDate: txn.date,
+    expectedReferPrefix: fingerprint.slice(0, 20),
+  });
+  await assertAentryAtran(trx, {
+    entryNumber: entryIn,
+    bankAccount: destBank,
+    expectedSignedPence: pence(absAmount),
+    expectedAtType: 8,
+    expectedDate: txn.date,
+    expectedReferPrefix: fingerprint.slice(0, 20),
+  });
+  await assertBalancedPair(trx, {
+    table: 'ntran',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber: entryOut,
+  });
+  await assertBalancedPair(trx, {
+    table: 'anoml',
+    sharedUnique,
+    expectedCount: 2,
+    entryNumber: entryOut,
+  });
 
   return { entry_number: entryOut, fingerprint };
 }
@@ -1540,9 +1677,48 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
             at_type: AT_TYPE_FOR_ACTION[action]!,
           });
         }
+
+        // --- Phase C verification (post-commit, fresh pool connection) ---
+        // The in-trx checks (Phase A) already confirmed the row landed
+        // before the trx committed. Phase C re-reads from a separate
+        // session to confirm the commit is visible outside our trx —
+        // catches the rare cases where a trigger or replication issue
+        // leaves the row only visible to us. NEVER silently retries:
+        // if the row isn't visible, surface a hard operator-action
+        // error rather than masking a real corruption.
+        if (entryNumber) {
+          const isTransfer = action === 'bank_transfer';
+          const verifyBankAccount = isTransfer
+            ? (prepared.amount < 0
+                ? bankCode
+                : prepared.matchedAccount ?? bankCode)
+            : bankCode;
+          const verifySignedPence = isTransfer
+            ? -Math.round(Math.abs(prepared.amount) * 100)
+            : Math.round(prepared.amount * 100);
+          const vResult = await verifyAentryCommitted(operaDb, {
+            entryNumber,
+            bankAccount: verifyBankAccount,
+            expectedSignedPence: verifySignedPence,
+          });
+          if (!vResult.verified) {
+            errors.push(
+              `Row ${i + 1}: POST-COMMIT VERIFICATION FAILED — entry ${entryNumber} ` +
+                `posted to Opera but verification could not confirm: ${vResult.reason}. ` +
+                `Check Opera manually before re-running.`,
+            );
+          }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        errors.push(`Row ${i + 1}: ${msg}`);
+        if (err instanceof PostingVerificationError) {
+          errors.push(
+            `Row ${i + 1}: VERIFICATION FAILED (${err.phase}) — ${msg}. ` +
+              `Trx rolled back; nothing posted for this row.`,
+          );
+        } else {
+          errors.push(`Row ${i + 1}: ${msg}`);
+        }
         failed += 1;
       }
     }
