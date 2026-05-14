@@ -1076,12 +1076,25 @@ export async function scanAllBanksFaithful(
     bank.statements_total = statementsTotal;
     bank.statements_extracted = statementsExtracted;
     bank.extraction_failures = extractionFailures;
+    // extraction_status drives the FE's per-bank "Process disabled"
+    // gate (BankStatementHub.tsx:2243 — canProcess requires
+    // bankExtractionComplete !== false). Counting EVERY statement in
+    // the folder against the gate breaks the common operator scenario:
+    // 1 current statement + a folder of stale unimported PDFs from
+    // earlier months. The current statement has cached balances and
+    // is ready, but the stale ones drag the bank to "incomplete" and
+    // the FE blocks Process. Now we count only the NEXT-IN-SEQUENCE
+    // statement (sortStatementsByChain already put it first): if it
+    // has balances, the bank is "complete" enough for the operator
+    // to proceed. The stale ones still surface as pending_extraction
+    // for visibility but don't block the workflow.
+    const nextStmt = stmts[0];
+    const nextHasBalances =
+      !!nextStmt &&
+      nextStmt.opening_balance != null &&
+      nextStmt.closing_balance != null;
     bank.extraction_status =
-      statementsTotal > 0 && statementsExtracted === statementsTotal
-        ? 'complete'
-        : statementsTotal > 0
-          ? 'incomplete'
-          : 'complete';
+      statementsTotal === 0 || nextHasBalances ? 'complete' : 'incomplete';
     // Per-statement promotion only: a statement with cached balances
     // (opening + closing both set) stays "ready" even when other
     // statements on the same bank failed extraction. The legacy
