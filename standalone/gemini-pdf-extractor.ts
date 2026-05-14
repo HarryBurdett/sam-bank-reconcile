@@ -26,6 +26,59 @@ import { callGeminiWithThrottle } from './gemini-throttle.js';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 
+/**
+ * Repair common JSON issues from LLM responses. Faithful port of
+ * `_repair_json` (sql_rag/statement_reconcile.py:1132).
+ *
+ *   - Strip trailing commas before ] or }.
+ *   - Replace single-quoted JSON-style string delimiters with double
+ *     quotes (taking care to leave apostrophes inside strings alone).
+ *   - Trim anything after the last closing brace.
+ *   - If braces/brackets remain unbalanced, find the last complete
+ *     transaction object inside the "transactions" array and truncate
+ *     there; otherwise pad with ] and } to close.
+ */
+export function repairJson(jsonText: string): string {
+  let text = jsonText;
+
+  // Trailing commas before ] or }
+  text = text.replace(/,(\s*[}\]])/g, '$1');
+
+  // Single-quoted JSON delimiters → double quotes. Lookbehind ensures
+  // we only match where a JSON delimiter is expected (after { , : [).
+  text = text.replace(
+    /(?<=[{,:\[])\s*'([^']*?)'\s*(?=[,}\]:])/g,
+    '"$1"',
+  );
+
+  // Trim trailing content after the last }
+  const lastBrace = text.lastIndexOf('}');
+  if (lastBrace !== -1) {
+    text = text.slice(0, lastBrace + 1);
+  }
+
+  // Re-balance: if unclosed structures remain, find the last complete
+  // transaction entry and truncate there; otherwise close the brackets.
+  const openBraces =
+    (text.match(/\{/g)?.length ?? 0) - (text.match(/\}/g)?.length ?? 0);
+  const openBrackets =
+    (text.match(/\[/g)?.length ?? 0) - (text.match(/\]/g)?.length ?? 0);
+
+  if (openBrackets > 0 || openBraces > 0) {
+    const match = text.match(
+      /("transactions"\s*:\s*\[[\s\S]*?)(\{[^{}]*\})\s*,?\s*(\{[^}]*$)/,
+    );
+    if (match) {
+      text = `${match[1]}${match[2]}]}`;
+    } else {
+      text += ']'.repeat(Math.max(0, openBrackets));
+      text += '}'.repeat(Math.max(0, openBraces));
+    }
+  }
+
+  return text;
+}
+
 /** Legacy extraction prompt, copied verbatim from
  *  sql_rag/statement_reconcile.py:695-785 to preserve behaviour. */
 const EXTRACTION_PROMPT = `You are extracting data from a bank statement PDF. Process ALL pages.
@@ -475,13 +528,25 @@ export function buildGeminiPdfExtractor(
       try {
         parsed = JSON.parse(match[0]) as Record<string, unknown>;
       } catch (err) {
-        // Legacy attempts _repair_json fallback; not yet ported. Surface
-        // a clean error so the operator can re-trigger extraction.
-        throw new Error(
-          `Gemini returned non-parseable JSON: ${
+        // Faithful port of statement_reconcile.py:828-836: try the
+        // repair-then-parse fallback. If even that fails, surface a
+        // clean error for the operator.
+        logger?.warn(
+          `[gemini] JSON parse error: ${
             err instanceof Error ? err.message : String(err)
-          }`,
+          } — attempting repair...`,
         );
+        const repaired = repairJson(match[0]);
+        try {
+          parsed = JSON.parse(repaired) as Record<string, unknown>;
+          logger?.info('[gemini] JSON repair successful');
+        } catch (err2) {
+          throw new Error(
+            `Could not parse JSON even after repair: ${
+              err2 instanceof Error ? err2.message : String(err2)
+            }. Original error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
 
       const result = parseResultJson(parsed, logger);
