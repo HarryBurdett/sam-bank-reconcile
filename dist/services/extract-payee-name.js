@@ -22,7 +22,7 @@
  */
 const BANK_METHOD_SUFFIX_RE = /\s*\(\s*(?:faster\s*pay(?:\.\.\.|…|ments?)|direct\s*debit|standing\s*order|bacs|chaps|card\s*payment|cheque|cash|online\s*payment|transfer)\s*\)\s*$/i;
 const CLASSIFICATION_LABEL_RE = /^(?:SUPPLIER|CUSTOMER|PAYMENT|RECEIPT|TRANSFER|SALARY|WAGES|REFUND)\s*[-–:]\s*/i;
-const PRIMARY_MATCH_RE = /(?:(?:dd\s+)?direct\s+debit\s+to|(?:giro\s+)?direct\s+credit\s+from|card\s+payment\s+to|card\s+purchase|faster\s+payment\s+to|faster\s+payment\s+from|standing\s+order\s+to|bank\s+giro\s+credit\s+from)\s+(.+)/i;
+const PRIMARY_MATCH_RE = /(?:(?:dd\s+)?direct\s+debit\s+to|(?:giro\s+)?direct\s+credit\s+from|card\s+payment\s+to|card\s+purchase|faster\s+payment\s+to|faster\s+payment\s+from|standing\s+order\s+to|bank\s+giro\s+credit\s+from|(?:on[-\s]?line\s+banking\s+)?bill\s+payment\s+to|(?:on[-\s]?line\s+banking\s+)?transfer\s+to|(?:on[-\s]?line\s+banking\s+)?transfer\s+from)\s+(.+)/i;
 const TAIL_STRIP_RE = /\s+(?:on\s+\d{1,2}\s|ref:\s|ref\s|\d{5,})|\*/i;
 const FALLBACK_PREFIX_RE = /^(?:dd\s+)?(?:card\s+payment|direct\s+debit|direct\s+credit|faster\s+payment|standing\s+order|(?:giro\s+)?(?:bank\s+)?giro\s+credit|counter\s+credit)\s*/i;
 const TAIL_TO_FROM_RE = /\s+(?:to|from)\s*$/i;

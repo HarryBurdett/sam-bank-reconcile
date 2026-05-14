@@ -28,7 +28,7 @@ const CLASSIFICATION_LABEL_RE =
   /^(?:SUPPLIER|CUSTOMER|PAYMENT|RECEIPT|TRANSFER|SALARY|WAGES|REFUND)\s*[-–:]\s*/i;
 
 const PRIMARY_MATCH_RE =
-  /(?:(?:dd\s+)?direct\s+debit\s+to|(?:giro\s+)?direct\s+credit\s+from|card\s+payment\s+to|card\s+purchase|faster\s+payment\s+to|faster\s+payment\s+from|standing\s+order\s+to|bank\s+giro\s+credit\s+from)\s+(.+)/i;
+  /(?:(?:dd\s+)?direct\s+debit\s+to|(?:giro\s+)?direct\s+credit\s+from|card\s+payment\s+to|card\s+purchase|faster\s+payment\s+to|faster\s+payment\s+from|standing\s+order\s+to|bank\s+giro\s+credit\s+from|(?:on[-\s]?line\s+banking\s+)?bill\s+payment\s+to|(?:on[-\s]?line\s+banking\s+)?transfer\s+to|(?:on[-\s]?line\s+banking\s+)?transfer\s+from)\s+(.+)/i;
 
 const TAIL_STRIP_RE = /\s+(?:on\s+\d{1,2}\s|ref:\s|ref\s|\d{5,})|\*/i;
 
