@@ -191,7 +191,132 @@ async function cachePut(
   }
 }
 
-function parseResultJson(parsed: Record<string, unknown>): PdfExtractionResult {
+function safeFloat(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const cleaned = v.replace(/,|£|\$/g, '').trim();
+    if (!cleaned) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+interface RawTxn {
+  date?: unknown;
+  money_in?: unknown;
+  money_out?: unknown;
+  balance?: unknown;
+}
+
+/**
+ * Faithful port of `_calculate_opening_balance` from
+ * sql_rag/statement_reconcile.py:878. Dual-interpretation chain
+ * validation: tries opening = (balance + out - in) [interpretation A —
+ * balance includes txn] and opening = balance [interpretation B —
+ * balance is opening]. Whichever chain reaches `closingBalance` wins.
+ * Falls back to summary opening, then to interpretation A as best-guess.
+ */
+function calculateOpeningBalance(
+  rawTransactions: RawTxn[],
+  closingBalance: number | null,
+  summaryOpening: number | null,
+  logger?: AppLogger,
+): number | null {
+  if (!rawTransactions.length) return null;
+
+  const sorted = [...rawTransactions].sort((a, b) => {
+    const da = typeof a.date === 'string' ? a.date : '9999';
+    const db_ = typeof b.date === 'string' ? b.date : '9999';
+    return da < db_ ? -1 : da > db_ ? 1 : 0;
+  });
+
+  let firstReal: RawTxn | null = null;
+  let firstIdx = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const t = sorted[i]!;
+    const mi = Math.abs(safeFloat(t.money_in) ?? 0);
+    const mo = Math.abs(safeFloat(t.money_out) ?? 0);
+    const bal = safeFloat(t.balance);
+    if (bal !== null && (mi > 0 || mo > 0)) {
+      firstReal = t;
+      firstIdx = i;
+      break;
+    }
+  }
+
+  if (firstReal === null) {
+    // No transaction with both amount and balance — use first balance line.
+    for (const t of sorted) {
+      const bal = safeFloat(t.balance);
+      if (bal !== null) {
+        logger?.info(
+          `[gemini] opening balance: no real txns with balance, using first balance line = ${bal}`,
+        );
+        return bal;
+      }
+    }
+    return null;
+  }
+
+  const firstBal = safeFloat(firstReal.balance) ?? 0;
+  const firstIn = Math.abs(safeFloat(firstReal.money_in) ?? 0);
+  const firstOut = Math.abs(safeFloat(firstReal.money_out) ?? 0);
+
+  // Interpretation A: balance INCLUDES the transaction.
+  const openingA = Math.round((firstBal + firstOut - firstIn) * 100) / 100;
+  // Interpretation B: balance IS the opening (txn applied to next line).
+  const openingB = firstBal;
+
+  const chainValidates = (opening: number, txns: RawTxn[]): boolean => {
+    let current = opening;
+    for (const t of txns) {
+      const mi = Math.abs(safeFloat(t.money_in) ?? 0);
+      const mo = Math.abs(safeFloat(t.money_out) ?? 0);
+      const bal = safeFloat(t.balance);
+      if (bal === null) continue;
+      if (mi === 0 && mo === 0) continue;
+      const expected = Math.round((current + mi - mo) * 100) / 100;
+      if (Math.abs(expected - bal) > 0.02) return false;
+      current = bal;
+    }
+    if (closingBalance !== null) {
+      return Math.abs(current - closingBalance) < 0.02;
+    }
+    return true;
+  };
+
+  const testTxns = sorted.slice(firstIdx);
+  const aValid = chainValidates(openingA, testTxns);
+  const bValid = chainValidates(openingB, testTxns);
+
+  if (aValid && !bValid) {
+    logger?.info(`[gemini] opening balance: interpretation A (includes txn) = ${openingA}`);
+    return openingA;
+  }
+  if (bValid && !aValid) {
+    logger?.info(`[gemini] opening balance: interpretation B (is opening) = ${openingB}`);
+    return openingB;
+  }
+  if (aValid && bValid) {
+    logger?.info(`[gemini] opening balance: both valid, using A = ${openingA}`);
+    return openingA;
+  }
+
+  logger?.warn(
+    `[gemini] opening balance: neither interpretation chains. A=${openingA}, B=${openingB}`,
+  );
+  if (summaryOpening !== null) {
+    logger?.info(`[gemini] opening balance: falling back to summary opening = ${summaryOpening}`);
+    return summaryOpening;
+  }
+  return openingA;
+}
+
+function parseResultJson(
+  parsed: Record<string, unknown>,
+  logger?: AppLogger,
+): PdfExtractionResult {
   const info = (parsed.statement_info ?? {}) as Record<string, unknown>;
   const rawTransactions = Array.isArray(parsed.transactions)
     ? (parsed.transactions as Array<Record<string, unknown>>)
@@ -225,6 +350,31 @@ function parseResultJson(parsed: Record<string, unknown>): PdfExtractionResult {
     };
   });
 
+  // Legacy: never trust AI's opening_balance. Derive from chain.
+  // Faithful port of _parse_extraction_result @ statement_reconcile.py:1002.
+  const aiOpening = safeFloat(info.opening_balance);
+  const aiClosing = safeFloat(info.closing_balance);
+  const summary = (info.summary ?? {}) as Record<string, unknown>;
+  const summaryOpening = safeFloat(summary.opening_balance);
+  const chainOpening = calculateOpeningBalance(
+    rawTransactions as RawTxn[],
+    aiClosing,
+    summaryOpening,
+    logger,
+  );
+
+  let opening: number | null = aiOpening;
+  if (chainOpening !== null) {
+    if (aiOpening !== null && Math.abs(aiOpening - chainOpening) > 0.01) {
+      logger?.info(
+        `[gemini] opening balance overridden: AI=${aiOpening}, calculated=${chainOpening}`,
+      );
+    } else if (aiOpening === null) {
+      logger?.info(`[gemini] opening balance calculated (AI had none): ${chainOpening}`);
+    }
+    opening = chainOpening;
+  }
+
   return {
     bank_name: typeof info.bank_name === 'string' ? info.bank_name : null,
     account_number:
@@ -235,10 +385,8 @@ function parseResultJson(parsed: Record<string, unknown>): PdfExtractionResult {
     period_start:
       typeof info.period_start === 'string' ? info.period_start : null,
     period_end: typeof info.period_end === 'string' ? info.period_end : null,
-    opening_balance:
-      typeof info.opening_balance === 'number' ? info.opening_balance : null,
-    closing_balance:
-      typeof info.closing_balance === 'number' ? info.closing_balance : null,
+    opening_balance: opening,
+    closing_balance: aiClosing,
     transactions,
   };
 }
@@ -270,10 +418,13 @@ export function buildGeminiPdfExtractor(
       if (cached) {
         const txCount = cached.transactions?.length ?? 0;
         if (txCount >= 5 || pdfBytes.byteLength <= 50_000) {
-          return parseResultJson({
-            statement_info: cached.statement_info ?? {},
-            transactions: cached.transactions ?? [],
-          });
+          return parseResultJson(
+            {
+              statement_info: cached.statement_info ?? {},
+              transactions: cached.transactions ?? [],
+            },
+            logger,
+          );
         }
         logger?.warn(
           `[gemini] cache had ${txCount} transactions for ${pdfBytes.byteLength} byte PDF — invalidating and re-extracting`,
@@ -333,7 +484,7 @@ export function buildGeminiPdfExtractor(
         );
       }
 
-      const result = parseResultJson(parsed);
+      const result = parseResultJson(parsed, logger);
 
       // Persist to cache. Store the raw legacy shape so future SAM
       // changes to parseResultJson() can re-derive without re-paying
