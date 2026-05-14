@@ -333,18 +333,96 @@ export async function importBankStatementFromPdf(
       }
     }
 
+    // Apply per-row overrides + date_overrides + rejected_refund_rows
+    // BEFORE handing transactions to the executor. Faithful port of
+    // routes.py:4259-4308 (_apply_overrides / _apply_dates /
+    // rejected_refund_set / bank_transfer_details).
+    //
+    // The orchestration shell mutates txn shape directly so the
+    // executor keeps its contract: read `t.action`, `t.matched_account`,
+    // `t.manual_account`, `t.cbtype`. For bank_transfer rows, the
+    // destination bank is mapped onto `manual_account` because the
+    // executor uses txn.matchedAccount for the other side of the
+    // transfer.
+    type OverrideRow = {
+      row?: number;
+      account?: string | null;
+      ledger_type?: string | null;
+      transaction_type?: string | null;
+      nominal_code?: string | null;
+      vat_code?: string | null;
+      project_code?: string | null;
+      department_code?: string | null;
+      cbtype?: string | null;
+      net_amount?: number | null;
+      bank_transfer?: { dest_bank?: string | null } | null;
+    };
+    const overrideByRow = new Map<number, OverrideRow>();
+    for (const raw of input.overrides ?? []) {
+      const o = (raw ?? {}) as OverrideRow;
+      const row = Number(o.row ?? 0);
+      if (!row) continue;
+      overrideByRow.set(row, o);
+    }
+    const dateOverrideByRow = new Map<number, string>();
+    for (const raw of input.dateOverrides ?? []) {
+      const d = raw as { row?: number; date?: string };
+      if (!d?.row || !d?.date) continue;
+      dateOverrideByRow.set(Number(d.row), String(d.date));
+    }
+    const rejectedRefundSet = new Set<number>(
+      (input.rejectedRefundRows ?? []).map((n) => Number(n)),
+    );
+
+    // Mutate a working copy so we don't disturb the cached extraction
+    // result (extractor cache returns shared references).
+    const txnList = extracted.transactions.map((t, i) => {
+      const rowNum = i + 1;
+      const overlay: Record<string, unknown> = { ...t };
+      const ov = overrideByRow.get(rowNum);
+      if (ov) {
+        if (ov.transaction_type) overlay.action = ov.transaction_type;
+        if (ov.account) overlay.manual_account = ov.account;
+        if (ov.cbtype) overlay.cbtype = ov.cbtype;
+        if (ov.nominal_code) overlay.nominal_code = ov.nominal_code;
+        if (ov.vat_code) overlay.vat_code = ov.vat_code;
+        if (ov.project_code) overlay.project_code = ov.project_code;
+        if (ov.department_code) overlay.department_code = ov.department_code;
+        if (ov.net_amount !== undefined && ov.net_amount !== null) {
+          overlay.net_amount = ov.net_amount;
+        }
+        if (
+          (ov.transaction_type === 'bank_transfer' ||
+            overlay.action === 'bank_transfer') &&
+          ov.bank_transfer?.dest_bank
+        ) {
+          overlay.manual_account = ov.bank_transfer.dest_bank;
+        }
+      }
+      const dateOverride = dateOverrideByRow.get(rowNum);
+      if (dateOverride) overlay.date = dateOverride;
+      return overlay as typeof t;
+    });
+
     // Build the effective selectedRows set. selectedRows uses 1-based
     // line numbers (matches executor's i+1 convention). When the UI
     // sends null we treat it as "post everything"; on resume + closed-
-    // year exclusions we then subtract those line numbers from a
-    // fully-populated list.
+    // year + rejected-refund exclusions we then subtract those line
+    // numbers from a fully-populated list.
     let effectiveSelected = input.selectedRows ?? null;
-    if (alreadyPosted.size > 0 || closedYearSkipSet.size > 0) {
+    if (
+      alreadyPosted.size > 0 ||
+      closedYearSkipSet.size > 0 ||
+      rejectedRefundSet.size > 0
+    ) {
       const base =
         effectiveSelected ??
         Array.from({ length: extracted.transactions.length }, (_, i) => i + 1);
       effectiveSelected = base.filter(
-        (n) => !alreadyPosted.has(n) && !closedYearSkipSet.has(n),
+        (n) =>
+          !alreadyPosted.has(n) &&
+          !closedYearSkipSet.has(n) &&
+          !rejectedRefundSet.has(n),
       );
     }
 
@@ -352,7 +430,7 @@ export async function importBankStatementFromPdf(
       operaDb,
       bankCode,
       statementInfo: extracted,
-      transactions: extracted.transactions,
+      transactions: txnList,
       overrides: input.overrides ?? [],
       selectedRows: effectiveSelected,
       autoAllocate: !!input.autoAllocate,
