@@ -85,7 +85,7 @@ export function buildMssqlAdapter(config: MssqlAdapterConfig): MssqlAdapter {
         // active bank-level import) plus active query traffic. The
         // standalone host's applock holds one connection per held
         // lock for its lifetime; over-provisioning here is cheap.
-        pool: { min: 0, max: 10 },
+        pool: { min: 0, max: 5 },
       });
       pools.set(code, pool);
       config.logger.info(

@@ -19,12 +19,14 @@
  * confidence ≥ `posted_threshold` (default 0.85) is treated as
  * already-posted; below that the transaction is left alone.
  *
- * The type-aware ledger-allocation-target logic (so a posted invoice
- * doesn't get classified as "duplicate" of a bank receipt) is a
- * follow-up port — see `sql_rag/duplicate_check.py`. For replication
- * purposes the threshold-based check is sufficient: fingerprint and
- * exact-match cases are unambiguous, and the matched_account /
- * action fields the frontend already has cover the discrimination.
+ * LEDGER_ALLOCATION_TARGET (the type-aware refund advisory) is
+ * surfaced separately by `pre-posting-duplicate-check.ts` at import
+ * time, not here. refresh-matches is the "operator just posted
+ * something in Opera, refresh the preview" path and the
+ * threshold-based check on findDuplicates is correct for it:
+ * fingerprint and exact-match cases are unambiguous, and the
+ * matched_account / action fields the frontend already has cover the
+ * discrimination between cashbook and ledger.
  */
 import type { Knex } from 'knex';
 export interface RefreshTransactionInput {

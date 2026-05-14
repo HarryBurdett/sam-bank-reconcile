@@ -87,12 +87,27 @@ describe('getPdfContent', () => {
 });
 
 describe('scanAllBanks', () => {
-  it('returns banks from operaDb', async () => {
+  it('returns banks dict keyed by bank_code from operaDb', async () => {
     const db: any = (_t: string) => ({});
-    db.raw = async () => [{ bank_code: 'BC010', description: 'Barclays' }];
+    db.raw = async () => [
+      {
+        bank_code: 'BC010',
+        description: 'Barclays',
+        sort_code: '',
+        account_number: '',
+        reconciled_balance: 0,
+        current_balance: 0,
+      },
+    ];
     const r = await scanAllBanks(db);
     expect(r.success).toBe(true);
-    expect(r.banks.length).toBe(1);
+    // banks is a dict keyed by bank_code, matching legacy
+    // routes.py:6688. Empty banks are filtered out via the
+    // scanAllBanks-faithful path; the older entry point in
+    // misc-endpoints still returns all banks with statements: [].
+    expect(Object.keys(r.banks).length).toBeGreaterThanOrEqual(1);
+    expect(r.banks.BC010).toBeDefined();
+    expect(r.banks.BC010!.description).toBe('Barclays');
   });
 });
 

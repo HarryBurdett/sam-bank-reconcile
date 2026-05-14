@@ -1,3 +1,6 @@
+import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
+import { buildMatchContext, matchTransaction, } from './match-transaction.js';
+import { loadCustomerCandidates, loadSupplierCandidates, } from './bank-matcher.js';
 const EXTRACTION_PROMPT = `You are a bank-statement parser. Extract the
 following from the PDF I'm sending and return a JSON document with
 this exact shape:
@@ -130,7 +133,7 @@ async function callLlmForExtraction(llm, pdfPath, pdfBytes) {
 function normaliseBankNumber(s) {
     return (s ?? '').replace(/[\s-]/g, '').trim();
 }
-export async function previewBankImportFromPdf(operaDb, llm, input, extractor = null) {
+export async function previewBankImportFromPdf(operaDb, llm, input, extractor = null, appDb = null) {
     if (!input.bankCode) {
         return { success: false, error: 'bank_code is required' };
     }
@@ -228,6 +231,125 @@ export async function previewBankImportFromPdf(operaDb, llm, input, extractor = 
             const excluded = extracted.transactions.length - used.size;
             if (excluded > 0) {
                 warnings.push(`Balance chain excluded ${excluded} transaction(s) that didn't fit the running total — likely from a different account on the same PDF.`);
+            }
+        }
+    }
+    // process_transactions duplicate-candidate enrichment. Faithful
+    // port of bank_import.py:1910-1969. Each transaction is checked
+    // against Opera's cashbook (atran/aentry) at preview time so the
+    // UI can render "already posted" badges and pre-deselect the row
+    // for the operator. Identical to the just-in-time check the
+    // import-from-pdf executor runs, but at preview time and across
+    // ALL at_types (the matcher doesn't yet know the action).
+    //
+    // We thread a `consumedEntries` set across the loop so two
+    // identical-amount lines on the same statement match distinct
+    // existing aentries — preserving legacy's multi-occurrence
+    // handling (bank_import.py:1919-1923).
+    const consumedEntries = new Set();
+    const txnsForUi = extracted.transactions;
+    for (const txn of txnsForUi) {
+        if (!txn.date)
+            continue;
+        // Probe all four possible at_types whose magnitude matches.
+        // Sign-aware: receipts (+) only match at_type 4 (sales_receipt) /
+        // 2 (nominal_receipt) / 6 (purchase_refund) / 8 (transfer); payments
+        // (-) only match 5 / 1 / 3 / 8.
+        const candidateActions = txn.amount < 0
+            ? ['purchase_payment', 'nominal_payment', 'sales_refund', 'bank_transfer']
+            : ['sales_receipt', 'nominal_receipt', 'purchase_refund', 'bank_transfer'];
+        for (const probeAction of candidateActions) {
+            try {
+                const dup = await checkCashbookDuplicateBeforePosting({
+                    operaDb,
+                    bankCode: bank.code,
+                    transactionDate: String(txn.date).slice(0, 10),
+                    signedAmountPounds: Number(txn.amount),
+                    action: probeAction,
+                    excludeEntryNumbers: consumedEntries,
+                    description: (txn.name ?? txn.memo ?? ''),
+                });
+                if (dup.isDuplicate) {
+                    txn.is_duplicate = true;
+                    txn.action = 'skip';
+                    txn.skip_reason = `Already posted: ${dup.reason}`;
+                    txn.matched_entry_number = dup.entryNumber;
+                    if (dup.entryNumber)
+                        consumedEntries.add(dup.entryNumber);
+                    break;
+                }
+            }
+            catch {
+                // Tolerate per-row probe errors — matches the JIT check's
+                // policy of degrading to "not a duplicate" on lookup failure.
+                break;
+            }
+        }
+    }
+    // Full _match_transaction pipeline. Faithful port of
+    // bank_import.py:1297-1495 (the function _match_transaction).
+    // Stages run in legacy order, each terminating on a successful match:
+    //
+    //   Stage 0    repeat-entry check (arhead/arline)
+    //   Stage 0.5  bank-transfer detection (other Opera banks)
+    //   Stage 1    alias lookup (per-bank → global)
+    //   Stage 2    fuzzy match (BankMatcher) with extract_payee_name
+    //              fallback
+    //   Stage 3    ambiguity resolution + credit-note refund detection
+    //   Stage 4    direction-based decision + alias learning at score
+    //              >= 0.85
+    //
+    // Reuses the same service `processStatement` calls so the matcher
+    // is consistent across both paths.
+    let matchCtx = null;
+    try {
+        const [customers, suppliers] = await Promise.all([
+            loadCustomerCandidates(operaDb),
+            loadSupplierCandidates(operaDb),
+        ]);
+        matchCtx = await buildMatchContext(operaDb, bank.code, {
+            customers,
+            suppliers,
+        });
+    }
+    catch {
+        // Matcher unavailable (e.g. customer/supplier load failed) — we
+        // skip per-row matching but the preview still surfaces dup info
+        // and the operator can manually pick accounts.
+        matchCtx = null;
+    }
+    if (matchCtx) {
+        for (const txn of txnsForUi) {
+            if (txn.is_duplicate)
+                continue;
+            try {
+                const dateAny = txn.date;
+                const dateYmd = dateAny != null && typeof dateAny === 'object' && 'toISOString' in dateAny
+                    ? dateAny.toISOString().slice(0, 10)
+                    : String(dateAny ?? '').slice(0, 10);
+                const res = await matchTransaction(operaDb, appDb, matchCtx, {
+                    bankCode: bank.code,
+                    date: dateYmd,
+                    amount: Number(txn.amount ?? 0),
+                    name: (txn.name ?? '').toString(),
+                    memo: (txn.memo ?? '').toString(),
+                    reference: (txn.reference ?? ''),
+                    preDeferred: false,
+                });
+                if (res.matched_account) {
+                    txn.matched_account = res.matched_account;
+                    txn.matched_name = res.matched_name ?? null;
+                    txn.match_confidence = res.match_score;
+                }
+                if (res.action && res.action !== 'skip') {
+                    txn.action = res.action;
+                }
+                if (res.skip_reason)
+                    txn.skip_reason = res.skip_reason;
+            }
+            catch {
+                // Per-row matcher failures degrade silently — operator
+                // can pick manually.
             }
         }
     }

@@ -1,0 +1,103 @@
+/**
+ * Normalise a bank description for matching. Strips common bank
+ * prefixes (DD/BACS/FP/...), reference numbers, dates, and company-
+ * suffixes. Faithful port of bank_patterns.py:126.
+ */
+export function normalizeDescription(description) {
+    if (!description)
+        return '';
+    let text = description.toUpperCase();
+    const prefixes = [
+        /^DD\s+/,
+        /^DIRECT DEBIT\s+/,
+        /^BACS\s+/,
+        /^FASTER PAYMENT\s+/,
+        /^FP\s+/,
+        /^FPI\s+/,
+        /^FPO\s+/,
+        /^BGC\s+/,
+        /^BANK GIRO CREDIT\s+/,
+        /^CHQ\s+/,
+        /^CHEQUE\s+/,
+        /^TFR\s+/,
+        /^TRANSFER\s+/,
+        /^S\/O\s+/,
+        /^STANDING ORDER\s+/,
+        /^POS\s+/,
+        /^CARD\s+/,
+        /^VISA\s+/,
+        /^MASTERCARD\s+/,
+    ];
+    for (const p of prefixes)
+        text = text.replace(p, '');
+    // Reference numbers (XX123456, long numerics, REF: ...).
+    text = text.replace(/\b[A-Z]{2,3}\d{6,}\b/g, '');
+    text = text.replace(/\b\d{6,}\b/g, '');
+    text = text.replace(/\bREF[:\s]*\S+/gi, '');
+    // Dates in various formats.
+    text = text.replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, '');
+    text = text.replace(/\b\d{1,2}\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*\d{0,4}\b/gi, '');
+    // Common suffixes.
+    text = text.replace(/\bLTD\.?\b/gi, '');
+    text = text.replace(/\bLIMITED\b/gi, '');
+    text = text.replace(/\bPLC\.?\b/gi, '');
+    text = text.replace(/\b& CO\.?\b/gi, '');
+    return text.replace(/\s+/g, ' ').trim();
+}
+/**
+ * Learn or refresh a pattern. Returns true on success, false on
+ * failure (e.g. empty normalised description). Failures are logged
+ * but never thrown so the import flow isn't blocked by a learner
+ * hiccup — matches legacy bank_patterns.py:252-256.
+ */
+export async function learnPattern(appDb, input) {
+    const normalized = normalizeDescription(input.description);
+    if (!normalized)
+        return false;
+    const now = new Date().toISOString();
+    try {
+        // Attempt UPDATE first — matches legacy upsert semantics.
+        const updated = (await appDb('bank_import_patterns')
+            .where({
+            company_code: input.companyCode,
+            description_normalized: normalized,
+        })
+            .update({
+            transaction_type: input.transactionType,
+            account_code: input.accountCode,
+            account_name: input.accountName ?? null,
+            ledger_type: input.ledgerType,
+            vat_code: input.vatCode ?? null,
+            nominal_code: input.nominalCode ?? null,
+            net_amount_typical: input.netAmount !== undefined && input.netAmount !== null
+                ? input.netAmount
+                : appDb.raw('net_amount_typical'),
+            times_used: appDb.raw('COALESCE(times_used, 0) + 1'),
+            last_used: now,
+        }));
+        if (!updated) {
+            await appDb('bank_import_patterns').insert({
+                company_code: input.companyCode,
+                description_raw: input.description,
+                description_normalized: normalized,
+                transaction_type: input.transactionType,
+                account_code: input.accountCode,
+                account_name: input.accountName ?? null,
+                ledger_type: input.ledgerType,
+                vat_code: input.vatCode ?? null,
+                nominal_code: input.nominalCode ?? null,
+                net_amount_typical: input.netAmount ?? null,
+                times_used: 1,
+                first_used: now,
+                last_used: now,
+            });
+        }
+        return true;
+    }
+    catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`[bank-reconcile] learn_pattern failed for '${normalized}': ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+    }
+}
+//# sourceMappingURL=bank-pattern-learner.js.map

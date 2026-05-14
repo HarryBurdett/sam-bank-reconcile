@@ -2044,11 +2044,19 @@ export function createRouter(ctx) {
                     ? body.rejected_refund_rows
                     : [],
                 skipOverlapCheck: body.skip_overlap_check === true,
+                importedBy: req.user?.userId ?? null,
+                // Tenant id (`standalone:<co>` in standalone mode, `<co>`
+                // in plain SAM) is what the legacy learner key expects.
+                // Stripping the namespace prefix keeps row reuse clean
+                // across mode switches.
+                companyCode: (ctx.tenantId ?? '').replace(/^standalone:/, '') || null,
+                paymentRequestLookup: adapter.bankPaymentRequestLookup ?? null,
             }, extractor, executor, lock, overlapChecker);
-            if (!result.success) {
-                res.status(400).json(result);
-                return;
-            }
+            // Legacy returns 200 with `success: false` on overlap /
+            // validation errors; only true server faults are non-200
+            // (caught below). Anything keyed off HTTP status will break
+            // otherwise — matches routes.py:4109 (return overlap_err) and
+            // 4438 ("success": …) where neither call sets a non-200 code.
             res.json(result);
         }
         catch (err) {
@@ -2066,13 +2074,15 @@ export function createRouter(ctx) {
      * for already-imported duplicates. Faithful port of `check_duplicates`
      * (apps/bank_reconcile/api/routes.py:2901-2955).
      *
-     * Currently covers two of six strategies:
+     * Covers all seven legacy strategies via findDuplicates:
      *   - fingerprint  (BKIMP:* in at_refer/st_trref/pt_trref) — definitive
+     *   - fit_id       (OFX bank-issued unique txn id)         — definitive
      *   - exact        (date + amount + account)               — 0.90
-     *
-     * The remaining four strategies (fit_id, fuzzy_amount, reference,
-     * cross_period, bank_amount) are TODO'd in the service file with
-     * pointers to the Python source line numbers.
+     *   - fuzzy_amount (date + ±5% amount + account)           — 0.80
+     *   - reference    (partial reference + account)           — 0.75
+     *   - cross_period (±7 days + amount + account)            — 0.70
+     *   - bank_amount  (±14 days + signed amount on bank,      — 0.65
+     *                   only when account-level found nothing)
      *
      * Body shape:
      *   { transactions: [{ name, amount, date, account?, fit_id?, reference? }] }
@@ -2116,11 +2126,10 @@ export function createRouter(ctx) {
      * already-posted; the row's `action` is set to `skip` and
      * `skip_reason` is populated with the matching table+id+strategy.
      *
-     * The Python implementation has additional type-aware logic
-     * (CASHBOOK_DUPLICATE vs LEDGER_ALLOCATION_TARGET — see
-     * `sql_rag/duplicate_check.py`); that's a follow-up port for the
-     * SAM team if the threshold-based approach surfaces too many
-     * false positives in production.
+     * LEDGER_ALLOCATION_TARGET (refund advisory) is surfaced from the
+     * import-time pre-posting check, not here. refresh-matches uses
+     * findDuplicates with a confidence threshold, which is the same
+     * behaviour the legacy refresh path used.
      */
     router.post('/api/reconcile/refresh-matches', async (req, res) => {
         const operaDb = getOperaDb(req, res);
@@ -2216,7 +2225,7 @@ export function createRouter(ctx) {
                 filePath: String(req.query.file_path ?? body.file_path ?? '') || undefined,
                 bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
                 filename: body.filename ?? undefined,
-            }, extractorAdapter);
+            }, extractorAdapter, getAppDb(req, res) ?? null);
             res.json(result);
         }
         catch (err) {

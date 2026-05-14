@@ -1,4 +1,6 @@
 import { generateImportFingerprint, } from './duplicate-detection.js';
+import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
+import { autoAllocateReceipt, autoAllocatePayment } from './auto-allocate.js';
 import { getControlAccounts, getNacntType, getNextId, getNextJournal, getPeriodForDate, generateOperaUniqueId, incrementAtypeEntry, insertNjmemo, updateNacntBalance, updateNbankBalance, } from '../_shared/index.js';
 const AT_TYPE_FOR_ACTION = {
     sales_receipt: 4,
@@ -979,9 +981,8 @@ async function postBankTransfer(args) {
 // ---------------------------------------------------------------------
 export const bankImportPostingExecutor = {
     async postBankImport({ operaDb, bankCode, statementInfo, transactions, overrides: _overrides, // applied upstream by the route layer
-    selectedRows, autoAllocate: _autoAllocate, // follow-up port
-    autoReconcile: _autoReconcile, // follow-up port
-     }) {
+    selectedRows, autoAllocate, autoReconcile: _autoReconcile, // wired in import-from-pdf.ts post-success
+    paymentRequestLookup, }) {
         const errors = [];
         const warnings = [];
         const posted_lines = [];
@@ -1010,6 +1011,11 @@ export const bankImportPostingExecutor = {
         };
         void statementInfo;
         const selected = selectedRows ? new Set(selectedRows) : null;
+        // Aentries claimed earlier in this batch by the just-in-time
+        // duplicate check. Threaded across the loop so two identical-
+        // amount transactions on the same statement allocate to distinct
+        // existing aentries (matches legacy routes.py:4171-4180).
+        const consumedAtEntries = new Set();
         for (let i = 0; i < transactions.length; i++) {
             const t = transactions[i];
             if (selected && !selected.has(i + 1) && !selected.has(i)) {
@@ -1041,8 +1047,42 @@ export const bankImportPostingExecutor = {
                 cbtype: t.cbtype ?? null,
                 reference: t.reference ?? null,
             };
+            // Just-in-time cashbook duplicate check. Faithful port of
+            // routes.py:4317-4348. Skipped for 'skip'/'defer' (handled
+            // above) — applied to every action that creates a new aentry.
+            try {
+                const dup = await checkCashbookDuplicateBeforePosting({
+                    operaDb,
+                    bankCode,
+                    transactionDate: prepared.date,
+                    signedAmountPounds: prepared.amount,
+                    action,
+                    excludeEntryNumbers: consumedAtEntries,
+                    description: prepared.name || prepared.memo || '',
+                    accountCode: matchedAccount,
+                });
+                if (dup.isDuplicate) {
+                    skipped += 1;
+                    errors.push(`Row ${i + 1}: Skipped - ${dup.reason}`);
+                    if (dup.entryNumber)
+                        consumedAtEntries.add(dup.entryNumber);
+                    continue;
+                }
+                // LEDGER_ALLOCATION_TARGET: informational. Caller still posts;
+                // surface the hint as a warning so the operator can see why
+                // auto-allocate may have a candidate.
+                if (dup.ledgerAllocationHint) {
+                    warnings.push(`Row ${i + 1}: ${dup.ledgerAllocationHint.reason}`);
+                }
+            }
+            catch (dupErr) {
+                // Don't block the post on dup-check failure; the legacy
+                // wrapper also logs and continues (routes.py:4347-4348).
+                warnings.push(`Row ${i + 1}: pre-posting duplicate check failed: ${dupErr instanceof Error ? dupErr.message : String(dupErr)}`);
+            }
             try {
                 let entryNumber = null;
+                let postedRef = null;
                 await operaDb.transaction(async (trx) => {
                     let result;
                     if (action === 'nominal_payment' || action === 'nominal_receipt') {
@@ -1055,6 +1095,59 @@ export const bankImportPostingExecutor = {
                         result = await postOneTransaction({ trx, bankCode, txn: prepared, defaults });
                     }
                     entryNumber = result.entry_number;
+                    postedRef = result.transaction_ref ?? null;
+                    // Auto-allocate within the same trx so the allocation rolls
+                    // back together with the posting on any failure. Faithful
+                    // port of routes.py:4369-4397: only fires for sales_receipt
+                    // and purchase_payment, against the matched ledger account.
+                    if (autoAllocate &&
+                        (action === 'sales_receipt' || action === 'purchase_payment') &&
+                        prepared.matchedAccount) {
+                        const txnRef = postedRef ?? prepared.reference ?? prepared.name.slice(0, 20);
+                        try {
+                            if (action === 'sales_receipt') {
+                                // Extract a candidate gc_payment_id from the
+                                // description. GoCardless payment IDs match the
+                                // pattern PM<alphanumeric> (e.g. 'PM000ABCDEF12345'
+                                // per opera_sql_import.py:7049). The lookup is a
+                                // no-op when no candidate is present.
+                                const descText = (prepared.memo || prepared.name) ?? '';
+                                const gcMatch = descText.match(/\bPM[A-Z0-9]{6,}\b/);
+                                const gcCandidate = gcMatch ? gcMatch[0] : null;
+                                const allocRes = await autoAllocateReceipt({
+                                    trx,
+                                    customerAccount: prepared.matchedAccount,
+                                    receiptRef: txnRef,
+                                    receiptAmount: Math.abs(prepared.amount),
+                                    allocationDate: prepared.date,
+                                    bankAccount: bankCode,
+                                    description: descText,
+                                    gcPaymentId: gcCandidate,
+                                    paymentRequestLookup: paymentRequestLookup ?? null,
+                                });
+                                if (!allocRes.success && allocRes.message) {
+                                    warnings.push(`Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`);
+                                }
+                            }
+                            else {
+                                const allocRes = await autoAllocatePayment({
+                                    trx,
+                                    supplierAccount: prepared.matchedAccount,
+                                    paymentRef: txnRef,
+                                    paymentAmount: Math.abs(prepared.amount),
+                                    allocationDate: prepared.date,
+                                    bankAccount: bankCode,
+                                    description: prepared.memo || prepared.name,
+                                });
+                                if (!allocRes.success && allocRes.message) {
+                                    warnings.push(`Row ${i + 1}: auto-allocate did not run: ${allocRes.message}`);
+                                }
+                            }
+                        }
+                        catch (allocErr) {
+                            warnings.push(`Row ${i + 1}: auto-allocate threw: ${allocErr instanceof Error ? allocErr.message : String(allocErr)}`);
+                        }
+                    }
                 });
                 imported += 1;
                 // Capture per-line record for production-correct restore

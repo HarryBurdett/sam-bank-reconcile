@@ -59,6 +59,11 @@ import {
   sortStatementsByChain,
   filterFullyReconciledStatements,
 } from './scan-chain-ordering.js';
+import {
+  buildOperaSePeriodReconciliationDs,
+  checkPeriodReconciled,
+} from './period-reconciliation.js';
+import { markStatementReconciled } from './statement-files.js';
 import type {
   BankWithStatements,
   StatementCandidate,
@@ -871,9 +876,62 @@ export async function scanAllBanksFaithful(
   }
 
   // Auto-promote imported statements where period is fully reconciled.
-  // Legacy line 7697. Requires check_period_reconciled (not ported);
-  // matches legacy line 7768 graceful skip.
+  // Faithful port of routes.py:7693-7769. For every is_imported
+  // statement on a bank with a known rec_bal, query the single source
+  // of truth (check_period_reconciled) and auto-mark as reconciled
+  // when FULLY_RECONCILED. UNKNOWN / PARTIALLY_RECONCILED keep the
+  // row visible (legacy line 7757-7766 "show, don't auto-promote").
   const finalRecFilenames = new Set(tracking.reconciled_filenames);
+  try {
+    const ds = buildOperaSePeriodReconciliationDs(operaDb);
+    for (const [code, bank] of Object.entries(banksWithStatements)) {
+      const recBal = bank.reconciled_balance;
+      if (recBal === null || recBal === undefined) continue;
+      for (const stmt of bank.statements) {
+        // is_imported in legacy maps to status === 'imported' here.
+        if (stmt.status !== 'imported') continue;
+        const periodStart = (stmt.period_start ?? null) as string | null;
+        const periodEnd = (stmt.period_end ?? null) as string | null;
+        const closing = (stmt.closing_balance ?? null) as number | null;
+        const res = await checkPeriodReconciled(ds, {
+          bankCode: code,
+          periodStart,
+          periodEnd,
+          statementClosing: closing,
+          currentRecBal: Number(recBal),
+        });
+        if (res.status === 'fully_reconciled') {
+          const fn = stmt.filename;
+          logger.info(
+            `Scan cleanup: auto-marking '${fn}' as reconciled — ${res.reason}`,
+          );
+          finalRecFilenames.add(fn);
+          if (appDb) {
+            try {
+              await markStatementReconciled(appDb, {
+                filename: fn,
+                reconciledCount: 0,
+                bankCode: code,
+              });
+            } catch {
+              /* best-effort */
+            }
+          }
+        } else if (res.status === 'partially_reconciled' || res.status === 'unknown') {
+          logger.info(
+            `Scan cleanup: NOT auto-marking '${stmt.filename}' — ${res.reason}`,
+          );
+        }
+        // 'not_reconciled': keep visible silently (legacy line 7767).
+      }
+    }
+  } catch (promoErr) {
+    logger.warn(
+      `Auto-promote scan cleanup failed: ${
+        promoErr instanceof Error ? promoErr.message : String(promoErr)
+      }`,
+    );
+  }
 
   // Remove reconciled statements from bank + non_current lists. Legacy 7771.
   for (const [code, bank] of Object.entries(banksWithStatements)) {

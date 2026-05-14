@@ -70,6 +70,33 @@ export interface PreviewResponse {
         type: string;
         balance?: number | null;
         line_number?: number;
+        /** Set when the matcher's process_transactions pass found the row
+         *  already exists in Opera's cashbook. Faithful port of
+         *  bank_import.py:1946. The UI uses this to render the "already
+         *  posted" badge and pre-deselect the row. */
+        is_duplicate?: boolean;
+        /** Skip flag — when set, the import-from-pdf orchestration
+         *  shell will route this row through the executor's skip path
+         *  (no cashbook write). Set by the duplicate-detection pass at
+         *  preview time. */
+        action?: string;
+        /** Human-readable explanation for the skip, surfaced in the
+         *  preview UI alongside is_duplicate. Mirrors
+         *  BankTransaction.skip_reason in bank_import.py:252. */
+        skip_reason?: string | null;
+        /** The Opera entry_number that already holds this posting. Used
+         *  by the FE's duplicate-override modal and by the import loop's
+         *  consumed-entries seeding. */
+        matched_entry_number?: string | null;
+        /** Customer or supplier account code that the alias matcher
+         *  resolved this row to. Mirrors BankTransaction.matched_account
+         *  in bank_import.py:252. */
+        matched_account?: string | null;
+        /** Display name for the matched account, surfaced as the
+         *  "matched to" badge in the preview UI. */
+        matched_name?: string | null;
+        /** Confidence (0..1) of the alias match. */
+        match_confidence?: number | null;
     }>;
     bank?: PreviewBankInfo;
     warnings?: string[];
@@ -79,5 +106,5 @@ export interface PreviewResponse {
     selected_bank?: string;
     correct_bank_code?: string | null;
 }
-export declare function previewBankImportFromPdf(operaDb: Knex, llm: LlmService | null, input: PreviewFromPdfInput, extractor?: PdfExtractor | null): Promise<PreviewResponse>;
+export declare function previewBankImportFromPdf(operaDb: Knex, llm: LlmService | null, input: PreviewFromPdfInput, extractor?: PdfExtractor | null, appDb?: Knex | null): Promise<PreviewResponse>;
 //# sourceMappingURL=preview-from-pdf.d.ts.map

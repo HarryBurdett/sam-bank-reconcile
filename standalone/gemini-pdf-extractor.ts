@@ -6,8 +6,7 @@
  * by default) with the same extraction prompt as legacy, returns the same
  * shape the plugin's preview-from-pdf service expects.
  *
- * Not yet ported from legacy (deferred to follow-up sessions):
- *   - JSON repair fallback (legacy uses _repair_json on parse failure)
+ * All faithful ports landed; see commit history.
  *
  * The standalone wires this as a `bankPdfExtractor` adapter on every
  * company's ctx. SAM-plugged mode provides its own implementation via
@@ -489,64 +488,120 @@ export function buildGeminiPdfExtractor(
 
       logger?.info(`[gemini] extracting ${name} (${pdfBytes.byteLength} bytes)`);
       const base64 = Buffer.from(pdfBytes).toString('base64');
-      // Throttle + 429 retry wrapper, faithful port of
-      // sql_rag/gemini_throttle.py:call_gemini_with_throttle.
-      const response = await callGeminiWithThrottle(
-        () =>
-          ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { inlineData: { mimeType: 'application/pdf', data: base64 } },
-                  { text: EXTRACTION_PROMPT },
-                ],
-              },
-            ],
-          }),
-        {
-          filename: name,
-          logger: {
-            warn: (m) => logger?.warn(m),
-            info: (m) => logger?.info(m),
+
+      // Retry-on-truncation. Faithful port of statement_reconcile.py:
+      // 794-852. Two attempts max; retry when the response was
+      // truncated by MAX_TOKENS (finishReason 2) OR fewer than 5
+      // transactions came back (likely truncated mid-array). The
+      // second attempt prefixes a more explicit instruction.
+      const MAX_ATTEMPTS = 2;
+      let parsed: Record<string, unknown> | null = null;
+      let lastResponseText = '';
+      let prompt = EXTRACTION_PROMPT;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // Throttle + 429 retry wrapper, faithful port of
+        // sql_rag/gemini_throttle.py:call_gemini_with_throttle.
+        const response = await callGeminiWithThrottle(
+          () =>
+            ai.models.generateContent({
+              model,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    { inlineData: { mimeType: 'application/pdf', data: base64 } },
+                    { text: prompt },
+                  ],
+                },
+              ],
+            }),
+          {
+            filename: name,
+            logger: {
+              warn: (m) => logger?.warn(m),
+              info: (m) => logger?.info(m),
+            },
           },
-        },
-      );
-
-      const text = response.text ?? '';
-      logger?.info(`[gemini] response ${text.length} chars`);
-
-      // JSON extraction — match legacy line 819 (`re.search(r'\{[\s\S]*\}'`)).
-      const match = text.match(/\{[\s\S]*\}/);
-      if (!match) {
-        throw new Error(
-          `Could not extract JSON from Gemini response: ${text.slice(0, 500)}`,
         );
-      }
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(match[0]) as Record<string, unknown>;
-      } catch (err) {
-        // Faithful port of statement_reconcile.py:828-836: try the
-        // repair-then-parse fallback. If even that fails, surface a
-        // clean error for the operator.
-        logger?.warn(
-          `[gemini] JSON parse error: ${
-            err instanceof Error ? err.message : String(err)
-          } — attempting repair...`,
+
+        const text = response.text ?? '';
+        lastResponseText = text;
+        // finishReason: 1=STOP normal, 2=MAX_TOKENS truncated, 3=SAFETY etc.
+        const finishReason =
+          (response as { candidates?: Array<{ finishReason?: number }> })
+            .candidates?.[0]?.finishReason ?? null;
+        logger?.info(
+          `[gemini] response ${text.length} chars, finishReason=${finishReason ?? '?'} (attempt ${attempt + 1}/${MAX_ATTEMPTS})`,
         );
-        const repaired = repairJson(match[0]);
-        try {
-          parsed = JSON.parse(repaired) as Record<string, unknown>;
-          logger?.info('[gemini] JSON repair successful');
-        } catch (err2) {
+
+        // JSON extraction — match legacy line 819 (`re.search(r'\{[\s\S]*\}'`)).
+        const match = text.match(/\{[\s\S]*\}/);
+        if (!match) {
+          if (attempt < MAX_ATTEMPTS - 1) {
+            logger?.warn(
+              `[gemini] no JSON in response (attempt ${attempt + 1}) — retrying`,
+            );
+            continue;
+          }
           throw new Error(
-            `Could not parse JSON even after repair: ${
-              err2 instanceof Error ? err2.message : String(err2)
-            }. Original error: ${err instanceof Error ? err.message : String(err)}`,
+            `Could not extract JSON from Gemini response: ${text.slice(0, 500)}`,
           );
         }
+        let candidateParsed: Record<string, unknown>;
+        try {
+          candidateParsed = JSON.parse(match[0]) as Record<string, unknown>;
+        } catch (err) {
+          // Faithful port of statement_reconcile.py:828-836: try the
+          // repair-then-parse fallback. If even that fails on the
+          // final attempt, surface a clean error.
+          logger?.warn(
+            `[gemini] JSON parse error: ${
+              err instanceof Error ? err.message : String(err)
+            } — attempting repair...`,
+          );
+          const repaired = repairJson(match[0]);
+          try {
+            candidateParsed = JSON.parse(repaired) as Record<string, unknown>;
+            logger?.info('[gemini] JSON repair successful');
+          } catch (err2) {
+            if (attempt < MAX_ATTEMPTS - 1) {
+              logger?.warn(`[gemini] repair failed on attempt ${attempt + 1} — retrying`);
+              continue;
+            }
+            throw new Error(
+              `Could not parse JSON even after repair: ${
+                err2 instanceof Error ? err2.message : String(err2)
+              }. Original error: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
+        const rawTxns = Array.isArray(candidateParsed.transactions)
+          ? (candidateParsed.transactions as unknown[])
+          : [];
+        const looksTruncated = finishReason === 2 || rawTxns.length < 5;
+        if (looksTruncated && attempt < MAX_ATTEMPTS - 1) {
+          logger?.warn(
+            `[gemini] only ${rawTxns.length} transactions extracted (attempt ${attempt + 1}, finishReason=${finishReason ?? '?'}) — retrying with explicit instruction`,
+          );
+          prompt =
+            `The previous extraction attempt only returned ${rawTxns.length} transactions.\n` +
+            `This bank statement has MANY MORE transactions than that across multiple pages.\n\n` +
+            `CRITICAL: You MUST extract EVERY SINGLE transaction from ALL pages of this PDF.\n` +
+            `Go through page by page systematically. Do not stop after the first page.\n` +
+            `A typical business bank statement has 20-100+ transactions.\n\n` +
+            EXTRACTION_PROMPT;
+          continue;
+        }
+
+        parsed = candidateParsed;
+        break;
+      }
+
+      if (parsed === null) {
+        throw new Error(
+          `Failed to extract transactions from PDF after ${MAX_ATTEMPTS} attempts: ${lastResponseText.slice(0, 300)}`,
+        );
       }
 
       const result = parseResultJson(parsed, logger);
