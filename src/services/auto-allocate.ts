@@ -64,6 +64,17 @@ function round2(n: number): number {
 }
 
 /**
+ * Pluggable lookup for Rule 0 (GoCardless payment-request invoice
+ * refs). When set, the receipt allocator consults this hook with the
+ * supplied gc_payment_id and uses the returned invoice references as
+ * the primary allocation target. The default standalone wiring leaves
+ * this unset; the GoCardless plugin can inject its own implementation.
+ */
+export interface PaymentRequestInvoiceLookup {
+  (gcPaymentId: string): Promise<string[] | null>;
+}
+
+/**
  * Allocate a posted receipt against outstanding customer invoices.
  * Faithful port of auto_allocate_receipt (opera_sql_import.py:7017).
  */
@@ -75,6 +86,15 @@ export async function autoAllocateReceipt(args: {
   allocationDate: string;
   bankAccount: string;
   description?: string | null;
+  /** Optional GoCardless payment ID — when provided alongside a
+   *  paymentRequestLookup, Rule 0 fires and the invoice_refs from
+   *  the payment request become the allocation target. Matches
+   *  opera_sql_import.py:7025. */
+  gcPaymentId?: string | null;
+  /** Lookup hook for Rule 0. When omitted, Rule 0 is skipped and the
+   *  allocator falls through to Rule 1 / Rule 2 as the SAM standalone
+   *  has always done. */
+  paymentRequestLookup?: PaymentRequestInvoiceLookup | null;
 }): Promise<AutoAllocateResult> {
   const {
     trx,
@@ -84,6 +104,8 @@ export async function autoAllocateReceipt(args: {
     allocationDate,
     bankAccount,
     description = '',
+    gcPaymentId,
+    paymentRequestLookup,
   } = args;
 
   const result: AutoAllocateResult = {
@@ -163,14 +185,96 @@ export async function autoAllocateReceipt(args: {
 
     let invoicesToAllocate: InvoiceAllocation[] = [];
     let allocationMethod: string | null = null;
+    let receiptFullyAllocatedRule0 = true;
 
-    // RULE 1: invoice reference in description.
+    // RULE 0: GoCardless payment-request invoice lookup.
+    // Faithful port of opera_sql_import.py:7120-7189. When the caller
+    // raised a payment request against specific invoices, those refs
+    // are the precise allocation target. Each invoice is rechecked
+    // against current stran state so anything already paid manually
+    // is excluded.
+    if (gcPaymentId && paymentRequestLookup) {
+      try {
+        const prInvoiceRefs = await paymentRequestLookup(gcPaymentId);
+        if (Array.isArray(prInvoiceRefs) && prInvoiceRefs.length > 0) {
+          const prInvoicesToAllocate: InvoiceAllocation[] = [];
+          const skippedInvoices: string[] = [];
+          for (const wantedRef of prInvoiceRefs) {
+            const wantedUpper = wantedRef.trim().toUpperCase();
+            let found = false;
+            for (const inv of invoiceRows) {
+              if ((inv.st_trref ?? '').trim().toUpperCase() === wantedUpper) {
+                const invBalance = Number(inv.st_trbal);
+                if (invBalance > 0.005) {
+                  prInvoicesToAllocate.push({
+                    ref: (inv.st_trref ?? '').trim(),
+                    custref: (inv.st_custref ?? '').trim(),
+                    amount: invBalance,
+                    full_allocation: true,
+                    unique: (inv.st_unique ?? '').trim(),
+                    stran_id: Number(inv.id),
+                  });
+                } else {
+                  skippedInvoices.push(`${wantedRef} (already paid)`);
+                }
+                found = true;
+                break;
+              }
+            }
+            if (!found) skippedInvoices.push(`${wantedRef} (not found/outstanding)`);
+          }
+
+          if (prInvoicesToAllocate.length > 0) {
+            const totalPrInvoiceBalance = round2(
+              prInvoicesToAllocate.reduce((s, a) => s + a.amount, 0),
+            );
+            if (receiptRounded >= totalPrInvoiceBalance) {
+              // Receipt covers all outstanding invoices from the request;
+              // any excess stays on account (receipt NOT fully allocated
+              // to invoices — opera_sql_import.py:7266-7268).
+              invoicesToAllocate = prInvoicesToAllocate;
+              allocationMethod = 'payment_request';
+              if (receiptRounded > totalPrInvoiceBalance) {
+                receiptFullyAllocatedRule0 = false;
+              }
+            } else {
+              // Receipt is less than outstanding invoices — allocate
+              // oldest first up to the receipt amount (partial path
+              // at opera_sql_import.py:7170-7182).
+              let remaining = receiptRounded;
+              for (const inv of prInvoicesToAllocate) {
+                if (remaining <= 0.005) break;
+                const allocAmt = Math.min(inv.amount, remaining);
+                inv.amount = allocAmt;
+                inv.full_allocation = Math.abs(allocAmt - inv.amount) < 0.01;
+                remaining -= allocAmt;
+              }
+              invoicesToAllocate = prInvoicesToAllocate.filter(
+                (a) => a.amount > 0.005,
+              );
+              allocationMethod = 'payment_request';
+            }
+          }
+          // All invoices already paid → fall through to Rule 1/2.
+        }
+      } catch (rule0Err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bank-reconcile] auto-allocate Rule 0 lookup failed for ${gcPaymentId}: ${
+            rule0Err instanceof Error ? rule0Err.message : String(rule0Err)
+          }`,
+        );
+        // Fall through to existing rules.
+      }
+    }
+
+    // RULE 1: invoice reference in description (skipped if Rule 0 fired).
     let invMatches: string[] = [];
     if (description) {
       const m = description.toUpperCase().match(/INV\d+/g);
       if (m) invMatches = m;
     }
-    if (invMatches.length > 0) {
+    if (!allocationMethod && invMatches.length > 0) {
       for (const invRef of invMatches) {
         for (const inv of invoiceRows) {
           if ((inv.st_trref ?? '').trim().toUpperCase() === invRef) {
@@ -237,8 +341,20 @@ export async function autoAllocateReceipt(args: {
 
     // Execute the allocation. We assume the caller already opened a
     // trx, so we just write inside it (no inner BEGIN/COMMIT).
-    const totalToAllocate = receiptAmount;
-    const receiptFullyAllocated = true;
+    //
+    // For Rule 0 (payment_request) where the receipt exceeds the
+    // total invoice balance, legacy allocates ONLY the invoice total
+    // and leaves the remainder on account
+    // (opera_sql_import.py:7266-7271).
+    const totalInvoiceAmountRule0 = round2(
+      invoicesToAllocate.reduce((s, a) => s + a.amount, 0),
+    );
+    const totalToAllocate =
+      allocationMethod === 'payment_request' && !receiptFullyAllocatedRule0
+        ? totalInvoiceAmountRule0
+        : receiptAmount;
+    const receiptFullyAllocated =
+      allocationMethod === 'payment_request' ? receiptFullyAllocatedRule0 : true;
     const allocDateStr = allocationDate.slice(0, 10);
     const nowStr = fmtNow();
 
@@ -291,9 +407,11 @@ export async function autoAllocateReceipt(args: {
     if (receiptFullyAllocated) {
       const sallocId = await getNextId(trx, 'salloc');
       const allocRef2 =
-        allocationMethod === 'invoice_reference'
-          ? 'AUTO:INV_REF'
-          : 'AUTO:CLR_ACCT';
+        allocationMethod === 'payment_request'
+          ? 'AUTO:GC_REQ'
+          : allocationMethod === 'invoice_reference'
+            ? 'AUTO:INV_REF'
+            : 'AUTO:CLR_ACCT';
       const receiptTrdate =
         typeof receipt.st_trbal === 'number' ? allocDateStr : allocDateStr;
       await trx.raw(
@@ -421,9 +539,11 @@ export async function autoAllocateReceipt(args: {
     result.receipt_fully_allocated = receiptFullyAllocated;
     result.allocation_method = allocationMethod ?? undefined;
     result.message =
-      allocationMethod === 'invoice_reference'
-        ? `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) by reference`
-        : `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) - clears account`;
+      allocationMethod === 'payment_request'
+        ? `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) from payment request`
+        : allocationMethod === 'invoice_reference'
+          ? `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) by reference`
+          : `Allocated £${totalToAllocate.toFixed(2)} to ${invoicesToAllocate.length} invoice(s) - clears account`;
     return result;
   } catch (err) {
     result.message = `Allocation failed: ${
