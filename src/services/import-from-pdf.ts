@@ -29,6 +29,7 @@ import {
   SqlInputValidationError,
 } from '../_shared/index.js';
 import { markEntriesReconciled } from './mark-reconciled.js';
+import { learnPattern } from './bank-pattern-learner.js';
 
 export interface PdfExtractionResult {
   bank_name: string | null;
@@ -140,6 +141,12 @@ export interface ImportFromPdfInput {
    *  Legacy threads `request.state.user.username` here
    *  (routes.py:4502). When omitted, defaults to 'system'. */
   importedBy?: string | null;
+  /** Tenant company code (e.g. 'intsys', 'cloudsis'). Threaded onto
+   *  bank_import_patterns rows so the legacy upsert key
+   *  (company_code, description_normalized) works. Defaults to
+   *  'default' to match BankPatternLearner's fallback
+   *  (bank_patterns.py:54). */
+  companyCode?: string | null;
 }
 
 export interface ImportFromPdfResponse {
@@ -551,6 +558,63 @@ export async function importBankStatementFromPdf(
         console.warn(
           `[bank-reconcile] persist post-import tracking failed: ${
             writeErr instanceof Error ? writeErr.message : String(writeErr)
+          }`,
+        );
+      }
+
+      // Pattern learning. Faithful port of routes.py:4583-4606.
+      // For every operator override with an account+ledger_type, write
+      // the (description -> account) mapping to bank_import_patterns so
+      // subsequent imports auto-match. Non-fatal on failure.
+      try {
+        const companyForPatterns = input.companyCode ?? 'default';
+        let learned = 0;
+        for (const raw of input.overrides ?? []) {
+          const ov = (raw ?? {}) as {
+            row?: number;
+            account?: string | null;
+            account_name?: string | null;
+            ledger_type?: string | null;
+            transaction_type?: string | null;
+            vat_code?: string | null;
+            nominal_code?: string | null;
+            net_amount?: number | null;
+          };
+          if (!ov.account || !ov.ledger_type) continue;
+          const txn = txnList[(Number(ov.row) || 0) - 1] as
+            | { name?: string | null; memo?: string | null; amount?: number }
+            | undefined;
+          if (!txn) continue;
+          const desc = (txn.memo ?? txn.name ?? '').toString();
+          if (!desc) continue;
+          const defaultType =
+            Number(txn.amount ?? 0) < 0 ? 'PI' : 'SI';
+          const ok = await learnPattern(appDb, {
+            companyCode: companyForPatterns,
+            description: desc,
+            transactionType: ov.transaction_type ?? defaultType,
+            accountCode: ov.account,
+            accountName: ov.account_name ?? null,
+            ledgerType: ov.ledger_type,
+            vatCode: ov.vat_code ?? null,
+            nominalCode: ov.nominal_code ?? null,
+            netAmount: ov.net_amount ?? null,
+          });
+          if (ok) learned += 1;
+        }
+        if (learned > 0) {
+          // eslint-disable-next-line no-console
+          console.info(
+            `[bank-reconcile] learned ${learned} pattern(s) from ${
+              (input.overrides ?? []).length
+            } override(s)`,
+          );
+        }
+      } catch (patErr) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bank-reconcile] pattern learner pass failed: ${
+            patErr instanceof Error ? patErr.message : String(patErr)
           }`,
         );
       }

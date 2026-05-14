@@ -2321,6 +2321,11 @@ export function createRouter(ctx: AppContext): Router {
               : [],
             skipOverlapCheck: body.skip_overlap_check === true,
             importedBy: req.user?.userId ?? null,
+            // Tenant id (`standalone:<co>` in standalone mode, `<co>`
+            // in plain SAM) is what the legacy learner key expects.
+            // Stripping the namespace prefix keeps row reuse clean
+            // across mode switches.
+            companyCode: (ctx.tenantId ?? '').replace(/^standalone:/, '') || null,
           },
           extractor,
           executor,
