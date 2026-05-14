@@ -449,7 +449,9 @@ export async function getStatementReview(appDb, importId) {
                 records_failed: Number(row.records_failed ?? 0),
                 opening_balance: row.opening_balance,
                 closing_balance: row.closing_balance,
-                status: row.import_status ?? '',
+                // No import_status column on the SAM schema — row existence
+                // implies "imported".
+                status: 'imported',
             },
         };
     }

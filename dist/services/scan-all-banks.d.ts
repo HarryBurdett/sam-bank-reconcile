@@ -2,6 +2,8 @@ import type { Knex } from 'knex';
 import type { AppLogger as Logger } from '../app-context.js';
 import type { BankMailboxAdapter } from './scan-emails.js';
 import type { BankWithStatements, StatementCandidate } from './scan-all-banks-types.js';
+import type { PdfExtractor } from './import-from-pdf.js';
+import type { EmailAttachmentProvider } from './preview-from-email.js';
 /**
  * Full response shape — matches legacy line 7910 verbatim.
  */
@@ -42,7 +44,18 @@ export interface ScanAllBanksOptions {
     daysBack?: number;
     includeProcessed?: boolean;
     validateBalances?: boolean;
+    /** When true (default) and an extractor is supplied, the scanner
+     *  eagerly extracts the first pending_extraction PDF per bank so
+     *  the operator sees opening/closing balances + the next-in-
+     *  sequence marker without a separate Analyse pass. Bounded to one
+     *  Gemini call per pending bank per scan to cap cost. */
     extractOnMiss?: boolean;
+    /** PDF extractor (Gemini). When present + extractOnMiss=true,
+     *  pending PDFs that lack cached balances get extracted inline. */
+    extractor?: PdfExtractor | null;
+    /** Email-attachment provider — required to eager-extract PDFs
+     *  whose only source is the IMAP mailbox (no folder copy). */
+    emailAttachments?: EmailAttachmentProvider | null;
     pageSize?: number;
 }
 export declare function scanAllBanksFaithful(operaDb: Knex, mailbox: BankMailboxAdapter | null, appDb: Knex | null, logger: Logger, opts?: ScanAllBanksOptions): Promise<ScanAllBanksResponse>;

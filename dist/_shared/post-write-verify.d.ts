@@ -76,7 +76,7 @@ export declare function assertLedgerRow(trx: Knex, opts: {
  */
 export declare function assertBalancedPair(trx: Knex, opts: {
     table: 'ntran' | 'anoml';
-    sharedUnique: string;
+    journal: number;
     expectedCount: number;
     entryNumber: string;
 }): Promise<void>;

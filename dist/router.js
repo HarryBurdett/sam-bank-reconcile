@@ -2801,12 +2801,20 @@ export function createRouter(ctx) {
         const appDb = ctx.db.app ?? null;
         const adapter = ctx;
         const mailbox = adapter.bankMailboxAdapter ?? builtinEmailIngest?.mailbox ?? null;
+        const extractor = adapter.bankPdfExtractor ?? builtinPdfExtractor ?? null;
+        const emailAttachments = adapter.bankEmailAttachments ??
+            builtinEmailIngest?.attachments ??
+            null;
         const daysBack = req.query.days_back ? Number(req.query.days_back) : 30;
         const validateBalances = req.query.validate_balances !== 'false';
+        const extractOnMiss = req.query.extract_on_miss !== 'false';
         const { scanAllBanksFaithful } = await import('./services/scan-all-banks.js');
         res.json(await scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
             daysBack,
             validateBalances,
+            extractOnMiss,
+            extractor,
+            emailAttachments,
         }));
     });
     /**

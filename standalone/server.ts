@@ -464,6 +464,97 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
     });
   });
 
+  // /api/file/view — serve a PDF (or other file) for inline preview
+  // by the FE iframe viewer. Faithful port of legacy api/main.py:
+  // 7826 (`view_file`). Reads the file from disk and streams it back
+  // with content type derived from extension and Content-Disposition:
+  // inline so the browser renders rather than downloads.
+  app.get('/api/file/view', (req: Request, res: Response): void => {
+    const rawPath = String(req.query.path ?? '');
+    if (!rawPath) {
+      res.status(400).json({ error: 'path query parameter required' });
+      return;
+    }
+    let filePath = rawPath;
+    if (!existsSync(filePath)) {
+      res.status(404).json({ error: `File not found: ${rawPath}` });
+      return;
+    }
+    try {
+      const lower = filePath.toLowerCase();
+      const contentType = lower.endsWith('.pdf')
+        ? 'application/pdf'
+        : lower.endsWith('.csv')
+          ? 'text/csv'
+          : 'application/octet-stream';
+      const bytes = readFileSync(filePath);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+      res.send(bytes);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: `Failed to read file: ${msg}` });
+    }
+  });
+
+  // /api/email/messages/:emailId/attachments/:attachmentId/view —
+  // streams an IMAP attachment back for inline browser preview.
+  // Faithful port of legacy api/main.py:6652 (view_email_attachment).
+  app.get(
+    '/api/email/messages/:emailId/attachments/:attachmentId/view',
+    async (req: Request, res: Response): Promise<void> => {
+      const code = req.standaloneCompany;
+      if (!code) {
+        res.status(400).json({ error: 'no company in session' });
+        return;
+      }
+      const company = companies.get(code);
+      if (!company) {
+        res.status(404).json({ error: `unknown company: ${code}` });
+        return;
+      }
+      const attachments = (
+        company.ctx as unknown as {
+          bankEmailAttachments?: import('../src/services/preview-from-email.js').EmailAttachmentProvider;
+        }
+      ).bankEmailAttachments;
+      if (!attachments) {
+        res.status(503).json({ error: 'email attachment provider not configured' });
+        return;
+      }
+      const emailId = Number(req.params.emailId);
+      const attachmentId = String(req.params.attachmentId);
+      if (!Number.isFinite(emailId) || emailId <= 0) {
+        res.status(400).json({ error: 'invalid email_id' });
+        return;
+      }
+      try {
+        const downloaded = await attachments.fetchAttachment({
+          emailId,
+          attachmentId,
+        });
+        if (!downloaded) {
+          res.status(404).json({ error: 'Attachment not found' });
+          return;
+        }
+        res.setHeader(
+          'Content-Type',
+          downloaded.contentType || 'application/octet-stream',
+        );
+        res.setHeader(
+          'Content-Disposition',
+          `inline; filename="${downloaded.filename.replace(/"/g, '')}"`,
+        );
+        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+        res.send(Buffer.from(downloaded.bytes));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        res.status(500).json({ error: `Failed to fetch attachment: ${msg}` });
+      }
+    },
+  );
+
   // Frontend static bundle. We set Cache-Control: no-store so the
   // browser never serves a stale bundle after a rebuild — the dist
   // entry filename is unfingerprinted (Vite lib mode), so without

@@ -730,7 +730,6 @@ export async function getStatementReview(
           records_failed: number | null;
           opening_balance: number | null;
           closing_balance: number | null;
-          import_status: string | null;
         }
       | undefined;
     if (!row) {
@@ -750,7 +749,9 @@ export async function getStatementReview(
         records_failed: Number(row.records_failed ?? 0),
         opening_balance: row.opening_balance,
         closing_balance: row.closing_balance,
-        status: row.import_status ?? '',
+        // No import_status column on the SAM schema — row existence
+        // implies "imported".
+        status: 'imported',
       },
     };
   } catch (err: any) {

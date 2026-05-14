@@ -194,7 +194,35 @@ export function extractStatementNumberFromFilename(
     }
   }
 
-  // Pattern 2: DD/MM/YYYY or DD-MM-YYYY
+  // Pattern 2: YYYY-MM-DD (must run BEFORE the DD-MM-YYYY pattern below
+  // because filenames like "Monzo_bank_statement_2026-04-01-2026-04-28"
+  // contain two YYYY-MM-DD dates joined by a hyphen — the DD-MM-YYYY
+  // pattern would greedy-match the middle chunk "04-01-2026" and emit
+  // a bogus "04-JAN-2026". When multiple ISO dates appear, pick the
+  // LAST one — that's the statement end date (the value finance users
+  // expect to see as the "statement date").
+  const ymdRe = /(20\d{2})[-/](\d{1,2})[-/](\d{1,2})/g;
+  let ymdMatch: RegExpExecArray | null;
+  let lastYmd: RegExpExecArray | null = null;
+  while ((ymdMatch = ymdRe.exec(searchText)) !== null) {
+    const year = Number(ymdMatch[1]);
+    const month = Number(ymdMatch[2]);
+    const day = Number(ymdMatch[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      lastYmd = ymdMatch;
+    }
+  }
+  if (lastYmd) {
+    const year = Number(lastYmd[1]);
+    const month = Number(lastYmd[2]);
+    const day = Number(lastYmd[3]);
+    return {
+      sort_key: [year, month, day, 0],
+      display_date: `${formatDay(day)}-${monthAbbr(month)}-${year}`,
+    };
+  }
+
+  // Pattern 3: DD/MM/YYYY or DD-MM-YYYY (UK-style)
   const dmy = /(\d{1,2})[/-](\d{1,2})[/-](20\d{2})/.exec(searchText);
   if (dmy) {
     const day = Number(dmy[1]);
@@ -204,20 +232,6 @@ export function extractStatementNumberFromFilename(
       month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
       Number.isFinite(year)
     ) {
-      return {
-        sort_key: [year, month, day, 0],
-        display_date: `${formatDay(day)}-${monthAbbr(month)}-${year}`,
-      };
-    }
-  }
-
-  // Pattern 3: YYYY-MM-DD
-  const ymd = /(20\d{2})[-/](\d{1,2})[-/](\d{1,2})/.exec(searchText);
-  if (ymd) {
-    const year = Number(ymd[1]);
-    const month = Number(ymd[2]);
-    const day = Number(ymd[3]);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
       return {
         sort_key: [year, month, day, 0],
         display_date: `${formatDay(day)}-${monthAbbr(month)}-${year}`,

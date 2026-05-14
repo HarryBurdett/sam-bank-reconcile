@@ -22,6 +22,10 @@ import type {
   PdfExtractor,
 } from '../src/services/import-from-pdf.js';
 import { callGeminiWithThrottle } from './gemini-throttle.js';
+import {
+  solveStatementBalance,
+  type SolverTxn,
+} from '../src/services/statement-balance-solver.js';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 
@@ -115,7 +119,27 @@ STEP 4 — REPORT BALANCES (DO NOT CALCULATE):
   If no explicit label exists, set to null — the code will calculate it.
 - closing_balance: If labelled ("Balance carried forward", "Closing balance") use it.
   Otherwise use the running balance on the very last transaction.
-- summary: If a summary section exists, report its values. Otherwise set all to null.
+- summary: CRITICAL — the downstream solver relies on these totals to
+  derive the opening balance arithmetically (opening = closing − total_in +
+  total_out). If the statement prints ANY of: total deposits / total in,
+  total withdrawals / total out, opening balance, closing balance — in a
+  summary box, header, or footer — extract them into the summary object.
+  Look for phrases like "Total deposits", "Total credits", "Money in",
+  "Total in" → total_in. Look for "Total withdrawals", "Total debits",
+  "Money out", "Total out", "Total outgoings" → total_out. Numeric values
+  only, no currency symbols, no signs (total_out is always positive).
+  Only set a field to null if it is NOT printed anywhere on the statement.
+
+STEP 4b — PER-TRANSACTION AMOUNTS (CRITICAL):
+For every transaction row, money_in OR money_out MUST be populated — never
+both null. Look at the amount column. If you see a positive value or a
+value in a "credits/deposits" column → money_in. If you see a negative
+value or a value in a "debits/withdrawals" column → money_out. Always use
+the absolute value (no minus signs). If a single column has signed values
+(e.g. "-50.00"), put the absolute value in money_out for negatives, money_in
+for positives. If money_in and money_out are both null for any row, the
+downstream balance chain calculation will fail — re-check the row before
+emitting it.
 
 Return this JSON structure:
 {
@@ -436,29 +460,76 @@ function parseResultJson(
     };
   });
 
-  // Legacy: never trust AI's opening_balance. Derive from chain.
-  // Faithful port of _parse_extraction_result @ statement_reconcile.py:1002.
+  // Opening + closing derivation via the format-agnostic constraint
+  // solver. Replaces the older calculateOpeningBalance + chain-walk
+  // pair. The solver gathers every fact present on the statement
+  // (labelled opening, labelled closing, summary totals, per-txn
+  // chain) and picks the value that the most independent constraints
+  // agree on. See docs/superpowers/specs/2026-05-14-statement-
+  // balance-derivation-design.md.
   const aiOpening = safeFloat(info.opening_balance);
   const aiClosing = safeFloat(info.closing_balance);
   const summary = (info.summary ?? {}) as Record<string, unknown>;
   const summaryOpening = safeFloat(summary.opening_balance);
-  const chainOpening = calculateOpeningBalance(
-    rawTransactions as RawTxn[],
-    aiClosing,
-    summaryOpening,
-    logger,
-  );
+  const summaryClosing = safeFloat(summary.closing_balance);
+  const summaryTotalIn = safeFloat(summary.total_in);
+  const summaryTotalOut = safeFloat(summary.total_out);
+  // labelledClosing: prefer summary.closing if set, else AI's top-
+  // level closing_balance. labelledOpening: only when explicitly
+  // labelled (legacy prompt rule).
+  const labelledClosing = summaryClosing ?? aiClosing;
+  const labelledOpening = aiOpening ?? summaryOpening;
 
-  let opening: number | null = aiOpening;
-  if (chainOpening !== null) {
-    if (aiOpening !== null && Math.abs(aiOpening - chainOpening) > 0.01) {
-      logger?.info(
-        `[gemini] opening balance overridden: AI=${aiOpening}, calculated=${chainOpening}`,
-      );
-    } else if (aiOpening === null) {
-      logger?.info(`[gemini] opening balance calculated (AI had none): ${chainOpening}`);
+  const solverTxns: SolverTxn[] = rawTransactions.map((t, i) => {
+    const mi = safeFloat((t as RawTxn).money_in);
+    const mo = safeFloat((t as RawTxn).money_out);
+    let amount: number | null = null;
+    if (mi !== null || mo !== null) {
+      amount =
+        (mi !== null ? Math.abs(mi) : 0) -
+        (mo !== null ? Math.abs(mo) : 0);
     }
-    opening = chainOpening;
+    return {
+      index: i,
+      date: typeof (t as RawTxn).date === 'string'
+        ? ((t as RawTxn).date as string)
+        : null,
+      amount,
+      balance: safeFloat((t as RawTxn).balance),
+    };
+  });
+
+  const solved = solveStatementBalance({
+    txns: solverTxns,
+    labelledOpening,
+    labelledClosing,
+    summaryTotalIn,
+    summaryTotalOut,
+    // externalReconciledBalance not threaded yet — added in a later
+    // wiring step from the caller. For now solver runs without it.
+    externalReconciledBalance: null,
+  });
+
+  let opening: number | null = null;
+  let closing: number | null = labelledClosing;
+  if (solved.ok) {
+    opening = solved.opening;
+    closing = solved.closing;
+    logger?.info(
+      `[gemini] solver: opening=£${solved.opening.toFixed(2)} closing=£${solved.closing.toFixed(2)} ` +
+        `source=${solved.chosenSource} chained=${solved.chainedTxnIndexes.length}/${solverTxns.length} ` +
+        `rejected=${solved.rejectedTxnIndexes.length}`,
+    );
+    for (const note of solved.notes) logger?.debug(`[gemini] solver: ${note}`);
+  } else {
+    logger?.warn(
+      `[gemini] solver failed: ${solved.reason}; falling back to AI-supplied values`,
+    );
+    for (const note of solved.notes) logger?.warn(`[gemini] solver: ${note}`);
+    // Fallback: trust the AI's opening/closing as-is so the operator
+    // sees something, with the solver discrepancy logged for review.
+    opening = aiOpening;
+    closing = aiClosing;
   }
 
   return {
@@ -472,7 +543,7 @@ function parseResultJson(
       typeof info.period_start === 'string' ? info.period_start : null,
     period_end: typeof info.period_end === 'string' ? info.period_end : null,
     opening_balance: opening,
-    closing_balance: aiClosing,
+    closing_balance: closing,
     transactions,
   };
 }

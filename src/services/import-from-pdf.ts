@@ -330,12 +330,40 @@ export async function importBankStatementFromPdf(
       );
     }
 
+    // Build override + dateOverride lookup maps EARLY so the
+    // closed-year and period-validation passes see the operator's
+    // edited date and the override-supplied action (preview-pass
+    // matcher result isn't on extracted.transactions; only overrides
+    // carry action for the import endpoint). Pre-port TS built these
+    // maps AFTER the validation loops, so the loops read pre-override
+    // values and were effectively dead code. Audit 2026-05-14 BLOCKER.
+    const earlyOverrideByRow = new Map<
+      number,
+      { transaction_type?: string | null }
+    >();
+    for (const raw of input.overrides ?? []) {
+      const o = (raw ?? {}) as { row?: number; transaction_type?: string | null };
+      const row = Number(o.row ?? 0);
+      if (!row) continue;
+      earlyOverrideByRow.set(row, { transaction_type: o.transaction_type });
+    }
+    const earlyDateOverrideByRow = new Map<number, string>();
+    for (const raw of input.dateOverrides ?? []) {
+      const d = raw as { row?: number; date?: string };
+      if (!d?.row || !d?.date) continue;
+      earlyDateOverrideByRow.set(Number(d.row), String(d.date));
+    }
+    const effectiveDateForRow = (i: number, fallback: string | null): string => {
+      const dateOverride = earlyDateOverrideByRow.get(i + 1);
+      return (dateOverride ?? fallback ?? '').slice(0, 10);
+    };
+
     const closedYearErrors: string[] = [];
     const closedYearSkipSet = new Set<number>();
     if (openYearStart) {
       for (let i = 0; i < extracted.transactions.length; i++) {
         const txn = extracted.transactions[i]!;
-        const txnDate = (txn.date ?? '').slice(0, 10);
+        const txnDate = effectiveDateForRow(i, txn.date ?? null);
         if (!txnDate) continue;
         if (txnDate < openYearStart) {
           const rowNum = i + 1;
@@ -359,9 +387,18 @@ export async function importBankStatementFromPdf(
       const txn = extracted.transactions[i]!;
       const rowNum = i + 1;
       if (closedYearSkipSet.has(rowNum)) continue;
-      const action = (txn as unknown as { action?: string }).action ?? null;
+      // Read action from override (operator's pick in the UI) first,
+      // then fall back to extracted.transactions (which is almost
+      // always null on the import endpoint — the preview matcher's
+      // result isn't carried through). Pre-port TS only read txn.action
+      // → always null → entire loop was dead. Audit 2026-05-14.
+      const overrideAction =
+        earlyOverrideByRow.get(rowNum)?.transaction_type ?? null;
+      const txnAction =
+        (txn as unknown as { action?: string | null }).action ?? null;
+      const action = overrideAction || txnAction;
       if (!action || action === 'skip' || action === 'defer') continue;
-      const txnDate = (txn.date ?? '').slice(0, 10);
+      const txnDate = effectiveDateForRow(i, txn.date ?? null);
       if (!txnDate) continue;
       try {
         const ledger = getLedgerTypeForTransaction(action);
@@ -480,6 +517,11 @@ export async function importBankStatementFromPdf(
       department_code?: string | null;
       cbtype?: string | null;
       net_amount?: number | null;
+      // FE always sends `bank_transfer_details`; legacy and the
+      // orchestrator should both read this key. The shorter
+      // `bank_transfer` form was a typo in the TS port — kept here as
+      // a backwards-compat alias so older payloads still work.
+      bank_transfer_details?: { dest_bank?: string | null } | null;
       bank_transfer?: { dest_bank?: string | null } | null;
     };
     const overrideByRow = new Map<number, OverrideRow>();
@@ -507,7 +549,15 @@ export async function importBankStatementFromPdf(
       const ov = overrideByRow.get(rowNum);
       if (ov) {
         if (ov.transaction_type) overlay.action = ov.transaction_type;
-        if (ov.account) overlay.manual_account = ov.account;
+        if (ov.account) {
+          overlay.manual_account = ov.account;
+          // Also populate matched_account so the executor's primary read
+          // hits a value. Without this, the matcher-set matched_account
+          // from the preview pass is lost on re-extract (no cache), and
+          // matched rows with action set but no override-account would
+          // throw "Missing matched_account".
+          overlay.matched_account = ov.account;
+        }
         if (ov.cbtype) overlay.cbtype = ov.cbtype;
         if (ov.nominal_code) overlay.nominal_code = ov.nominal_code;
         if (ov.vat_code) overlay.vat_code = ov.vat_code;
@@ -516,12 +566,16 @@ export async function importBankStatementFromPdf(
         if (ov.net_amount !== undefined && ov.net_amount !== null) {
           overlay.net_amount = ov.net_amount;
         }
+        // FE sends `bank_transfer_details`; legacy import_orchestration
+        // also uses that key. Keep `bank_transfer` as a back-compat alias.
+        const btDest =
+          ov.bank_transfer_details?.dest_bank ?? ov.bank_transfer?.dest_bank;
         if (
           (ov.transaction_type === 'bank_transfer' ||
             overlay.action === 'bank_transfer') &&
-          ov.bank_transfer?.dest_bank
+          btDest
         ) {
-          overlay.manual_account = ov.bank_transfer.dest_bank;
+          overlay.manual_account = btDest;
         }
       }
       const dateOverride = dateOverrideByRow.get(rowNum);
@@ -531,10 +585,17 @@ export async function importBankStatementFromPdf(
 
     // Build the effective selectedRows set. selectedRows uses 1-based
     // line numbers (matches executor's i+1 convention). When the UI
-    // sends null we treat it as "post everything"; on resume + closed-
-    // year + rejected-refund exclusions we then subtract those line
-    // numbers from a fully-populated list.
-    let effectiveSelected = input.selectedRows ?? null;
+    // sends null OR an empty array we treat it as "post everything";
+    // on resume + closed-year + rejected-refund exclusions we then
+    // subtract those line numbers from a fully-populated list.
+    // Legacy: `selected_rows_set = set(selected_rows) if selected_rows
+    // else None` — falsy treats `[]` and None the same way (routes.py:
+    // 4067, 4143, 4193). Empty array would otherwise be truthy in JS
+    // and turn into an empty Set → "select nothing".
+    let effectiveSelected =
+      input.selectedRows && input.selectedRows.length > 0
+        ? input.selectedRows
+        : null;
     if (
       alreadyPosted.size > 0 ||
       closedYearSkipSet.size > 0 ||
@@ -621,7 +682,6 @@ export async function importBankStatementFromPdf(
                 total_payments: prevPayments + totalPayments,
                 transactions_imported: prevTxImported + result.records_imported,
                 records_imported: prevImported + result.records_imported,
-                import_status: 'imported',
                 imported_at: appDb.fn.now(),
                 imported_by: input.importedBy ?? 'system',
               });
@@ -993,6 +1053,36 @@ export async function importBankStatementFromPdf(
         statement_info: statementInfoOut,
         ...(reconciliationResult ? { reconciliation_result: reconciliationResult } : {}),
         ...(autoReconcileEnabled ? { auto_reconcile_enabled: true } : {}),
+      };
+    }
+    // No-op success case: the executor ran cleanly (no errors) but
+    // posted zero rows — e.g. a re-attempt where every transaction
+    // is already in Opera and was correctly skipped by the dup-check.
+    // Pre-fix the function silently returned `success: false, error:
+    // 'Import failed'` because the success-return was nested inside
+    // the shouldPersistAudit block. Treat this as success and report
+    // nothing to do.
+    if (
+      result.success &&
+      result.records_imported === 0 &&
+      deferredCount === 0 &&
+      closedYearErrors.length === 0 &&
+      periodErrors.length === 0
+    ) {
+      return {
+        success: true,
+        message:
+          result.skipped_count > 0
+            ? `Nothing to import — ${result.skipped_count} transaction(s) already in Opera.`
+            : 'Nothing to import.',
+        records_imported: 0,
+        records_failed: 0,
+        skipped_count: result.skipped_count ?? 0,
+        deferred_count: 0,
+        warnings: result.warnings,
+        imported_count: 0,
+        imported_transactions: [],
+        resume_import_id: overlap.resumeImportId,
       };
     }
     return {

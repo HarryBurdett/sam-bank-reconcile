@@ -116,13 +116,17 @@ export async function assertLedgerRow(trx, opts) {
  * sum-of-value=0.
  */
 export async function assertBalancedPair(trx, opts) {
-    const uniqueCol = opts.table === 'ntran' ? 'nt_pstid' : 'ax_unique';
+    // Legacy allocates a DISTINCT unique ID per leg (audit 2026-05-14,
+    // opera_sql_import.py:2253). So we can't key the count by the
+    // per-row unique — we use `nt_jrnl` / `ax_jrnl`, which IS shared
+    // across the pair (one journal per posting via insertNjmemo).
+    const jrnlCol = opts.table === 'ntran' ? 'nt_jrnl' : 'ax_jrnl';
     const valueCol = opts.table === 'ntran' ? 'nt_value' : 'ax_value';
     let rows;
     try {
         rows = (await trx.raw(`SELECT COUNT(*) AS cnt, SUM(${valueCol}) AS total
        FROM ${opts.table} WITH (NOLOCK)
-       WHERE RTRIM(${uniqueCol}) = ?`, [opts.sharedUnique]));
+       WHERE ${jrnlCol} = ?`, [opts.journal]));
     }
     catch (err) {
         throw new PostingVerificationError(`${opts.table} in-trx verify query failed for ${opts.entryNumber}: ${isPlainErr(err)}`, { entryNumber: opts.entryNumber, phase: 'in-trx' });
@@ -130,10 +134,10 @@ export async function assertBalancedPair(trx, opts) {
     const cnt = Number(rows?.[0]?.cnt ?? 0);
     const total = Number(rows?.[0]?.total ?? NaN);
     if (cnt !== opts.expectedCount) {
-        throw new PostingVerificationError(`${opts.table} pair count mismatch for ${opts.entryNumber}: got ${cnt}, expected ${opts.expectedCount} (unique=${opts.sharedUnique})`, { entryNumber: opts.entryNumber, phase: 'in-trx' });
+        throw new PostingVerificationError(`${opts.table} pair count mismatch for ${opts.entryNumber}: got ${cnt}, expected ${opts.expectedCount} (jrnl=${opts.journal})`, { entryNumber: opts.entryNumber, phase: 'in-trx' });
     }
     if (!Number.isFinite(total) || Math.abs(total) > 0.005) {
-        throw new PostingVerificationError(`${opts.table} pair does not balance for ${opts.entryNumber}: sum=${total} (unique=${opts.sharedUnique})`, { entryNumber: opts.entryNumber, phase: 'in-trx' });
+        throw new PostingVerificationError(`${opts.table} pair does not balance for ${opts.entryNumber}: sum=${total} (jrnl=${opts.journal})`, { entryNumber: opts.entryNumber, phase: 'in-trx' });
     }
 }
 // ---------------------------------------------------------------------

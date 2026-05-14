@@ -3052,7 +3052,70 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         .filter(([row]) => selectedForImport.has(row))
         .map(([row, cbtype]) => ({ row, cbtype }));
 
-      const allOverrides = [...unmatchedOverrides, ...skippedOverrides, ...refundOverridesList];
+      // MATCHED ROWS — see comment at the other import call site. Without
+      // passing the auto-matched action+account as an override, the backend
+      // executor defaults the action to 'skip' and silently drops the row.
+      // The override must ALSO carry any operator-supplied VAT / nominal /
+      // project / department / net_amount / bank_transfer_details so the
+      // BE's VAT-split + bank-transfer branches receive the data they need.
+      // Audit 2026-05-14 HIGH defect: previously only row/account/ledger_type/
+      // transaction_type/cbtype were echoed, silently dropping VAT etc.
+      const matchedRowsForOverride = [
+        ...(bankPreview?.matched_receipts || []),
+        ...(bankPreview?.matched_payments || []),
+        ...(bankPreview?.matched_refunds || []),
+      ];
+      const matchedOverrides = matchedRowsForOverride
+        .filter((t: any) =>
+          t && selectedForImport.has(t.row) && t.action && t.action !== 'skip' && t.action !== 'defer',
+        )
+        .map((t: any) => {
+          const row = t.row as number;
+          const override: any = {
+            row,
+            account: (t.account ?? '') as string,
+            ledger_type:
+              (t.matched_ledger_type as string | undefined) ??
+              (t.action === 'sales_receipt' || t.action === 'sales_refund'
+                ? 'C'
+                : t.action === 'purchase_payment' || t.action === 'purchase_refund'
+                  ? 'S'
+                  : t.action?.startsWith('nominal_') || t.action === 'bank_transfer'
+                    ? 'N'
+                    : 'C'),
+            transaction_type: t.action as string,
+            cbtype: (t.cbtype as string | undefined) ?? undefined,
+          };
+          // Per-row nominal posting details (operator-edited via the
+          // Nominal Detail modal on a matched row).
+          const nomDetail = nominalPostingDetails.get(row);
+          if (nomDetail?.nominalCode) override.nominal_code = nomDetail.nominalCode;
+          if (nomDetail?.vatCode) override.vat_code = nomDetail.vatCode;
+          if (nomDetail?.projectCode) override.project_code = nomDetail.projectCode;
+          if (nomDetail?.departmentCode) override.department_code = nomDetail.departmentCode;
+          // Bank-transfer destination (operator opens a matched row in
+          // the BT modal and converts it to a transfer).
+          if (t.action === 'bank_transfer') {
+            const btDetails = bankTransferDetails.get(row);
+            if (btDetails) {
+              override.bank_transfer_details = {
+                dest_bank: btDetails.destBankCode,
+                cashbook_type: btDetails.cashbookType || 'TRF',
+                reference: btDetails.reference || '',
+                comment: btDetails.comment || '',
+                date: btDetails.date || '',
+              };
+            }
+          }
+          return override;
+        });
+
+      const allOverrides = [
+        ...unmatchedOverrides,
+        ...skippedOverrides,
+        ...refundOverridesList,
+        ...matchedOverrides,
+      ];
 
       // Merge cbtype overrides into allOverrides (add cbtype to existing overrides or create new ones)
       for (const cbo of cbtypeOverridesList) {
@@ -3930,7 +3993,66 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         .filter(([row]) => selectedForImport.has(row))
         .map(([row, cbtype]) => ({ row, cbtype }));
 
-      const allOverrides = [...unmatchedOverrides, ...skippedOverrides, ...refundOverridesList];
+      // MATCHED ROWS — every row the matcher resolved (sales_receipt /
+      // sales_refund / purchase_payment / purchase_refund / bank_transfer
+      // / nominal_*) needs its action + matched_account passed through as
+      // an override, otherwise the backend executor defaults the action
+      // to 'skip' and the row is silently dropped (records_imported=0).
+      // Only the `unmatchedOverrides` array above covers manually-assigned
+      // rows; auto-matched receipts/payments fall through that filter
+      // because they have no `editedTxn.manual_account`.
+      const matchedRowsForOverride = [
+        ...(bankPreview?.matched_receipts || []),
+        ...(bankPreview?.matched_payments || []),
+        ...(bankPreview?.matched_refunds || []),
+      ];
+      const matchedOverrides = matchedRowsForOverride
+        .filter((t: any) =>
+          t && selectedForImport.has(t.row) && t.action && t.action !== 'skip' && t.action !== 'defer',
+        )
+        .map((t: any) => {
+          const row = t.row as number;
+          const override: any = {
+            row,
+            account: (t.account ?? '') as string,
+            ledger_type:
+              (t.matched_ledger_type as string | undefined) ??
+              (t.action === 'sales_receipt' || t.action === 'sales_refund'
+                ? 'C'
+                : t.action === 'purchase_payment' || t.action === 'purchase_refund'
+                  ? 'S'
+                  : t.action?.startsWith('nominal_') || t.action === 'bank_transfer'
+                    ? 'N'
+                    : 'C'),
+            transaction_type: t.action as string,
+            cbtype: (t.cbtype as string | undefined) ?? undefined,
+          };
+          const nomDetail = nominalPostingDetails.get(row);
+          if (nomDetail?.nominalCode) override.nominal_code = nomDetail.nominalCode;
+          if (nomDetail?.vatCode) override.vat_code = nomDetail.vatCode;
+          if (nomDetail?.projectCode) override.project_code = nomDetail.projectCode;
+          if (nomDetail?.departmentCode) override.department_code = nomDetail.departmentCode;
+          if (t.action === 'bank_transfer') {
+            const btDetails = bankTransferDetails.get(row);
+            if (btDetails) {
+              override.bank_transfer_details = {
+                dest_bank: btDetails.destBankCode,
+                cashbook_type: btDetails.cashbookType || 'TRF',
+                reference: btDetails.reference || '',
+                comment: btDetails.comment || '',
+                date: btDetails.date || '',
+              };
+            }
+          }
+          return override;
+        });
+
+      const allOverrides = [
+        ...unmatchedOverrides,
+        ...skippedOverrides,
+        ...refundOverridesList,
+        ...matchedOverrides,
+      ];
 
       // Merge cbtype overrides into allOverrides (add cbtype to existing overrides or create new ones)
       for (const cbo of cbtypeOverridesList) {
@@ -4190,7 +4312,59 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         .filter(([row]) => selectedForImport.has(row))
         .map(([row, cbtype]) => ({ row, cbtype }));
 
-      const allOverrides = [...unmatchedOverrides, ...skippedOverrides, ...refundOverridesList];
+      // MATCHED ROWS — see comment at the other import call site.
+      const matchedRowsForOverride = [
+        ...(bankPreview?.matched_receipts || []),
+        ...(bankPreview?.matched_payments || []),
+        ...(bankPreview?.matched_refunds || []),
+      ];
+      const matchedOverrides = matchedRowsForOverride
+        .filter((t: any) =>
+          t && selectedForImport.has(t.row) && t.action && t.action !== 'skip' && t.action !== 'defer',
+        )
+        .map((t: any) => {
+          const row = t.row as number;
+          const override: any = {
+            row,
+            account: (t.account ?? '') as string,
+            ledger_type:
+              (t.matched_ledger_type as string | undefined) ??
+              (t.action === 'sales_receipt' || t.action === 'sales_refund'
+                ? 'C'
+                : t.action === 'purchase_payment' || t.action === 'purchase_refund'
+                  ? 'S'
+                  : t.action?.startsWith('nominal_') || t.action === 'bank_transfer'
+                    ? 'N'
+                    : 'C'),
+            transaction_type: t.action as string,
+            cbtype: (t.cbtype as string | undefined) ?? undefined,
+          };
+          const nomDetail = nominalPostingDetails.get(row);
+          if (nomDetail?.nominalCode) override.nominal_code = nomDetail.nominalCode;
+          if (nomDetail?.vatCode) override.vat_code = nomDetail.vatCode;
+          if (nomDetail?.projectCode) override.project_code = nomDetail.projectCode;
+          if (nomDetail?.departmentCode) override.department_code = nomDetail.departmentCode;
+          if (t.action === 'bank_transfer') {
+            const btDetails = bankTransferDetails.get(row);
+            if (btDetails) {
+              override.bank_transfer_details = {
+                dest_bank: btDetails.destBankCode,
+                cashbook_type: btDetails.cashbookType || 'TRF',
+                reference: btDetails.reference || '',
+                comment: btDetails.comment || '',
+                date: btDetails.date || '',
+              };
+            }
+          }
+          return override;
+        });
+
+      const allOverrides = [
+        ...unmatchedOverrides,
+        ...skippedOverrides,
+        ...refundOverridesList,
+        ...matchedOverrides,
+      ];
 
       // Merge cbtype overrides into allOverrides (add cbtype to existing overrides or create new ones)
       for (const cbo of cbtypeOverridesList) {
@@ -9776,7 +9950,9 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                               : allAlreadyInOpera
                                 ? 'All non-deferred transactions are now in Opera — nothing further to import, proceed to reconcile'
                               : bankImportResult?.success
-                                ? `${bankImportResult.imported_count || 0} imported — select remaining transactions to continue`
+                                ? (bankImportResult.imported_count || 0) === 0 && (bankImportResult.skipped_count || 0) > 0
+                                  ? `Nothing to import — all ${bankImportResult.skipped_count} attempted transaction${bankImportResult.skipped_count === 1 ? '' : 's'} already in Opera.`
+                                  : `${bankImportResult.imported_count || 0} imported — select remaining transactions to continue`
                                 : importReadiness?.canImport
                                   ? `Ready to import ${importReadiness.totalReady} transaction${importReadiness.totalReady !== 1 ? 's' : ''}${duplicateTransactionCount > 0 ? ` (${duplicateTransactionCount} already in Opera)` : ''}`
                                   : duplicateTransactionCount > 0
@@ -9968,7 +10144,11 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                     <XCircle className="h-5 w-5 text-red-600" />
                   )}
                   <h3 className={`font-semibold ${bankImportResult.success ? 'text-green-800' : 'text-red-800'}`}>
-                    {bankImportResult.success ? 'Import Completed' : 'Import Failed'}
+                    {bankImportResult.success
+                      ? (bankImportResult.imported_count || 0) === 0 && (bankImportResult.skipped_count || 0) > 0
+                        ? 'Nothing to Import'
+                        : 'Import Completed'
+                      : 'Import Failed'}
                   </h3>
                 </div>
                 {bankImportResult.imported_transactions_count !== undefined && (

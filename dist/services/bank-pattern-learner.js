@@ -76,7 +76,12 @@ export async function learnPattern(appDb, input) {
             last_used: now,
         }));
         if (!updated) {
+            // `pattern` is a NOT NULL legacy column kept for backward compat.
+            // The active match key is `description_normalized` (unique index
+            // (company_code, description_normalized)); we duplicate the same
+            // value into `pattern` to satisfy the constraint.
             await appDb('bank_import_patterns').insert({
+                pattern: normalized,
                 company_code: input.companyCode,
                 description_raw: input.description,
                 description_normalized: normalized,

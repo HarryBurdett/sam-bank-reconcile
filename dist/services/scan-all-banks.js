@@ -49,6 +49,7 @@ import { sortStatementsByChain, filterFullyReconciledStatements, } from './scan-
 import { buildOperaSePeriodReconciliationDs, checkPeriodReconciled, } from './period-reconciliation.js';
 import { markStatementReconciled } from './statement-files.js';
 import { autoCleanResolvedDefers } from './deferred-items.js';
+import { checkChainComplete } from './scan-chain-check.js';
 /**
  * Read opening/closing/period balances from the per-PDF extraction
  * cache when the bank_statement_imports tracking has no row for
@@ -101,6 +102,9 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
     const daysBack = Number.isFinite(opts.daysBack) ? Number(opts.daysBack) : 30;
     const pageSize = Number.isFinite(opts.pageSize) ? Number(opts.pageSize) : 500;
     const validateBalances = opts.validateBalances !== false;
+    const extractOnMiss = opts.extractOnMiss !== false;
+    const extractor = opts.extractor ?? null;
+    const emailAttachments = opts.emailAttachments ?? null;
     const t0 = Date.now();
     const timings = {};
     const nonCurrent = {
@@ -881,6 +885,163 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                 }
             }
         }
+    }
+    // ---- Eager extraction pass ----
+    // For each bank still marked incomplete, walk pending_extraction
+    // statements (up to MAX_EAGER_PER_BANK per scan) and resolve their
+    // balances via Gemini. This populates opening_balance +
+    // closing_balance + period dates so the FE can render the balance
+    // columns AND determine which statement is the next-in-sequence
+    // (the one whose opening_balance matches the bank's reconciled
+    // balance). Bounded per bank to cap Gemini cost; the rest stay
+    // pending until the operator clicks Analyse or re-scans.
+    const MAX_EAGER_PER_BANK = 8;
+    if (extractOnMiss && extractor && appDb) {
+        for (const bank of Object.values(banksWithStatements)) {
+            if (bank.extraction_status !== 'incomplete')
+                continue;
+            const targets = bank.statements
+                .filter((s) => s.status === 'pending_extraction' &&
+                (!!(s.full_path || s.file_path) ||
+                    (s.source === 'email' && s.email_id && s.attachment_id)))
+                .slice(0, MAX_EAGER_PER_BANK);
+            if (targets.length === 0)
+                continue;
+            for (const target of targets) {
+                const filePath = (target.full_path || target.file_path) ?? null;
+                const fromEmail = target.source === 'email' && !filePath;
+                if (fromEmail && !emailAttachments) {
+                    logger.debug(`eager-extract[${bank.bank_code}]: email source but no attachment provider — skipping ${target.filename}`);
+                    continue;
+                }
+                try {
+                    let pdfBytes = null;
+                    if (filePath) {
+                        pdfBytes = await readFile(filePath);
+                    }
+                    else if (fromEmail && emailAttachments) {
+                        const downloaded = await emailAttachments.fetchAttachment({
+                            emailId: target.email_id,
+                            attachmentId: target.attachment_id,
+                        });
+                        pdfBytes = downloaded?.bytes ?? null;
+                    }
+                    if (!pdfBytes) {
+                        logger.debug(`eager-extract[${bank.bank_code}]: no bytes for ${target.filename}`);
+                        continue;
+                    }
+                    const extracted = await extractor.extractFromPdf({
+                        bytes: pdfBytes,
+                        filename: target.filename,
+                    });
+                    if (typeof extracted.opening_balance === 'number' &&
+                        typeof extracted.closing_balance === 'number') {
+                        target.opening_balance = extracted.opening_balance;
+                        target.closing_balance = extracted.closing_balance;
+                        target.period_start = extracted.period_start ?? null;
+                        target.period_end = extracted.period_end ?? null;
+                        target.extraction_status =
+                            'extracted';
+                        target.status = 'ready';
+                        // Persist into extraction_cache so the next scan hits the
+                        // fast path without re-billing Gemini.
+                        try {
+                            const hash = createHash('sha256').update(pdfBytes).digest('hex');
+                            const payload = JSON.stringify({
+                                statement_info: {
+                                    opening_balance: extracted.opening_balance,
+                                    closing_balance: extracted.closing_balance,
+                                    period_start: extracted.period_start,
+                                    period_end: extracted.period_end,
+                                    sort_code: extracted.sort_code,
+                                    account_number: extracted.account_number,
+                                    statement_date: extracted.statement_date,
+                                    bank_name: extracted.bank_name,
+                                },
+                                transactions: extracted.transactions ?? [],
+                            });
+                            await appDb('extraction_cache')
+                                .insert({
+                                content_hash: hash,
+                                extraction_json: payload,
+                                created_at: new Date().toISOString(),
+                            })
+                                .onConflict('content_hash')
+                                .merge({ extraction_json: payload });
+                        }
+                        catch (cacheErr) {
+                            logger.debug(`extraction_cache write skipped for ${filePath}: ${cacheErr instanceof Error ? cacheErr.message : String(cacheErr)}`);
+                        }
+                    }
+                }
+                catch (extErr) {
+                    logger.warn(`eager extraction failed for ${filePath}: ${extErr instanceof Error ? extErr.message : String(extErr)}`);
+                }
+            } // end inner for-of targets
+            // Re-evaluate the bank's extraction_status after all eager
+            // extractions for this bank: complete when the first (next-in-
+            // sequence) statement now has both balances populated.
+            const nextHasBalances = bank.statements[0]?.opening_balance != null &&
+                bank.statements[0]?.closing_balance != null;
+            if (nextHasBalances)
+                bank.extraction_status = 'complete';
+        }
+    }
+    // ---- Chain-complete check ----
+    // Faithful port of legacy `check_chain_complete`
+    // (apps/bank_reconcile/logic/scan_pdf_validation.py:285) applied
+    // by routes.py:7395 + 7115 in the email/folder scan loops.
+    //
+    // A statement is "already_processed" when EITHER:
+    //   (A) its closing balance matches a previously-reconciled
+    //       statement's opening balance, OR
+    //   (B) its opening is more than 1p below the bank's effective
+    //       reconciled balance (Opera's nk_recbal).
+    //
+    // Pre-port TS skipped this entirely, so the FE marked the OLDEST
+    // statement as "next" instead of the actual next-in-sequence.
+    for (const bank of Object.values(banksWithStatements)) {
+        const bankRecOpenings = tracking.reconciled_opening_balances.get(bank.bank_code) ??
+            new Set();
+        const effectiveRec = typeof bank.reconciled_balance === 'number'
+            ? bank.reconciled_balance
+            : null;
+        const remaining = [];
+        for (const stmt of bank.statements) {
+            // Only run the check on statements that have balances AND a
+            // matched bank code. Skip already-imported (status='imported')
+            // since they're tracked elsewhere.
+            if (stmt.opening_balance == null ||
+                stmt.closing_balance == null ||
+                stmt.status === 'imported' ||
+                stmt.status === 'already_processed') {
+                remaining.push(stmt);
+                continue;
+            }
+            const result = checkChainComplete({
+                openingBalance: stmt.opening_balance,
+                closingBalance: stmt.closing_balance,
+                effectiveReconciledBalance: effectiveRec,
+                bankRecOpenings,
+                filename: stmt.filename,
+            });
+            if (result.chainComplete) {
+                stmt.status = 'already_processed';
+                stmt.chain_reason =
+                    result.reasonKind;
+                stmt.skip_reason =
+                    result.skipReason;
+                // Move to the non-current bucket so the FE doesn't surface
+                // them as eligible for Process.
+                nonCurrent.already_processed.push(stmt);
+                logger.info(`chain-check[${bank.bank_code}]: ${stmt.filename} → already_processed (${result.reasonKind})`);
+            }
+            else {
+                remaining.push(stmt);
+            }
+        }
+        bank.statements = remaining;
+        bank.statement_count = remaining.length;
     }
     // Recompute totalStatements after cleanup.
     totalStatements = 0;

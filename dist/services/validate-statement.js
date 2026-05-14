@@ -40,9 +40,11 @@ export async function validateStatementForReconciliation(operaDb, input) {
         // of routes.py:1504 + _build_imported_pending_closings(92).
         if (!openingMatches && input.appDb) {
             try {
+                // Row existence implies "imported" — the `import_status` column
+                // was dropped from the SAM SQLite schema (no such column); the
+                // earlier filter on it was a silent error in the .catch below.
                 const rows = (await input.appDb('bank_statement_imports')
                     .where({ bank_code: bankAccount })
-                    .andWhere('import_status', 'imported')
                     .andWhere((qb) => {
                     qb.where('is_reconciled', false)
                         .orWhereNull('is_reconciled')

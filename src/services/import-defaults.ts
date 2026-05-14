@@ -48,9 +48,12 @@ export function makeBankStatementOverlapChecker(
         return { resumeImportId };
       }
       try {
+        // The SAM SQLite schema has no `import_status` column — row
+        // existence implies "imported". Earlier filter `.andWhereNot
+        // ({ import_status: 'failed' })` always errored and the catch
+        // swallowed the result, silently disabling overlap detection.
         const row = (await appDb('bank_statement_imports')
           .where('bank_code', bankCode)
-          .andWhereNot({ import_status: 'failed' })
           .andWhere(function overlap(this: Knex.QueryBuilder) {
             // Two ranges overlap iff start <= other_end AND end >= other_start
             this.where('period_start', '<=', periodEnd).andWhere(
@@ -66,7 +69,6 @@ export function makeBankStatementOverlapChecker(
               filename?: string | null;
               period_start?: string;
               period_end?: string;
-              import_status?: string;
             }
           | undefined;
         if (!row) return { resumeImportId };
@@ -74,14 +76,8 @@ export function makeBankStatementOverlapChecker(
         // Same-filename re-import is a continuation, not a conflict
         // — operator went back to add missed lines. Faithful port of
         // import_orchestration.py:105-109. Returns the existing
-        // import_id so the orchestrator's resume path kicks in
-        // regardless of import_status.
+        // import_id so the orchestrator's resume path kicks in.
         if ((row.filename ?? '').trim() === (filename ?? '').trim() && row.id) {
-          return { resumeImportId: Number(row.id) };
-        }
-
-        if (row.import_status === 'partial' && row.id) {
-          // Resume the prior partial import instead of erroring.
           return { resumeImportId: Number(row.id) };
         }
         return {
