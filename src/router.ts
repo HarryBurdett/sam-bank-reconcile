@@ -2276,6 +2276,9 @@ export function createRouter(ctx: AppContext): Router {
         bankImportExecutor?: ImportPostingExecutor;
         bankImportLock?: ImportLockAdapter;
         bankPeriodOverlapChecker?: PeriodOverlapChecker;
+        bankPaymentRequestLookup?: (
+          gcPaymentId: string,
+        ) => Promise<string[] | null>;
       };
       const extractor = adapter.bankPdfExtractor ?? builtinPdfExtractor;
       if (!extractor) {
@@ -2326,6 +2329,7 @@ export function createRouter(ctx: AppContext): Router {
             // Stripping the namespace prefix keeps row reuse clean
             // across mode switches.
             companyCode: (ctx.tenantId ?? '').replace(/^standalone:/, '') || null,
+            paymentRequestLookup: adapter.bankPaymentRequestLookup ?? null,
           },
           extractor,
           executor,

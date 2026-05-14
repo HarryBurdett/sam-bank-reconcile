@@ -83,6 +83,16 @@ export interface PostedLine {
   at_type: number;
 }
 
+/**
+ * Lookup hook for the auto-allocate Rule 0 branch. Returns the
+ * invoice_refs stored against a gc_payment_id, or null/[] when the
+ * payment ID isn't known (e.g. gocardless plugin not active). Faithful
+ * port surface for opera_sql_import.py:7128.
+ */
+export type PaymentRequestInvoiceLookup = (
+  gcPaymentId: string,
+) => Promise<string[] | null>;
+
 export interface ImportPostingExecutor {
   postBankImport(opts: {
     operaDb: Knex;
@@ -93,6 +103,7 @@ export interface ImportPostingExecutor {
     selectedRows: number[] | null;
     autoAllocate: boolean;
     autoReconcile: boolean;
+    paymentRequestLookup?: PaymentRequestInvoiceLookup | null;
   }): Promise<{
     success: boolean;
     records_imported: number;
@@ -152,6 +163,11 @@ export interface ImportFromPdfInput {
    *  'default' to match BankPatternLearner's fallback
    *  (bank_patterns.py:54). */
   companyCode?: string | null;
+  /** Hook used by auto-allocate Rule 0 to fetch invoice_refs for a
+   *  GoCardless payment ID. Wired from the standalone host
+   *  (company-registry.ts) when the gocardless plugin is present;
+   *  null in plain-SAM mode. */
+  paymentRequestLookup?: PaymentRequestInvoiceLookup | null;
 }
 
 export interface ImportFromPdfResponse {
@@ -546,6 +562,7 @@ export async function importBankStatementFromPdf(
       selectedRows: effectiveSelected,
       autoAllocate: !!input.autoAllocate,
       autoReconcile: !!input.autoReconcile,
+      paymentRequestLookup: input.paymentRequestLookup ?? null,
     });
 
     // Aggregate signed posted_lines into the receipt/payment totals

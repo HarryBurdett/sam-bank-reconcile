@@ -1282,6 +1282,7 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
     selectedRows,
     autoAllocate,
     autoReconcile: _autoReconcile, // wired in import-from-pdf.ts post-success
+    paymentRequestLookup,
   }) {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -1429,6 +1430,14 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
               postedRef ?? prepared.reference ?? prepared.name.slice(0, 20);
             try {
               if (action === 'sales_receipt') {
+                // Extract a candidate gc_payment_id from the
+                // description. GoCardless payment IDs match the
+                // pattern PM<alphanumeric> (e.g. 'PM000ABCDEF12345'
+                // per opera_sql_import.py:7049). The lookup is a
+                // no-op when no candidate is present.
+                const descText = (prepared.memo || prepared.name) ?? '';
+                const gcMatch = descText.match(/\bPM[A-Z0-9]{6,}\b/);
+                const gcCandidate = gcMatch ? gcMatch[0] : null;
                 const allocRes = await autoAllocateReceipt({
                   trx,
                   customerAccount: prepared.matchedAccount,
@@ -1436,7 +1445,9 @@ export const bankImportPostingExecutor: ImportPostingExecutor = {
                   receiptAmount: Math.abs(prepared.amount),
                   allocationDate: prepared.date,
                   bankAccount: bankCode,
-                  description: prepared.memo || prepared.name,
+                  description: descText,
+                  gcPaymentId: gcCandidate,
+                  paymentRequestLookup: paymentRequestLookup ?? null,
                 });
                 if (!allocRes.success && allocRes.message) {
                   warnings.push(

@@ -16,6 +16,7 @@ import knex, { type Knex } from 'knex';
 import { buildOperaAwareImportLock } from './import-lock-mssql.js';
 import { buildImapAdapter } from './imap-mailbox-adapter.js';
 import { buildGeminiPdfExtractor } from './gemini-pdf-extractor.js';
+import { buildGoCardlessPaymentLookup } from './gocardless-payment-lookup.js';
 import {
   existsSync,
   mkdirSync,
@@ -254,6 +255,29 @@ export async function loadCompany(
       opts.logger.info(
         `[${code}] Gemini PDF extractor wired (model=${opts.geminiModel ?? 'gemini-2.5-flash'})`,
       );
+    }
+
+    // GoCardless payment-request invoice lookup. Powers auto-allocate
+    // Rule 0 (opera_sql_import.py:7120-7189). The gocardless plugin
+    // owns gocardless_payments.db at
+    // <root>/<company>/gocardless/gocardless_payments.db; we probe
+    // both the SAM dataRoot and the legacyDataRoot so either plugin
+    // location works without explicit config. Returns null and the
+    // hook stays unset when the DB isn't present — auto-allocate
+    // falls through to Rules 1/2 exactly as today.
+    {
+      const searchRoots = [
+        join(opts.dataRoot, code, 'gocardless'),
+        opts.legacyDataRoot ? join(opts.legacyDataRoot, code, 'gocardless') : '',
+      ].filter((p) => p.length > 0);
+      const gcLookup = buildGoCardlessPaymentLookup({
+        companyCode: code,
+        searchRoots,
+        logger: opts.logger,
+      });
+      if (gcLookup) {
+        (ctx as Record<string, unknown>).bankPaymentRequestLookup = gcLookup;
+      }
     }
 
     // Reconciled-key store: the plugin's /scan-emails route uses this
