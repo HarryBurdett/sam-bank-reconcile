@@ -1198,38 +1198,12 @@ export async function scanAllBanksFaithful(
           (target as unknown as Record<string, unknown>).extraction_status =
             'extracted';
           target.status = 'ready';
-          // Persist into extraction_cache so the next scan hits the
-          // fast path without re-billing Gemini.
-          try {
-            const hash = createHash('sha256').update(pdfBytes).digest('hex');
-            const payload = JSON.stringify({
-              statement_info: {
-                opening_balance: extracted.opening_balance,
-                closing_balance: extracted.closing_balance,
-                period_start: extracted.period_start,
-                period_end: extracted.period_end,
-                sort_code: extracted.sort_code,
-                account_number: extracted.account_number,
-                statement_date: extracted.statement_date,
-                bank_name: extracted.bank_name,
-              },
-              transactions: extracted.transactions ?? [],
-            });
-            await appDb('extraction_cache')
-              .insert({
-                content_hash: hash,
-                extraction_json: payload,
-                created_at: new Date().toISOString(),
-              })
-              .onConflict('content_hash')
-              .merge({ extraction_json: payload });
-          } catch (cacheErr) {
-            logger.debug(
-              `extraction_cache write skipped for ${filePath}: ${
-                cacheErr instanceof Error ? cacheErr.message : String(cacheErr)
-              }`,
-            );
-          }
+          // The Gemini extractor caches the RAW response itself
+          // (gemini-pdf-extractor.ts:cachePut). We deliberately do
+          // NOT write here — earlier versions wrote the PROCESSED
+          // BankTransaction[] shape, which loses money_in/money_out
+          // and corrupts subsequent reads (every txn shows £0.00).
+          void pdfBytes;
         }
       } catch (extErr) {
         logger.warn(

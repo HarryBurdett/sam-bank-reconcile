@@ -432,6 +432,138 @@ function parseResultJson(
     return true;
   });
 
+  // ---- Pre-solver: derive amounts from balance chain when Gemini ----
+  // ---- returns null money_in/money_out but the balance column is ----
+  // ---- intact (common on single-amount-column formats like Monzo). ----
+  //
+  // Bank-format-agnostic: try the sorted-by-date order in both within-
+  // day directions (PDF order vs reversed-within-day) and pick the
+  // ordering whose chain from the summary-derived opening terminates
+  // at the labelled closing. If neither chains, the solver fallback
+  // takes over.
+  const aiOpeningPre = safeFloat(info.opening_balance);
+  const aiClosingPre = safeFloat(info.closing_balance);
+  const summaryPre = (info.summary ?? {}) as Record<string, unknown>;
+  const sumOpenPre = safeFloat(summaryPre.opening_balance);
+  const sumClosePre = safeFloat(summaryPre.closing_balance);
+  const sumInPre = safeFloat(summaryPre.total_in);
+  const sumOutPre = safeFloat(summaryPre.total_out);
+  const labelledClosingPre = sumClosePre ?? aiClosingPre;
+
+  const allAmountsNull = rawTransactions.every((t) => {
+    const mi = safeFloat((t as RawTxn).money_in);
+    const mo = safeFloat((t as RawTxn).money_out);
+    return mi === null && mo === null;
+  });
+  const anyBalancesPresent = rawTransactions.some(
+    (t) => safeFloat((t as RawTxn).balance) !== null,
+  );
+
+  if (allAmountsNull && anyBalancesPresent && rawTransactions.length > 0) {
+    // Compute opening candidate from summary identity.
+    let derivedOpening: number | null = null;
+    if (
+      aiOpeningPre !== null &&
+      labelledClosingPre !== null &&
+      sumInPre !== null &&
+      sumOutPre !== null
+    ) {
+      derivedOpening = aiOpeningPre;
+    } else if (
+      labelledClosingPre !== null &&
+      sumInPre !== null &&
+      sumOutPre !== null
+    ) {
+      derivedOpening = Math.round((labelledClosingPre - (sumInPre - sumOutPre)) * 100) / 100;
+    } else if (sumOpenPre !== null) {
+      derivedOpening = sumOpenPre;
+    } else if (aiOpeningPre !== null) {
+      derivedOpening = aiOpeningPre;
+    }
+
+    if (derivedOpening !== null && labelledClosingPre !== null) {
+      // Sort by date asc, with two within-day directions to try.
+      type Indexed = { idx: number; date: string; bal: number };
+      const indexed: Indexed[] = [];
+      for (let i = 0; i < rawTransactions.length; i += 1) {
+        const t = rawTransactions[i] as RawTxn;
+        const bal = safeFloat(t.balance);
+        const date =
+          typeof t.date === 'string' && t.date.length >= 10
+            ? t.date.slice(0, 10)
+            : '9999-99-99';
+        if (bal === null) continue;
+        indexed.push({ idx: i, date, bal });
+      }
+      const tryOrder = (preserveWithinDay: boolean): {
+        amounts: Map<number, number>;
+        terminal: number;
+        rejected: number[];
+      } | null => {
+        const sorted = [...indexed].sort((a, b) => {
+          if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+          return preserveWithinDay ? a.idx - b.idx : b.idx - a.idx;
+        });
+        const amounts = new Map<number, number>();
+        let current = derivedOpening!;
+        let i = 0;
+        const rejected: number[] = [];
+        for (const t of sorted) {
+          const delta = Math.round((t.bal - current) * 100) / 100;
+          // A delta of 0 is ambiguous — could mean a real £0 txn (rare)
+          // or a phantom row equal to running balance. Skip it (treat
+          // as phantom) to keep the chain clean.
+          if (Math.abs(delta) < 0.005) {
+            rejected.push(t.idx);
+            continue;
+          }
+          amounts.set(t.idx, delta);
+          current = t.bal;
+          i += 1;
+        }
+        return { amounts, terminal: Math.round(current * 100) / 100, rejected };
+      };
+
+      const orderA = tryOrder(true);   // PDF order within day
+      const orderB = tryOrder(false);  // reversed within day
+
+      // Score each ordering by how close its terminal matches the
+      // labelled closing. Pick the winner.
+      const pick =
+        orderA && Math.abs(orderA.terminal - labelledClosingPre) < 0.02
+          ? orderA
+          : orderB && Math.abs(orderB.terminal - labelledClosingPre) < 0.02
+            ? orderB
+            : null;
+
+      if (pick) {
+        logger?.info(
+          `[gemini] amount derivation from balance chain: ` +
+            `${pick.amounts.size} amounts derived, terminal=£${pick.terminal.toFixed(2)} ` +
+            `(matches labelled closing £${labelledClosingPre.toFixed(2)})`,
+        );
+        // Mutate rawTransactions in-place so downstream code sees the
+        // derived amounts.
+        for (const [idx, signed] of pick.amounts.entries()) {
+          const t = rawTransactions[idx] as Record<string, unknown>;
+          if (signed >= 0) {
+            t.money_in = signed;
+            t.money_out = null;
+          } else {
+            t.money_out = -signed;
+            t.money_in = null;
+          }
+        }
+      } else {
+        logger?.warn(
+          `[gemini] could not derive amounts from balance chain: ` +
+            `orderA.terminal=${orderA?.terminal} orderB.terminal=${orderB?.terminal} ` +
+            `vs labelled closing=${labelledClosingPre}`,
+        );
+      }
+    }
+  }
+
   const transactions = rawTransactions.map((t, i) => {
     const moneyOut = typeof t.money_out === 'number' ? t.money_out : null;
     const moneyIn = typeof t.money_in === 'number' ? t.money_in : null;
