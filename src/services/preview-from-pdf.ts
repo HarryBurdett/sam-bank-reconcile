@@ -20,6 +20,7 @@
  * preview lands.
  */
 import type { Knex } from 'knex';
+import { checkCashbookDuplicateBeforePosting } from './pre-posting-duplicate-check.js';
 import type {
   PdfExtractionResult,
   PdfExtractor,
@@ -74,6 +75,24 @@ export interface PreviewResponse {
     type: string;
     balance?: number | null;
     line_number?: number;
+    /** Set when the matcher's process_transactions pass found the row
+     *  already exists in Opera's cashbook. Faithful port of
+     *  bank_import.py:1946. The UI uses this to render the "already
+     *  posted" badge and pre-deselect the row. */
+    is_duplicate?: boolean;
+    /** Skip flag — when set, the import-from-pdf orchestration
+     *  shell will route this row through the executor's skip path
+     *  (no cashbook write). Set by the duplicate-detection pass at
+     *  preview time. */
+    action?: string;
+    /** Human-readable explanation for the skip, surfaced in the
+     *  preview UI alongside is_duplicate. Mirrors
+     *  BankTransaction.skip_reason in bank_import.py:252. */
+    skip_reason?: string | null;
+    /** The Opera entry_number that already holds this posting. Used
+     *  by the FE's duplicate-override modal and by the import loop's
+     *  consumed-entries seeding. */
+    matched_entry_number?: string | null;
   }>;
   bank?: PreviewBankInfo;
   warnings?: string[];
@@ -381,6 +400,64 @@ export async function previewBankImportFromPdf(
         warnings.push(
           `Balance chain excluded ${excluded} transaction(s) that didn't fit the running total — likely from a different account on the same PDF.`,
         );
+      }
+    }
+  }
+
+  // process_transactions duplicate-candidate enrichment. Faithful
+  // port of bank_import.py:1910-1969. Each transaction is checked
+  // against Opera's cashbook (atran/aentry) at preview time so the
+  // UI can render "already posted" badges and pre-deselect the row
+  // for the operator. Identical to the just-in-time check the
+  // import-from-pdf executor runs, but at preview time and across
+  // ALL at_types (the matcher doesn't yet know the action).
+  //
+  // We thread a `consumedEntries` set across the loop so two
+  // identical-amount lines on the same statement match distinct
+  // existing aentries — preserving legacy's multi-occurrence
+  // handling (bank_import.py:1919-1923).
+  const consumedEntries = new Set<string>();
+  const txnsForUi = extracted.transactions as Array<
+    PdfExtractionResult['transactions'][number] & {
+      is_duplicate?: boolean;
+      action?: string;
+      skip_reason?: string | null;
+      matched_entry_number?: string | null;
+    }
+  >;
+  for (const txn of txnsForUi) {
+    if (!txn.date) continue;
+    // Probe all four possible at_types whose magnitude matches.
+    // Sign-aware: receipts (+) only match at_type 4 (sales_receipt) /
+    // 2 (nominal_receipt) / 6 (purchase_refund) / 8 (transfer); payments
+    // (-) only match 5 / 1 / 3 / 8.
+    const candidateActions =
+      txn.amount < 0
+        ? ['purchase_payment', 'nominal_payment', 'sales_refund', 'bank_transfer']
+        : ['sales_receipt', 'nominal_receipt', 'purchase_refund', 'bank_transfer'];
+    for (const probeAction of candidateActions) {
+      try {
+        const dup = await checkCashbookDuplicateBeforePosting({
+          operaDb,
+          bankCode: bank.code,
+          transactionDate: String(txn.date).slice(0, 10),
+          signedAmountPounds: Number(txn.amount),
+          action: probeAction,
+          excludeEntryNumbers: consumedEntries,
+          description: (txn.name ?? txn.memo ?? '') as string,
+        });
+        if (dup.isDuplicate) {
+          txn.is_duplicate = true;
+          txn.action = 'skip';
+          txn.skip_reason = `Already posted: ${dup.reason}`;
+          txn.matched_entry_number = dup.entryNumber;
+          if (dup.entryNumber) consumedEntries.add(dup.entryNumber);
+          break;
+        }
+      } catch {
+        // Tolerate per-row probe errors — matches the JIT check's
+        // policy of degrading to "not a duplicate" on lookup failure.
+        break;
       }
     }
   }
