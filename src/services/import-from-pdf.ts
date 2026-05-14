@@ -593,6 +593,39 @@ export async function importBankStatementFromPdf(
           }));
           await appDb('bank_statement_transactions').insert(rows);
         }
+
+        // Opera-side audit row. Faithful port of routes.py:4466-4488.
+        // The bank_import_history table is an installation-specific
+        // extension to Opera SQL (not part of the stock Opera schema).
+        // When the table doesn't exist we tolerate the error and log
+        // it, exactly like legacy. This preserves compliance/audit
+        // visibility for anything that reads bank_import_history
+        // (e.g. the list-pdf already_processed badge at routes.py:3230).
+        try {
+          await operaDb.raw(
+            `INSERT INTO bank_import_history
+               (filename, source, bank_code, total_receipts, total_payments,
+                transactions_imported, target_system, imported_by, statement_date,
+                import_date)
+             VALUES (?, 'pdf', ?, ?, ?, ?, 'Opera SQL', ?, ?, GETDATE())`,
+            [
+              (input.filename ?? input.filePath.split('/').pop() ?? '').slice(0, 255),
+              bankCode,
+              totalReceipts,
+              totalPayments,
+              result.records_imported,
+              input.importedBy ?? 'system',
+              extracted.statement_date ?? null,
+            ],
+          );
+        } catch (histErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[bank-reconcile] could not insert into bank_import_history (Opera SQL): ${
+              histErr instanceof Error ? histErr.message : String(histErr)
+            }`,
+          );
+        }
       } catch (writeErr) {
         // History write failure is non-fatal at the import level —
         // log so it's visible, then proceed. (Legacy did the same.)
