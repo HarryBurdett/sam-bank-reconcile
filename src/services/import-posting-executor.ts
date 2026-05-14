@@ -243,23 +243,24 @@ async function loadSupplierInfo(
   supplierAccount: string,
   defaultControl: string,
 ): Promise<PartyInfo> {
+  // pname's column shape is different from sname — no `pn_region`,
+  // `pn_terrtry`, or `pn_custype`. Supplier type lives on `pn_suptype`.
+  // The pre-port TS query SELECTed sname-style columns which fail with
+  // "Invalid column name" on every supplier — matches legacy
+  // `SELECT pn_name, pn_suptype FROM pname` (opera_sql_import.py:9865).
   let rows: Array<{
     pn_name: string | null;
-    pn_region: string | null;
-    pn_terrtry: string | null;
-    pn_custype: string | null;
+    pn_suptype: string | null;
   }>;
   try {
     rows = (await trx.raw(
-      `SELECT TOP 1 pn_name, pn_region, pn_terrtry, pn_custype
+      `SELECT TOP 1 pn_name, pn_suptype
        FROM pname WITH (NOLOCK)
        WHERE RTRIM(pn_account) = ?`,
       [supplierAccount],
     )) as unknown as Array<{
       pn_name: string | null;
-      pn_region: string | null;
-      pn_terrtry: string | null;
-      pn_custype: string | null;
+      pn_suptype: string | null;
     }>;
   } catch (err) {
     throw new Error(
@@ -286,12 +287,15 @@ async function loadSupplierInfo(
   } catch {
     // fall through
   }
+  // PartyInfo `region` and `terr` are sales-side fields (sname) — the
+  // ptran INSERT does not use them. Returning empty strings keeps the
+  // shared type happy without binding meaningless values.
   return {
     account: supplierAccount,
     name: (r.pn_name ?? '').trim(),
-    region: (r.pn_region ?? '').trim() || 'K',
-    terr: (r.pn_terrtry ?? '').trim() || '001',
-    type: (r.pn_custype ?? '').trim() || 'DD1',
+    region: '',
+    terr: '',
+    type: (r.pn_suptype ?? '').trim(),
     controlAccount: control,
   };
 }
@@ -334,6 +338,13 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
   }
 
   const dir = deriveTxnDirection(txn.action);
+  // ax_source / nt_posttyp discriminators — legacy writes 'S' for sales
+  // posts (opera_sql_import.py:import_sales_receipt anoml ax_source='S';
+  // ntran nt_posttyp='S') and 'P' for purchase posts (import_purchase_payment
+  // anoml ax_source='P'; ntran nt_posttyp='P'). The pre-port TS hardcoded
+  // 'A' / 'S' regardless of ledger — confirmed wrong by 2026-05-14 audit.
+  const axSource = dir.ledger === 'sales' ? 'S' : 'P';
+  const ntPosttyp = dir.ledger === 'sales' ? 'S' : 'P';
   const cbtype = await resolveCbtype(trx, txn.cbtype, dir.receiptOrPayment);
   const at_type = AT_TYPE_FOR_ACTION[txn.action]!;
   const now = nowParts();
@@ -506,46 +517,64 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       [stValue, party.account],
     );
   } else {
-    // ptran: payments stored positive (reduce balance owed to supplier);
-    // refunds negative
-    const ptValue = dir.direction === 'out' ? absAmount : -absAmount;
+    // ptran sign convention (purchase ledger):
+    //   payment:  pt_trvalue = -amount (negative) — reduces balance owed
+    //   refund:   pt_trvalue = +amount (positive) — increases balance owed
+    // Faithful to legacy opera_sql_import.py:3443 (`{-amount_pounds}` for
+    // purchase_payment) and to the canonical snapshot row in
+    // transaction-library/opera_se/purchase_ledger_purchase_payment_bacs_...json
+    // (added_rows[0].pt_trvalue = -599.0 for a £599 payment).
+    //
+    // The corresponding pname.pn_currbal UPDATE below uses `+ ptValue`
+    // (i.e. adds the signed value) — matching legacy `pn_currbal - amount`
+    // because ptValue is already negative for a payment.
+    const ptValue = dir.direction === 'out' ? -absAmount : absAmount;
     const ptType = dir.direction === 'out' ? 'P' : 'F';
+    // ptran INSERT — 44 columns matching the canonical purchase_payment
+    // row in `~/opera-knowledge-ref/.../transaction-library/opera_se/
+    // purchase_ledger_purchase_payment_bacs_20260401_144136.json`.
+    // Every column name and literal default comes from that snapshot's
+    // added_rows[0]; allocation-touched fields (pt_paid, pt_payflag,
+    // pt_trbal) take their INSERT-time value from the same snapshot's
+    // modified_rows[0].changes.<col>.before. See design doc:
+    // docs/superpowers/specs/2026-05-14-faithful-ptran-insert-design.md
     await trx.raw(
       `INSERT INTO ptran (
         id, pt_account, pt_trdate, pt_trref, pt_supref, pt_trtype,
         pt_trvalue, pt_vatval, pt_trbal, pt_paid, pt_crdate,
-        pt_memo, pt_cbtype, pt_entry, pt_unique, pt_region,
-        pt_terr, pt_type, pt_dueday, pt_fcurr, pt_fcrate,
-        pt_fcdec, pt_fcval, pt_fcbal, pt_fcmult,
-        pt_nlpdate, datecreated, datemodified, state
+        pt_advance, pt_payflag, pt_set1day, pt_set1, pt_set2day,
+        pt_set2, pt_held, pt_fcurr, pt_fcrate, pt_fcdec,
+        pt_fcval, pt_fcbal, pt_adval, pt_fadval, pt_fcmult,
+        pt_cbtype, pt_entry, pt_unique, pt_suptype, pt_euro,
+        pt_payadvl, pt_origcur, pt_eurind, pt_revchrg, pt_nlpdate,
+        pt_adjsv, pt_vatset1, pt_vatset2, pt_pyroute, pt_fcvat,
+        datecreated, datemodified, state
       ) VALUES (
-        ?, ?, ?, ?, '', ?,
-        ?, 0, ?, ' ', ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, '   ', 0,
-        0, 0, 0, 0,
-        ?, ?, ?, 1
+        ?, ?, ?, ?, 'BACS', ?,
+        ?, 0, ?, '', ?,
+        'N', 0, 0, 0, 0,
+        0, '', '', 0, 0,
+        0, 0, 0, 0, 0,
+        ?, ?, ?, '', 0,
+        0, '', '', 0, ?,
+        0, 0, 0, 0, 0,
+        ?, ?, 1
       )`,
       [
-        ledgerId,
-        party.account,
-        txn.date,
-        reference,
-        ptType,
-        ptValue,
-        ptValue,
-        txn.date,
-        txn.memo.slice(0, 200),
-        cbtype,
-        entryNumber,
-        sharedUnique,
-        party.region.slice(0, 3),
-        party.terr.slice(0, 3),
-        party.type.slice(0, 3),
-        txn.date,
-        txn.date,
-        now.iso,
-        now.iso,
+        ledgerId,        // id
+        party.account,   // pt_account
+        txn.date,        // pt_trdate
+        reference,       // pt_trref
+        ptType,          // pt_trtype ('P' or 'F')
+        ptValue,         // pt_trvalue
+        ptValue,         // pt_trbal (= pt_trvalue at INSERT — full unallocated balance)
+        txn.date,        // pt_crdate
+        cbtype,          // pt_cbtype
+        entryNumber,     // pt_entry
+        sharedUnique,    // pt_unique
+        txn.date,        // pt_nlpdate
+        now.iso,         // datecreated
+        now.iso,         // datemodified
       ],
     );
     await trx.raw(
@@ -595,7 +624,7 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       ?, ?, ?, ?, 0,
       0, 0, '   ', 0, 0,
       0, 0, 'I', '', '        ',
-      '        ', 'S', 0, ?, 0,
+      '        ', '${ntPosttyp}', 0, ?, 0,
       0, 0, 0, 0, 0,
       0, ?, ?, 1
     )`,
@@ -636,7 +665,7 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       ?, ?, ?, ?, 0,
       0, 0, '   ', 0, 0,
       0, 0, 'I', '', '        ',
-      '        ', 'S', 0, ?, 0,
+      '        ', '${ntPosttyp}', 0, ?, 0,
       0, 0, 0, 0, 0,
       0, ?, ?, 1
     )`,
@@ -676,7 +705,7 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
       datecreated, datemodified, state
     ) VALUES (
-      ?, ?, '    ', 'A', ?, ?, ?,
+      ?, ?, '    ', '${axSource}', ?, ?, ?,
       ?, 'Y', '   ', 0, 0, 0, 0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
@@ -702,7 +731,7 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
       ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
       datecreated, datemodified, state
     ) VALUES (
-      ?, ?, '    ', 'A', ?, ?, ?,
+      ?, ?, '    ', '${axSource}', ?, ?, ?,
       ?, 'Y', '   ', 0, 0, 0, 0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
@@ -739,8 +768,10 @@ async function postOneTransaction(args: PostOneArgs): Promise<{
     account: party.account,
     expectedValuePounds:
       dir.ledger === 'sales'
-        ? dir.direction === 'in' ? -absAmount : absAmount
-        : dir.direction === 'out' ? absAmount : -absAmount,
+        ? // stran: receipts negative, refunds positive (reduces / increases customer balance)
+          dir.direction === 'in' ? -absAmount : absAmount
+        : // ptran: payments negative, refunds positive (reduces / increases supplier balance)
+          dir.direction === 'out' ? -absAmount : absAmount,
   });
   await assertBalancedPair(trx, {
     table: 'ntran',
@@ -964,6 +995,8 @@ async function postNominalEntry(args: PostOneArgs): Promise<{
   await insertNjmemo(trx, journal, isReceipt ? 'Nominal Receipt' : 'Nominal Payment');
 
   // 5. anoml debit/credit pair
+  // ax_fcrate=1.0 and ax_fcdec=2.0 per legacy import_nominal_entry anoml
+  // (opera_sql_import.py). Audit 2026-05-14 found TS was writing 0,0.
   const anomlIdStart = await getNextId(trx, 'anoml', 2);
   const anomlComment = ((txn.name || '').slice(0, 30).padEnd(30) + 'BankImport').slice(0, 40);
   await trx.raw(
@@ -974,7 +1007,7 @@ async function postNominalEntry(args: PostOneArgs): Promise<{
       datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', 'A', ?, ?, ?,
-      ?, 'Y', '   ', 0, 0, 0, 0,
+      ?, 'Y', '   ', 0, 1.0, 0, 2.0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
     )`,
@@ -1000,7 +1033,7 @@ async function postNominalEntry(args: PostOneArgs): Promise<{
       datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', 'A', ?, ?, ?,
-      ?, 'Y', '   ', 0, 0, 0, 0,
+      ?, 'Y', '   ', 0, 1.0, 0, 2.0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
     )`,
@@ -1237,6 +1270,8 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
   const ntranTrnref = `Bank Transfer`.padEnd(50).slice(0, 50);
 
   // Source CREDIT (negative)
+  // nt_trtype='A' per legacy import_bank_transfer (opera_sql_import.py);
+  // pre-port TS wrote 'T'. Audit 2026-05-14.
   await trx.raw(
     `INSERT INTO ntran (
       id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
@@ -1249,7 +1284,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       nt_distrib, datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', ?, ?, ?,
-      '', 'BANK_IMP', 'T', ?, ?,
+      '', 'BANK_IMP', 'A', ?, ?,
       ?, ?, ?, ?, 0,
       0, 0, '   ', 0, 0,
       0, 0, 'I', '', '        ',
@@ -1276,7 +1311,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
   );
   await updateNacntBalance(trx, sourceBank, -absAmount, { period, year });
 
-  // Dest DEBIT (positive)
+  // Dest DEBIT (positive) — same nt_trtype='A' fix as the source leg.
   await trx.raw(
     `INSERT INTO ntran (
       id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
@@ -1289,7 +1324,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       nt_distrib, datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', ?, ?, ?,
-      '', 'BANK_IMP', 'T', ?, ?,
+      '', 'BANK_IMP', 'A', ?, ?,
       ?, ?, ?, ?, 0,
       0, 0, '   ', 0, 0,
       0, 0, 'I', '', '        ',
@@ -1318,6 +1353,8 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
   await insertNjmemo(trx, journal, 'Bank Transfer');
 
   // anoml pair
+  // ax_fcrate=1.0, ax_fcdec=2.0 per legacy import_bank_transfer
+  // (opera_sql_import.py). Pre-port TS wrote 0,0. Audit 2026-05-14.
   const anomlIdStart = await getNextId(trx, 'anoml', 2);
   await trx.raw(
     `INSERT INTO anoml (
@@ -1327,7 +1364,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', 'A', ?, ?, ?,
-      ?, 'Y', '   ', 0, 0, 0, 0,
+      ?, 'Y', '   ', 0, 1.0, 0, 2.0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
     )`,
@@ -1353,7 +1390,7 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
       datecreated, datemodified, state
     ) VALUES (
       ?, ?, '    ', 'A', ?, ?, ?,
-      ?, 'Y', '   ', 0, 0, 0, 0,
+      ?, 'Y', '   ', 0, 1.0, 0, 2.0,
       'I', ?, '        ', '        ', ?, ?,
       ?, ?, 1
     )`,

@@ -9242,22 +9242,6 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                           </tbody>
                         </table>
                       </div>
-                      {editedTransactions.size > 0 && (
-                        <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-green-700">
-                            <Edit3 className="h-4 w-4" />
-                            <span className="text-sm font-medium">
-                              {editedTransactions.size} transaction(s) assigned and ready to import
-                            </span>
-                          </div>
-                          <button
-                            onClick={() => { setEditedTransactions(new Map()); setTransactionTypeOverrides(new Map()); }}
-                            className="text-sm text-green-600 hover:text-green-800 flex items-center gap-1"
-                          >
-                            <RefreshCw className="h-3 w-3" /> Reset All
-                          </button>
-                        </div>
-                      )}
                     </div>
                   );
                 })()}
