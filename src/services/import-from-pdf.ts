@@ -166,6 +166,22 @@ export interface ImportFromPdfResponse {
   error?: string;
   resume_import_id?: number | null;
   import_id?: number | null;
+  // Legacy result-shape keys (routes.py:4417-4435). Kept alongside
+  // the SAM keys so the FE can read either spelling.
+  imported_count?: number;
+  imported_transactions_count?: number;
+  receipts_imported?: number;
+  payments_imported?: number;
+  refunds_imported?: number;
+  transfers_imported?: number;
+  total_receipts?: number;
+  total_payments?: number;
+  skipped_not_selected?: number;
+  skipped_incomplete?: number;
+  skipped_duplicates?: number;
+  imported_transactions?: Array<Record<string, unknown>>;
+  auto_allocate_enabled?: boolean;
+  statement_info?: Record<string, unknown>;
   /** Result of the post-import auto-reconciliation pass, populated
    *  only when input.autoReconcile is true. Mirrors legacy
    *  `result['reconciliation_result']` (routes.py:4680). */
@@ -532,18 +548,19 @@ export async function importBankStatementFromPdf(
       autoReconcile: !!input.autoReconcile,
     });
 
+    // Aggregate signed posted_lines into the receipt/payment totals
+    // legacy persists (routes.py:4498-4508). Declared at the outer
+    // scope so the success-branch's legacy result-shape keys can
+    // reference them without re-walking the array.
+    let totalReceipts = 0;
+    let totalPayments = 0;
+    for (const line of result.posted_lines ?? []) {
+      if (line.amount > 0) totalReceipts += line.amount;
+      else if (line.amount < 0) totalPayments += Math.abs(line.amount);
+    }
+
     if (result.success) {
       try {
-        // Aggregate signed posted_lines into the receipt/payment totals
-        // legacy persists (routes.py:4498-4508). Match legacy's
-        // convention: receipts = sum of credits (amount > 0), payments
-        // = sum of absolute debits (amount < 0).
-        let totalReceipts = 0;
-        let totalPayments = 0;
-        for (const line of result.posted_lines ?? []) {
-          if (line.amount > 0) totalReceipts += line.amount;
-          else if (line.amount < 0) totalPayments += Math.abs(line.amount);
-        }
 
         // Resume-import: UPDATE the existing bank_statement_imports row
         // rather than INSERT a new one (legacy routes.py:4502-4526). The
@@ -620,24 +637,51 @@ export async function importBankStatementFromPdf(
               : (insertedId as { id: number })?.id;
         }
 
-        // Per-line tracking — write one row per posted statement
-        // line so subsequent Opera-restore detection can verify the
-        // posting still exists. New in SAM port (legacy had this
-        // table but the SAM port omitted it until 2026-05; see
-        // bank_statement_transactions migration 013).
-        if (importId && Array.isArray(result.posted_lines) && result.posted_lines.length > 0) {
-          const rows = result.posted_lines.map((line) => ({
+        // Per-line tracking — faithful port of
+        // save_statement_transactions (storage.py:2241). Write a row
+        // for EVERY extracted statement line so the reconcile screen
+        // can display the original statement layout regardless of
+        // whether the line was posted, skipped, or deferred. The
+        // posted lines get their posted_entry_number stamped in a
+        // follow-up UPDATE pass (legacy uses mark_transaction_posted
+        // — we batch it here for efficiency).
+        if (importId) {
+          // Idempotent: clear any prior rows for this import_id.
+          // Matches storage.py:2286.
+          await appDb('bank_statement_transactions')
+            .where({ import_id: importId })
+            .delete();
+
+          // Bulk insert the full extracted set.
+          const allRows = extracted.transactions.map((t, idx) => ({
             import_id: importId,
-            line_number: line.line_number,
-            post_date: line.post_date,
-            description: line.description,
-            amount: line.amount,
-            transaction_type: String(line.at_type),
-            posted_entry_number: line.posted_entry_number,
-            posted_at: appDb.fn.now(),
+            line_number: idx + 1,
+            post_date: (t.date ?? '').slice(0, 10) || null,
+            description: (t.memo ?? t.name ?? '').toString().slice(0, 500),
+            amount: Number(t.amount ?? 0),
+            balance: t.balance ?? null,
+            transaction_type: String(t.type ?? ''),
+            reference:
+              (t as unknown as { reference?: string | null }).reference ?? null,
+            posted_entry_number: null,
+            posted_at: null,
             is_reconciled: 0,
           }));
-          await appDb('bank_statement_transactions').insert(rows);
+          if (allRows.length > 0) {
+            await appDb('bank_statement_transactions').insert(allRows);
+          }
+
+          // Stamp the posted lines with their Opera entry numbers.
+          if (Array.isArray(result.posted_lines)) {
+            for (const line of result.posted_lines) {
+              await appDb('bank_statement_transactions')
+                .where({ import_id: importId, line_number: line.line_number })
+                .update({
+                  posted_entry_number: line.posted_entry_number,
+                  posted_at: appDb.fn.now(),
+                });
+            }
+          }
         }
 
         // Opera-side audit row. Faithful port of routes.py:4466-4488.
@@ -838,6 +882,54 @@ export async function importBankStatementFromPdf(
         }
       }
 
+      // Build the legacy result-shape companion keys (routes.py:4400-
+      // 4434). The SAM keys above are unchanged so callers of either
+      // spelling work. at_type bucketing:
+      //   4 = sales_receipt, 5 = purchase_payment,
+      //   3 = sales_refund,  6 = purchase_refund,
+      //   1 = nominal_payment, 2 = nominal_receipt,
+      //   8 = bank_transfer.
+      let receiptsImported = 0;
+      let paymentsImported = 0;
+      let refundsImported = 0;
+      let transfersImported = 0;
+      const importedTransactions: Array<Record<string, unknown>> = [];
+      for (const line of result.posted_lines ?? []) {
+        switch (line.at_type) {
+          case 4:
+            receiptsImported += 1;
+            break;
+          case 5:
+            paymentsImported += 1;
+            break;
+          case 3:
+          case 6:
+            refundsImported += 1;
+            break;
+          case 8:
+            transfersImported += 1;
+            break;
+        }
+        importedTransactions.push({
+          row: line.line_number,
+          date: line.post_date,
+          amount: line.amount,
+          entry_number: line.posted_entry_number,
+          at_type: line.at_type,
+          description: line.description,
+        });
+      }
+      const statementInfoOut = {
+        bank_name: extracted.bank_name,
+        account_number: extracted.account_number,
+        sort_code: extracted.sort_code,
+        statement_date: extracted.statement_date,
+        period_start: extracted.period_start,
+        period_end: extracted.period_end,
+        opening_balance: extracted.opening_balance,
+        closing_balance: extracted.closing_balance,
+      };
+
       return {
         success: true,
         message: `Imported ${result.records_imported} transactions${
@@ -854,6 +946,21 @@ export async function importBankStatementFromPdf(
             : undefined,
         import_id: result.import_id ?? null,
         resume_import_id: overlap.resumeImportId,
+        // Legacy keys (routes.py:4417-4434).
+        imported_count: result.records_imported,
+        imported_transactions_count: result.records_imported,
+        receipts_imported: receiptsImported,
+        payments_imported: paymentsImported,
+        refunds_imported: refundsImported,
+        transfers_imported: transfersImported,
+        total_receipts: totalReceipts,
+        total_payments: totalPayments,
+        skipped_not_selected: result.skipped_count,
+        skipped_incomplete: 0,
+        skipped_duplicates: 0,
+        imported_transactions: importedTransactions,
+        auto_allocate_enabled: !!input.autoAllocate,
+        statement_info: statementInfoOut,
         ...(reconciliationResult ? { reconciliation_result: reconciliationResult } : {}),
         ...(autoReconcileEnabled ? { auto_reconcile_enabled: true } : {}),
       };
