@@ -98,6 +98,8 @@ export async function getAllStatementTrackingData(
         'period_end',
         'target_system',
         'is_reconciled',
+        'records_imported',
+        'transactions_imported',
       )
       .orderBy('id', 'desc')) as Array<Record<string, unknown>>;
   } catch {
@@ -162,7 +164,18 @@ export async function getAllStatementTrackingData(
     }
 
     // --- imported-not-reconciled keys / filenames ---
-    if (!isReconciled && !isManaged) {
+    // Only classify as "imported but not reconciled" when the row
+    // actually persisted records. A bank_statement_imports stub with
+    // records_imported=0 AND transactions_imported=0 means an
+    // import attempt completed without writing anything to Opera —
+    // treating that as "imported" misleads the FE into hiding the
+    // statement under "already done". The row is still useful for
+    // the cached_stmt_info lookup (opening/closing) below, so we
+    // keep it in the result; we just don't flag it as imported.
+    const recordsImported = Number(row.records_imported ?? 0);
+    const txImported = Number(row.transactions_imported ?? 0);
+    const didImport = recordsImported > 0 || txImported > 0;
+    if (!isReconciled && !isManaged && didImport) {
       if (emailId !== null) {
         data.imported_nr_keys.add(ekey(emailId, attachmentId));
       }

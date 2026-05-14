@@ -576,7 +576,20 @@ export async function importBankStatementFromPdf(
       else if (line.amount < 0) totalPayments += Math.abs(line.amount);
     }
 
-    if (result.success) {
+    // Faithful to legacy routes.py:4440 — only write the
+    // bank_statement_imports audit row when something actually
+    // happened (records imported OR rows deferred). Without this
+    // guard, a "successful" import that posted zero rows (e.g.
+    // because every txn was flagged is_duplicate at preview time)
+    // creates a stub row that scan-all-banks then classifies as
+    // "imported but not reconciled" — confusing the UI for the
+    // next operator attempt. Legacy never persists a zero-result
+    // import.
+    const shouldPersistAudit =
+      result.success &&
+      (result.records_imported > 0 || deferredCount > 0);
+
+    if (shouldPersistAudit) {
       try {
 
         // Resume-import: UPDATE the existing bank_statement_imports row
