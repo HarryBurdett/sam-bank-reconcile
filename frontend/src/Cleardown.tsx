@@ -124,7 +124,7 @@ export function Cleardown({ appFilter, title }: SystemResetProps = {}) {
   const { data, isLoading } = useQuery({
     queryKey: ['system-reset-counts'],
     queryFn: async () => {
-      const response = await authFetch('http://localhost:8000/api/admin/system-reset/counts');
+      const response = await authFetch('/api/admin/system-reset/counts');
       if (!response.ok) {
         const err = await response.json().catch(() => ({ detail: 'Failed to fetch counts' }));
         throw new Error(err.detail || 'Failed to fetch counts');
@@ -169,7 +169,7 @@ export function Cleardown({ appFilter, title }: SystemResetProps = {}) {
 
     try {
       const actions = Array.from(selected);
-      const response = await authFetch('http://localhost:8000/api/admin/system-reset', {
+      const response = await authFetch('/api/admin/system-reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actions }),

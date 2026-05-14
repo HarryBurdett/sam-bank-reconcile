@@ -68,7 +68,7 @@ export function HealthCheck({ appFilter, title }: HealthCheckProps) {
   const { data, isLoading, isFetching, error, refetch } = useQuery<HealthCheckResult>({
     queryKey: ['health-check', appFilter],
     queryFn: async () => {
-      const r = await authFetch(`http://localhost:8000${endpoint}`);
+      const r = await authFetch(endpoint);
       if (!r.ok) throw new Error(`Health check failed: ${r.statusText}`);
       return r.json();
     },

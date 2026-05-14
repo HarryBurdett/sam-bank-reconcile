@@ -203,7 +203,15 @@ interface RecurringEntry {
 
 type PreviewTab = 'receipts' | 'payments' | 'refunds' | 'repeat' | 'unmatched' | 'skipped';
 
-const API_BASE = 'http://localhost:8000/api';
+// Relative URL: samFetch (standalone shell at public/index.html)
+// prepends the plugin mount point '/api/apps/bank-reconcile', so a
+// call like `${API_BASE}/bank-import/preview-from-pdf` lands at
+// /api/apps/bank-reconcile/api/bank-import/preview-from-pdf — the
+// dispatcher-routed plugin endpoint. The absolute localhost:8000
+// URL was a vendoring artefact from the legacy Python FastAPI host
+// and broke every Imports call in standalone mode (path got
+// concatenated literally and 404'd through the dispatcher).
+const API_BASE = '/api';
 
 type ImportType = 'bank-statement' | 'sales-receipt' | 'purchase-payment' | 'sales-invoice' | 'purchase-invoice' | 'nominal-journal';
 

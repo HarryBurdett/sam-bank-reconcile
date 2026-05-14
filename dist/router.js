@@ -1032,6 +1032,169 @@ export function createRouter(ctx) {
         }
     });
     /**
+     * GET /api/gocardless/nominal-accounts
+     *
+     * Nominal accounts for the import UI's "Nominal Receipt/Payment"
+     * dropdown. Faithful port of get_nominal_accounts
+     * (apps/gocardless/api/routes.py:1744-1779). Reads Opera's nacnt
+     * table, filters out Z-prefixed system accounts, returns
+     * code + description + project/department flags so the UI knows
+     * whether to surface project/department selectors per row.
+     *
+     * Path is `/gocardless/nominal-accounts` because the vendored FE
+     * still uses the legacy gocardless plugin URL. The endpoint is
+     * implemented inside the bank-reconcile router so it works in
+     * standalone mode without depending on the gocardless plugin
+     * being loaded.
+     */
+    router.get('/api/gocardless/nominal-accounts', async (req, res) => {
+        const operaDb = getOperaDb(req, res);
+        if (!operaDb)
+            return;
+        try {
+            const rows = (await operaDb.raw(`SELECT na_acnt, na_desc,
+                  ISNULL(na_allwprj, 0) AS na_allwprj,
+                  ISNULL(na_allwjob, 0) AS na_allwjob,
+                  RTRIM(ISNULL(na_project, '')) AS na_project,
+                  RTRIM(ISNULL(na_job, '')) AS na_job
+           FROM nacnt WITH (NOLOCK)
+           WHERE na_acnt NOT LIKE 'Z%'
+           ORDER BY na_acnt`));
+            const accounts = (Array.isArray(rows) ? rows : []).map((r) => ({
+                code: (r.na_acnt ?? '').trim(),
+                description: (r.na_desc ?? '').trim(),
+                allow_project: Number(r.na_allwprj ?? 0),
+                allow_department: Number(r.na_allwjob ?? 0),
+                default_project: (r.na_project ?? '').trim(),
+                default_department: (r.na_job ?? '').trim(),
+            }));
+            res.json({ success: true, accounts });
+        }
+        catch (err) {
+            ctx.logger.error('nominal-accounts failed', err);
+            res.json({ success: false, accounts: [], error: err?.message ?? String(err) });
+        }
+    });
+    /**
+     * GET /api/nominal/advanced-config
+     *
+     * Company-level Advanced Nominal toggle (project/department
+     * enabled flags + custom field labels). Faithful port of
+     * get_advanced_nominal_config (sql_rag/opera_config.py:455). The
+     * FE uses this to decide whether to show project/department
+     * dropdowns on nominal posting rows.
+     */
+    router.get('/api/nominal/advanced-config', async (req, res) => {
+        const operaDb = getOperaDb(req, res);
+        if (!operaDb) {
+            res.json({ success: true, project_enabled: false, department_enabled: false });
+            return;
+        }
+        const result = {
+            project_enabled: false,
+            department_enabled: false,
+            project_label: 'Project',
+            department_label: 'Department',
+        };
+        try {
+            const rows = (await operaDb.raw(`SELECT co_advproj, co_advjob
+           FROM Opera3SESystem.dbo.seqco WITH (NOLOCK)
+           WHERE co_code = RIGHT(DB_NAME(), 1)`));
+            if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+                result.project_enabled = !!rows[0].co_advproj;
+                result.department_enabled = !!rows[0].co_advjob;
+            }
+        }
+        catch {
+            // Try local seqco fallback (opera_config.py:487-496)
+            try {
+                const rows = (await operaDb.raw(`SELECT TOP 1 co_advproj, co_advjob FROM seqco WITH (NOLOCK)`));
+                if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+                    result.project_enabled = !!rows[0].co_advproj;
+                    result.department_enabled = !!rows[0].co_advjob;
+                }
+            }
+            catch {
+                /* tolerated */
+            }
+        }
+        try {
+            const rows = (await operaDb.raw(`SELECT RTRIM(ISNULL(sy_nlproj, '')) AS sy_nlproj,
+                  RTRIM(ISNULL(sy_nljob, '')) AS sy_nljob
+           FROM Opera3SESystem.dbo.seqsys WITH (NOLOCK)`));
+            if (Array.isArray(rows) && rows.length > 0 && rows[0]) {
+                const p = (rows[0].sy_nlproj ?? '').trim();
+                const d = (rows[0].sy_nljob ?? '').trim();
+                if (p)
+                    result.project_label = p;
+                if (d)
+                    result.department_label = d;
+            }
+        }
+        catch {
+            /* tolerated */
+        }
+        res.json({ success: true, ...result });
+    });
+    /**
+     * GET /api/nominal/projects
+     *
+     * Project codes for nominal posting rows. Faithful port of
+     * get_project_codes (api/main.py:11034). Reads nproj; tolerates
+     * missing table (older Opera installs).
+     */
+    router.get('/api/nominal/projects', async (req, res) => {
+        const operaDb = getOperaDb(req, res);
+        if (!operaDb) {
+            res.json({ success: true, projects: [] });
+            return;
+        }
+        try {
+            const rows = (await operaDb.raw(`SELECT RTRIM(nr_project) AS nr_project,
+                  RTRIM(ISNULL(nr_desc, '')) AS nr_desc
+           FROM nproj WITH (NOLOCK)
+           ORDER BY nr_project`));
+            const projects = (Array.isArray(rows) ? rows : []).map((r) => ({
+                code: (r.nr_project ?? '').trim(),
+                description: (r.nr_desc ?? '').trim(),
+            }));
+            res.json({ success: true, projects });
+        }
+        catch {
+            // Table may not exist on older installs — return empty,
+            // matches legacy fallback (api/main.py:11056).
+            res.json({ success: true, projects: [] });
+        }
+    });
+    /**
+     * GET /api/nominal/departments
+     *
+     * Department codes for nominal posting rows. Faithful port of
+     * get_department_codes (api/main.py:11059). Reads njob; tolerates
+     * missing table.
+     */
+    router.get('/api/nominal/departments', async (req, res) => {
+        const operaDb = getOperaDb(req, res);
+        if (!operaDb) {
+            res.json({ success: true, departments: [] });
+            return;
+        }
+        try {
+            const rows = (await operaDb.raw(`SELECT RTRIM(no_job) AS no_job,
+                  RTRIM(ISNULL(no_desc, '')) AS no_desc
+           FROM njob WITH (NOLOCK)
+           ORDER BY no_job`));
+            const departments = (Array.isArray(rows) ? rows : []).map((r) => ({
+                code: (r.no_job ?? '').trim(),
+                description: (r.no_desc ?? '').trim(),
+            }));
+            res.json({ success: true, departments });
+        }
+        catch {
+            res.json({ success: true, departments: [] });
+        }
+    });
+    /**
      * POST /api/reconcile/bank/:bank_code/unreconcile
      *
      * Reverse a previously-reconciled batch. Faithful port of

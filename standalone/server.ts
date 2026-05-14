@@ -464,14 +464,38 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
     });
   });
 
-  // Frontend static bundle.
-  app.use(`${APP_ROUTE}/static`, express.static(FRONTEND_DIST));
+  // Frontend static bundle. We set Cache-Control: no-store so the
+  // browser never serves a stale bundle after a rebuild — the dist
+  // entry filename is unfingerprinted (Vite lib mode), so without
+  // this header a "reload" hits the disk cache and the operator
+  // doesn't see fresh code without a manual cache-empty.
+  app.use(
+    `${APP_ROUTE}/static`,
+    express.static(FRONTEND_DIST, {
+      etag: false,
+      lastModified: false,
+      setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      },
+    }),
+  );
 
   // Dispatcher: forward /api/apps/bank-reconcile/* to the per-company router.
   app.use(APP_ROUTE, makeDispatcher(companies));
 
-  // App shell + any other authenticated static assets.
-  app.use(express.static(PUBLIC_DIR));
+  // App shell + any other authenticated static assets. Same no-store
+  // header so the HTML shell + its inline script changes propagate.
+  app.use(
+    express.static(PUBLIC_DIR, {
+      etag: false,
+      lastModified: false,
+      setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+      },
+    }),
+  );
 
   // Catch-all error handler.
   app.use(
