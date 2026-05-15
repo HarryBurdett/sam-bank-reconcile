@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { FileText, CheckCircle, XCircle, AlertCircle, Loader2, Receipt, CreditCard, FileSpreadsheet, BookOpen, Landmark, /* Upload - kept for CSV upload if re-enabled */ Edit3, RefreshCw, Search, RotateCcw, X, History, ChevronDown, ChevronRight, ArrowRight, FolderOpen, Clock } from 'lucide-react';
 import apiClient, { authFetch } from './api-shim';
+import { LIVE_VERSION } from './PageHeader';
 
 interface ImportResult {
   success: boolean;
@@ -5764,7 +5765,12 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
           <Landmark className="h-5 w-5 text-blue-600" />
         </div>
         <div>
-          <h1 className="text-xl font-bold text-gray-900">{bankRecOnly ? (initialStatement ? 'Bank Statement Processing' : 'Bank Statement Import') : 'Imports'}</h1>
+          <h1 className="text-xl font-bold text-gray-900">
+            {bankRecOnly ? (initialStatement ? 'Bank Statement Processing' : 'Bank Statement Import') : 'Imports'}
+            <span className="ml-2 text-xs font-medium text-gray-400">
+              Live Version {LIVE_VERSION}
+            </span>
+          </h1>
           <p className="text-sm text-gray-500">{initialStatement ? 'Review and import transactions from the selected statement' : 'Import and reconcile bank statement transactions'}</p>
         </div>
       </div>

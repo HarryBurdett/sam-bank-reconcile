@@ -24,6 +24,7 @@ import {
   Clock,
 } from 'lucide-react';
 import apiClient, { authFetch, friendlyError } from './api-shim';
+import { LIVE_VERSION } from './PageHeader';
 
 // SAM port shims — replace react-router-dom and VoiceContext with the
 // minimum the page needs.
@@ -2999,6 +3000,9 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
           <div>
             <h1 className="text-xl font-bold text-gray-900">
               Reconcile: {selectedBank}{bankDescription ? ` — ${bankDescription}` : ''}
+              <span className="ml-2 text-xs font-medium text-gray-400">
+                Live Version {LIVE_VERSION}
+              </span>
             </h1>
             {hasActiveStatement && activeStatementInfo?.filename && (
               <p className="text-sm text-gray-500">{activeStatementInfo.filename}</p>

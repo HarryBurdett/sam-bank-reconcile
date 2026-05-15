@@ -3,6 +3,7 @@ import { Landmark, RefreshCw, FileText, ArrowRight, CheckCircle, AlertTriangle, 
 import { authFetch, friendlyError } from './api-shim';
 import { Imports } from './Imports';
 import { BankStatementReconcileWithBoundary as BankStatementReconcile } from './BankStatementReconcile';
+import { LIVE_VERSION } from './PageHeader';
 
 // ---- Types ----
 
@@ -681,7 +682,12 @@ export function BankStatementHub() {
           <Landmark className="h-5 w-5 text-blue-600" />
         </div>
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Bank Statements</h1>
+          <h1 className="text-xl font-bold text-gray-900">
+            Bank Statements
+            <span className="ml-2 text-xs font-medium text-gray-400">
+              Live Version {LIVE_VERSION}
+            </span>
+          </h1>
           <p className="text-sm text-gray-500">Import, process and reconcile</p>
         </div>
       </div>
