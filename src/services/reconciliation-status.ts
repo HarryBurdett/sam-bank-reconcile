@@ -465,27 +465,46 @@ export interface OperaDivergenceRecoveryResult {
   success: boolean;
   cleared: number;
   cleared_imports?: StaleReconciledStatement[];
+  /** Set when the recovery took the "extra" direction path: number
+   *  of unreconciled SAM statements that got promoted to
+   *  is_reconciled=1 because their closing matched Opera's
+   *  current nk_recbal. */
+  promoted?: number;
+  promoted_imports?: StaleReconciledStatement[];
+  /** Recovery direction actually applied. */
+  direction?: 'restore' | 'extra' | 'none';
   error?: string;
 }
 
 /**
- * Find the SAM-reconciled statement whose closing balance matches
- * Opera's current `nk_recbal` (the anchor), then mark every statement
- * reconciled AFTER it as un-reconciled. This handles the legitimate
- * Opera-restore case without false positives from the natural
- * up-and-down movement of the reconciled balance between statements.
+ * Bidirectional Opera-divergence recovery.
  *
- * Refuses to act if no anchor matches — that's the corner case the
- * user flagged where Opera could coincidentally land on a value SAM
- * never saw. In that case the caller is told to investigate manually.
+ * Two scenarios, both handled symmetrically:
  *
- * Returns the rows that were cleared so the caller can list them in
- * the UI.
+ *   restore (SAM ahead of Opera) — Opera's nk_recbal is LOWER than
+ *     SAM's most-recent reconciled closing. Likely Opera DB
+ *     restored from backup. Find the SAM "anchor" statement whose
+ *     closing == nk_recbal and mark every statement reconciled
+ *     AFTER it as un-reconciled.
+ *
+ *   extra (Opera ahead of SAM) — Opera's nk_recbal is HIGHER than
+ *     SAM's most-recent reconciled closing. Either someone
+ *     reconciled in Opera Cashbook outside SAM, or (the common
+ *     case) a SAM reconcile workflow completed but failed to
+ *     flip is_reconciled=1 on the import row (silent UPDATE
+ *     failure or missing import_id at the FE). Find SAM
+ *     unreconciled statements whose closing chains forward to
+ *     Opera's nk_recbal, promote them to is_reconciled=1.
+ *
+ * Both directions refuse to act when there's no safe match
+ * (returns success=true, cleared=0 + a diagnostic message),
+ * so the operator can investigate the corner cases manually.
  */
 export async function recoverFromOperaDivergence(
   operaDb: Knex,
   appDb: Knex,
   bankCode: string,
+  opts: { user?: string } = {},
 ): Promise<OperaDivergenceRecoveryResult> {
   try {
     const nbank = (await operaDb('nbank')
@@ -493,7 +512,12 @@ export async function recoverFromOperaDivergence(
       .where('nk_acnt', bankCode)
       .first()) as { reconciled_balance: number | string | null } | undefined;
     if (!nbank) {
-      return { success: false, cleared: 0, error: `Bank ${bankCode} not found in nbank` };
+      return {
+        success: false,
+        cleared: 0,
+        direction: 'none',
+        error: `Bank ${bankCode} not found in nbank`,
+      };
     }
     const reconciledBalance = Number(nbank.reconciled_balance ?? 0);
 
@@ -507,13 +531,125 @@ export async function recoverFromOperaDivergence(
       .orderBy('statement_date', 'desc')
       .orderBy('id', 'desc')
       .first()) as { id: number; closing_balance: number | string | null } | undefined;
+    const mostRecentClosing = Number(mostRecent?.closing_balance ?? 0);
+    const noReconciledSamRows = !mostRecent;
     if (
-      !mostRecent ||
-      Math.abs(Number(mostRecent.closing_balance ?? 0) - reconciledBalance) <= 0.005
+      mostRecent &&
+      Math.abs(mostRecentClosing - reconciledBalance) <= 0.005
     ) {
-      return { success: true, cleared: 0, cleared_imports: [] };
+      return {
+        success: true,
+        cleared: 0,
+        cleared_imports: [],
+        promoted: 0,
+        promoted_imports: [],
+        direction: 'none',
+      };
     }
 
+    // Decide direction. When SAM has no reconciled rows but Opera
+    // is non-zero, treat as "extra" — SAM never tracked it.
+    const direction: 'restore' | 'extra' =
+      !noReconciledSamRows && mostRecentClosing > reconciledBalance
+        ? 'restore'
+        : 'extra';
+
+    // ============================================================
+    // EXTRA direction — Opera ahead of SAM. Promote unreconciled
+    // SAM statements whose closing == nk_recbal (or chain forward
+    // to it). The common case: SAM imported + processed + posted
+    // to Opera, but the workflow didn't flip is_reconciled=1 on
+    // the import row.
+    // ============================================================
+    if (direction === 'extra') {
+      // Find unreconciled statements whose closing matches Opera's
+      // current nk_recbal. The latest matching one is the "Opera
+      // anchor" — every unreconciled SAM statement between
+      // mostRecent (the last-reconciled SAM row) and the Opera
+      // anchor should be promoted.
+      const matchingUnreconciled = (await appDb('bank_statement_imports')
+        .select('id', 'filename', 'statement_date', 'closing_balance', 'statement_date')
+        .where('bank_code', bankCode)
+        .andWhere('is_reconciled', 0)
+        .andWhereRaw('ABS(closing_balance - ?) < 0.005', [reconciledBalance])
+        .orderBy('statement_date', 'desc')
+        .orderBy('id', 'desc')
+        .first()) as
+        | {
+            id: number;
+            filename: string | null;
+            statement_date: Date | string | null;
+            closing_balance: number | string | null;
+          }
+        | undefined;
+
+      if (!matchingUnreconciled) {
+        return {
+          success: false,
+          cleared: 0,
+          direction: 'extra',
+          error:
+            `Cannot auto-recover (Opera ahead of SAM): no SAM statement ` +
+            `closing balance matches Opera's current reconciled balance ` +
+            `(£${reconciledBalance.toFixed(2)}). The reconciliation chain ` +
+            `has been broken in a way SAM can't safely auto-resolve — ` +
+            `someone may have reconciled entries directly in Opera ` +
+            `Cashbook outside SAM. Investigate Opera Cashbook history ` +
+            `vs. SAM imports.`,
+        };
+      }
+
+      // Promote the directly-matching unreconciled statement. We
+      // intentionally don't chain-pickup earlier unreconciled
+      // statements here — if there are intermediates, the operator
+      // should review them in Reconcile manually so they get a
+      // proper line-by-line reconcile pass rather than a blind
+      // auto-flag. The common case (08-MAY-26 BC010 type) is a
+      // single-statement promotion, which this handles.
+      const targets = [
+        {
+          id: matchingUnreconciled.id,
+          filename: matchingUnreconciled.filename,
+          statement_date: matchingUnreconciled.statement_date,
+          closing_balance: matchingUnreconciled.closing_balance,
+        },
+      ];
+
+      const recCount = (await appDb('bank_statement_transactions')
+        .where('import_id', matchingUnreconciled.id)
+        .count<{ c: number }[]>({ c: '*' })
+        .first()) as { c: number } | undefined;
+      const reconciledLineCount = Number(recCount?.c ?? 0);
+
+      const promoted = Number(
+        await appDb('bank_statement_imports')
+          .where({ id: matchingUnreconciled.id })
+          .update({
+            is_reconciled: 1,
+            reconciled_count: reconciledLineCount,
+            reconciled_at: appDb.fn.now(),
+            reconciled_by: opts.user ?? 'sync-with-opera',
+          }),
+      );
+
+      return {
+        success: true,
+        cleared: 0,
+        promoted,
+        promoted_imports: targets.map((s) => ({
+          import_id: Number(s.id),
+          filename: s.filename,
+          statement_date: dateToYmd(s.statement_date) || null,
+          closing_balance: Number(s.closing_balance ?? 0),
+        })),
+        direction: 'extra',
+      };
+    }
+
+    // ============================================================
+    // RESTORE direction — SAM ahead of Opera. Find anchor + clear
+    // stale is_reconciled flags after it.
+    // ============================================================
     // Find anchor — the latest SAM-reconciled statement whose closing
     // balance equals Opera's current nk_recbal. Statements reconciled
     // after this anchor are stale.
@@ -530,6 +666,7 @@ export async function recoverFromOperaDivergence(
       return {
         success: false,
         cleared: 0,
+        direction: 'restore',
         error:
           `Cannot auto-recover: no SAM statement matches Opera's current ` +
           `reconciled balance (£${reconciledBalance.toFixed(2)}). The reconciliation ` +
@@ -588,8 +725,25 @@ export async function recoverFromOperaDivergence(
         statement_date: dateToYmd(s.statement_date) || null,
         closing_balance: Number(s.closing_balance ?? 0),
       })),
+      direction: 'restore',
     };
   } catch (err: any) {
     return { success: false, cleared: 0, error: err?.message ?? String(err) };
   }
+}
+
+/**
+ * Convenience — read statement_date for a given import id. Used by
+ * the "extra" recovery direction to scope which unreconciled
+ * statements to promote.
+ */
+async function getStatementDate(
+  appDb: Knex,
+  importId: number,
+): Promise<string | null> {
+  const row = (await appDb('bank_statement_imports')
+    .select('statement_date')
+    .where({ id: importId })
+    .first()) as { statement_date: Date | string | null } | undefined;
+  return dateToYmd(row?.statement_date ?? null) || null;
 }

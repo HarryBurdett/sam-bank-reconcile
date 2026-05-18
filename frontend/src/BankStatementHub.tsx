@@ -339,6 +339,7 @@ export function BankStatementHub() {
     try {
       let totalLines = 0;
       let totalStatements = 0;
+      let totalPromoted = 0;
       const errors: string[] = [];
       for (const b of affected) {
         // Clear orphan lines first (if any) — the recover-from-restore
@@ -374,6 +375,7 @@ export function BankStatementHub() {
             const data = await resp.json();
             if (data.success) {
               totalStatements += Number(data.cleared ?? 0);
+              totalPromoted += Number(data.promoted ?? 0);
             } else {
               errors.push(
                 `${b.bank_code} (divergence): ${data.error ?? 'unknown error'}`,
@@ -391,10 +393,19 @@ export function BankStatementHub() {
         totalStatements > 0
           ? `${totalStatements} stale reconciled statement(s)`
           : null,
+        totalPromoted > 0
+          ? `${totalPromoted} unflagged-but-completed statement(s) marked reconciled`
+          : null,
       ].filter(Boolean);
+      const nextStep =
+        totalLines > 0 || totalStatements > 0
+          ? ' Re-import the affected statements to re-post them to Opera.'
+          : totalPromoted > 0
+            ? ' Opera and SAM are now in sync.'
+            : '';
       const headline =
         partsCleared.length > 0
-          ? `Cleared ${partsCleared.join(' and ')} across ${affected.length} bank(s). Re-import the affected statements to re-post them to Opera.`
+          ? `Cleared ${partsCleared.join(' and ')} across ${affected.length} bank(s).${nextStep}`
           : `No stale tracking found to clear (Opera and SAM are already in sync). The divergence banner should clear on the next scan.`;
       setRestoreRecoveryResult(
         errors.length === 0
