@@ -3,6 +3,8 @@ import { useQuery } from '@tanstack/react-query';
 import { FileText, CheckCircle, XCircle, AlertCircle, Loader2, Receipt, CreditCard, FileSpreadsheet, BookOpen, Landmark, /* Upload - kept for CSV upload if re-enabled */ Edit3, RefreshCw, Search, RotateCcw, X, History, ChevronDown, ChevronRight, ArrowRight, FolderOpen, Clock } from 'lucide-react';
 import apiClient, { authFetch } from './api-shim';
 import { LIVE_VERSION } from './PageHeader';
+import { useBankAccounts } from './hooks/useBankAccounts';
+import { BankAccountPicker } from './components/BankAccountPicker';
 
 interface ImportResult {
   success: boolean;
@@ -317,8 +319,14 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
   });
   const currentCompanyId = companiesData?.current_company?.id || '';
 
-  // Bank statement import state
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  // Bank statement import state.
+  // bankAccounts is now sourced via the shared useBankAccounts hook —
+  // a single place to normalise the BE response shape (banks /
+  // accounts / bank_accounts), so no future endpoint rename can
+  // silently empty the dropdowns again. Previously each page rolled
+  // its own state + useEffect, and missed-field-name bugs were
+  // recurring (see commit f031e748 for the most recent example).
+  const { accounts: bankAccounts } = useBankAccounts();
   // Don't initialize from localStorage - wait for company to load
   const [selectedBankCode, setSelectedBankCode] = useState<string>('');
   const [csvDirectory, setCsvDirectory] = useState(() =>
@@ -1049,11 +1057,10 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
   const [modalVatAmount, setModalVatAmount] = useState('');
   const [modalProjectCode, setModalProjectCode] = useState('');
   const [modalDepartmentCode, setModalDepartmentCode] = useState('');
-  // Bank transfer modal fields
+  // Bank transfer modal fields. The shared BankAccountPicker owns
+  // its own search/dropdown/highlight state — we only need the
+  // selected code here.
   const [modalDestBank, setModalDestBank] = useState('');
-  const [modalDestBankSearch, setModalDestBankSearch] = useState('');
-  const [modalDestBankDropdownOpen, setModalDestBankDropdownOpen] = useState(false);
-  const [modalDestBankHighlightIndex, setModalDestBankHighlightIndex] = useState(0);
   const [modalCashbookType, setModalCashbookType] = useState('');
   const [modalReference, setModalReference] = useState('');
   const [modalComment, setModalComment] = useState('');
@@ -1063,7 +1070,6 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
   const modalVatInputRef = useRef<HTMLInputElement>(null);
   const modalNetAmountRef = useRef<HTMLInputElement>(null);
   const modalSaveButtonRef = useRef<HTMLButtonElement>(null);
-  const modalDestBankInputRef = useRef<HTMLInputElement>(null);
   const modalBankTransferSaveRef = useRef<HTMLButtonElement>(null);
 
   // Refs for auto-scrolling between workflow stages
@@ -1432,89 +1438,44 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     }
   }, [pdfDirectory]);
 
-  // Fetch bank accounts using react-query (auto-refreshes on company switch).
-  // Endpoint moved to /api/cashbook/bank-accounts when the cashbook
-  // sub-routes were consolidated; the old /opera-sql/bank-accounts path
-  // 404s, leaving bankAccounts empty and the bank-transfer dropdown
-  // unsearchable.
-  const { data: bankAccountsData } = useQuery({
-    queryKey: ['bank-accounts'],
-    queryFn: async () => {
-      const res = await authFetch(`${API_BASE}/cashbook/bank-accounts`);
-      return res.json();
-    },
-  });
-
-  // Track previous company to detect company switches
-  // Use null to distinguish "never set" from "empty string"
+  // Bank-accounts list itself comes from the shared `useBankAccounts`
+  // hook (declared with the rest of the state above). This effect
+  // only handles the company-change side-effects: picking a saved
+  // bank code on first load, clearing reconcile state when the
+  // operator switches company, etc.
   const previousCompanyRef = useRef<string | null>(null);
   const hasInitializedBankCode = useRef<boolean>(false);
 
-  // Update bank accounts state when data changes or company changes
   useEffect(() => {
-    // The cashbook endpoint returns the array under the key `banks`;
-    // older code expected `bank_accounts`. Accept either so a future
-    // BE change doesn't silently empty the dropdown again.
-    const banksFromResp =
-      bankAccountsData?.banks ?? bankAccountsData?.bank_accounts ?? null;
-    // Populate bankAccounts whenever the BE returned data. The
-    // company-change branch below additionally needs currentCompanyId
-    // (to derive the localStorage key for the saved bank code), but
-    // populating the bank-accounts list itself must NOT depend on
-    // currentCompanyId — that field is sourced from
-    // apiClient.getCompanies() which returns just a string-array in
-    // the standalone host, so .current_company.id is undefined and
-    // the gated useEffect never fired. Result: the bank-transfer
-    // modal's dropdown was empty, and typing a code couldn't
-    // auto-resolve (nothing to match against). Faithfully populating
-    // bankAccounts from the BE response, independent of company-id
-    // resolution, fixes the dropdown and the auto-resolve.
-    if (bankAccountsData?.success && Array.isArray(banksFromResp)) {
-      const accounts = banksFromResp.map((b: any) => ({
-        code: b.code,
-        description: b.description,
-        sort_code: b.sort_code || '',
-        account_number: b.account_number || ''
-      }));
-      setBankAccounts(accounts);
-    }
-    if (bankAccountsData?.success && Array.isArray(banksFromResp) && currentCompanyId) {
-      const accounts = banksFromResp.map((b: any) => ({
-        code: b.code,
-        description: b.description,
-        sort_code: b.sort_code || '',
-        account_number: b.account_number || ''
-      }));
+    if (bankAccounts.length === 0) return;
+    if (!currentCompanyId) return;
 
-      // Detect if company has ACTUALLY changed (not initial load)
-      // previousCompanyRef.current === null means this is first load
-      const previousCompany = previousCompanyRef.current;
-      const isInitialLoad = previousCompany === null;
-      const companyChanged = !isInitialLoad && previousCompany !== currentCompanyId;
+    // Detect if company has ACTUALLY changed (not initial load)
+    const previousCompany = previousCompanyRef.current;
+    const isInitialLoad = previousCompany === null;
+    const companyChanged = !isInitialLoad && previousCompany !== currentCompanyId;
 
-      // Update ref after checking
-      previousCompanyRef.current = currentCompanyId;
+    previousCompanyRef.current = currentCompanyId;
 
-      // Only set bank code on initial load or company change
-      // BUT skip if we restored from session (session bank code takes priority)
-      if ((!hasInitializedBankCode.current || companyChanged) && !hasRestoredFromSession.current) {
-        hasInitializedBankCode.current = true;
+    // Only set bank code on initial load or company change
+    // BUT skip if we restored from session (session bank code takes priority)
+    if ((!hasInitializedBankCode.current || companyChanged) && !hasRestoredFromSession.current) {
+      hasInitializedBankCode.current = true;
 
-        // Load bank code from company-specific localStorage key
-        const savedBankCode = localStorage.getItem(`bankImport_bankCode_${currentCompanyId}`);
-        const savedBankCodeValid = savedBankCode ? accounts.some((a: BankAccount) => a.code === savedBankCode) : false;
+      const savedBankCode = localStorage.getItem(`bankImport_bankCode_${currentCompanyId}`);
+      const savedBankCodeValid = savedBankCode ? bankAccounts.some((a) => a.code === savedBankCode) : false;
 
-        if (savedBankCodeValid) {
-          setSelectedBankCode(savedBankCode!);
-        } else if (accounts.length > 0) {
-          setSelectedBankCode(accounts[0].code);
-        }
-      } else if (hasRestoredFromSession.current) {
-        // Mark as initialized even if we skipped (session had the value)
-        hasInitializedBankCode.current = true;
+      if (savedBankCodeValid) {
+        setSelectedBankCode(savedBankCode!);
+      } else if (bankAccounts.length > 0) {
+        setSelectedBankCode(bankAccounts[0].code);
       }
+    } else if (hasRestoredFromSession.current) {
+      hasInitializedBankCode.current = true;
+    }
 
-      // Clear ALL reconciliation state ONLY when company actually changes (NOT on initial load)
+    // Clear ALL reconciliation state ONLY when company actually changes (NOT on initial load)
+    {
       if (companyChanged) {
         console.log(`Company changed from ${previousCompany} to ${currentCompanyId} - clearing all reconciliation state`);
         // Clear bank preview and transaction state
@@ -1554,7 +1515,7 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         deleteDraftForCurrentStatement();
       }
     }
-  }, [bankAccountsData, currentCompanyId]);
+  }, [bankAccounts, currentCompanyId]);
 
   // Fetch available Opera cashbook types (Receipt and Payment categories)
   useEffect(() => {
@@ -4955,15 +4916,11 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
 
   // Open bank transfer modal
   const openBankTransferModal = (txn: BankImportTransaction, source: 'unmatched' | 'refund' | 'skipped' | 'receipts' | 'payments') => {
-    // Initialize form state from existing detail or defaults from transaction
+    // Initialize form state from existing detail or defaults from transaction.
+    // The shared BankAccountPicker manages its own search/dropdown state
+    // internally — we only need to set `modalDestBank` (the selected code).
     const existingDetail = bankTransferDetails.get(txn.row);
     setModalDestBank(existingDetail?.destBankCode || '');
-    // Initialize bank search
-    const existingBank = existingDetail?.destBankCode
-      ? bankAccounts.find(b => b.code === existingDetail.destBankCode)
-      : null;
-    setModalDestBankSearch(existingBank ? `${existingBank.code} - ${existingBank.description}` : '');
-    setModalDestBankDropdownOpen(false);
     setModalCashbookType(existingDetail?.cashbookType || 'TRF');
     setModalReference(existingDetail?.reference || txn.name?.substring(0, 20) || '');
     setModalComment(existingDetail?.comment || txn.name || '');
@@ -4979,20 +4936,10 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const row = bankTransferModal.transaction.row;
     const txn = bankTransferModal.transaction;
     const source = bankTransferModal.source;
-    // Resolve via the same render-time logic the modal uses for
-    // its summary + canSave flag. Either modalDestBank (explicit
-    // dropdown selection) or modalDestBankSearch (typed code that
-    // exactly matches a bank). This keeps save behaviour identical
-    // to what the modal displayed at the moment Save was clicked.
-    const trimmedUC = modalDestBankSearch.trim().toUpperCase();
-    const typedMatch =
-      trimmedUC.length > 0
-        ? bankAccounts.find(
-            (b) =>
-              b.code.toUpperCase() === trimmedUC && b.code !== selectedBankCode,
-          )
-        : undefined;
-    const destBankCode = modalDestBank || typedMatch?.code || '';
+    // modalDestBank is reliably set by the shared BankAccountPicker —
+    // it auto-resolves typed exact-match codes internally before
+    // calling onChange, so we just read the code directly.
+    const destBankCode = modalDestBank;
     if (!destBankCode) return; // shouldn't happen — canSave gates this
     const destBankName = bankAccounts.find(b => b.code === destBankCode)?.description || '';
 
@@ -5067,25 +5014,10 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const amount = txn.amount;
     const isOutgoing = amount < 0;
 
-    // Resolve the destination/source bank at render time from
-    // EITHER an explicit dropdown selection (`modalDestBank`) OR
-    // a typed code that exact-matches one of the bank accounts.
-    // Computing here means typing "BB010" immediately reflects
-    // in the summary + enables Save, even before any state
-    // propagation through onChange would have settled.
-    const typedTrimmedUC = modalDestBankSearch.trim().toUpperCase();
-    const typedMatch =
-      typedTrimmedUC.length > 0
-        ? bankAccounts.find(
-            (b) =>
-              b.code.toUpperCase() === typedTrimmedUC &&
-              b.code !== selectedBankCode,
-          )
-        : undefined;
-    const resolvedDestCode = modalDestBank || typedMatch?.code || '';
-    const selectedDestBank = bankAccounts.find(
-      (b) => b.code === resolvedDestCode,
-    );
+    // The shared BankAccountPicker manages search/dropdown/auto-resolve
+    // internally, so the modal just reads modalDestBank for the
+    // selected code. No render-time resolution needed here anymore.
+    const resolvedDestCode = modalDestBank;
     const canSave = !!resolvedDestCode && !!modalReference && !!modalDate;
 
     return (
@@ -5194,139 +5126,24 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
               />
             </div>
 
-            {/* Destination/Source Bank - Searchable */}
-            {(() => {
-              const filteredDestBanks = bankAccounts
-                .filter(b => b.code !== selectedBankCode)
-                .filter(b => {
-                  if (!modalDestBankSearch) return true;
-                  const search = modalDestBankSearch.toLowerCase();
-                  return b.code.toLowerCase().includes(search) ||
-                         b.description.toLowerCase().includes(search) ||
-                         (b.sort_code && b.sort_code.includes(search)) ||
-                         (b.account_number && b.account_number.includes(search));
-                });
-              return (
-            <div className="relative">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                {isOutgoing ? 'Destination Bank' : 'Source Bank'} <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={modalDestBankSearch}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setModalDestBankSearch(v);
-                  setModalDestBankDropdownOpen(true);
-                  setModalDestBankHighlightIndex(0);
-                  // Auto-resolve when the typed text exactly matches a
-                  // bank code (case-insensitive). Without this, the
-                  // operator typing "BB010" sees the summary stay at
-                  // "?" because `modalDestBank` only gets set when
-                  // they click/Enter/Tab on a dropdown option.
-                  const trimmed = v.trim().toUpperCase();
-                  const exactMatch = bankAccounts.find(
-                    (b) =>
-                      b.code.toUpperCase() === trimmed &&
-                      b.code !== selectedBankCode,
-                  );
-                  if (exactMatch) {
-                    setModalDestBank(exactMatch.code);
-                  } else if (modalDestBank) {
-                    // Edits that no longer exact-match clear the
-                    // selection (existing behaviour).
-                    setModalDestBank('');
-                  }
-                }}
-                onFocus={() => {
-                  setModalDestBankDropdownOpen(true);
-                  setModalDestBankHighlightIndex(0);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    if (!modalDestBankDropdownOpen) {
-                      setModalDestBankDropdownOpen(true);
-                    } else {
-                      setModalDestBankHighlightIndex(prev => Math.min(prev + 1, filteredDestBanks.length - 1));
-                    }
-                  } else if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    setModalDestBankHighlightIndex(prev => Math.max(prev - 1, 0));
-                  } else if (e.key === 'Enter' && modalDestBankDropdownOpen && filteredDestBanks.length > 0) {
-                    e.preventDefault();
-                    const selected = filteredDestBanks[modalDestBankHighlightIndex];
-                    if (selected) {
-                      setModalDestBank(selected.code);
-                      setModalDestBankSearch(`${selected.code} - ${selected.description}`);
-                      setModalDestBankDropdownOpen(false);
-                      // Auto-focus Save button after selection
-                      setTimeout(() => modalBankTransferSaveRef.current?.focus(), 50);
-                    }
-                  } else if (e.key === 'Escape') {
-                    setModalDestBankDropdownOpen(false);
-                  } else if (e.key === 'Tab' && modalDestBankDropdownOpen && filteredDestBanks.length > 0) {
-                    // Select highlighted item on Tab, then let normal tab behavior move focus
-                    const selected = filteredDestBanks[modalDestBankHighlightIndex];
-                    if (selected) {
-                      setModalDestBank(selected.code);
-                      setModalDestBankSearch(`${selected.code} - ${selected.description}`);
-                    }
-                    setModalDestBankDropdownOpen(false);
-                  } else if (e.key === 'Tab') {
-                    setModalDestBankDropdownOpen(false);
-                  }
-                }}
-                placeholder="Search by code, name or sort code..."
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                ref={modalDestBankInputRef}
-              />
-              {modalDestBankDropdownOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-40"
-                    onClick={() => setModalDestBankDropdownOpen(false)}
-                  />
-                  <div className="absolute z-[60] w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-48 overflow-y-auto" style={{ bottom: '100%', marginBottom: '4px', marginTop: 0 }}>
-                    {filteredDestBanks.map((b, idx) => (
-                        <button
-                          key={b.code}
-                          type="button"
-                          onClick={() => {
-                            setModalDestBank(b.code);
-                            setModalDestBankSearch(`${b.code} - ${b.description}`);
-                            setModalDestBankDropdownOpen(false);
-                          }}
-                          className={`w-full text-left px-3 py-2 text-sm ${
-                            idx === modalDestBankHighlightIndex ? 'bg-blue-100' : 'hover:bg-blue-50'
-                          } ${modalDestBank === b.code ? 'text-blue-800' : ''}`}
-                        >
-                          <div>
-                            <span className="font-medium">{b.code}</span>
-                            <span className="text-gray-600"> - {b.description}</span>
-                          </div>
-                          {b.sort_code && (
-                            <div className="text-xs text-gray-500">
-                              Sort: {b.sort_code} {b.account_number && `| Acc: ${b.account_number}`}
-                            </div>
-                          )}
-                        </button>
-                      ))}
-                    {filteredDestBanks.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-500">No matching bank accounts found</div>
-                    )}
-                  </div>
-                </>
-              )}
-              {selectedDestBank && (
-                <div className="mt-2 text-xs text-gray-500">
-                  {selectedDestBank.sort_code && <span>Sort: {selectedDestBank.sort_code} </span>}
-                  {selectedDestBank.account_number && <span>Acc: {selectedDestBank.account_number}</span>}
-                </div>
-              )}
-            </div>
-              );
-            })()}
+            {/* Destination/Source Bank — shared picker (was 100 lines
+                of bespoke input + dropdown — now one component). */}
+            <BankAccountPicker
+              value={modalDestBank}
+              onChange={(code) => setModalDestBank(code)}
+              excludeCodes={selectedBankCode ? [selectedBankCode] : []}
+              label={isOutgoing ? 'Destination Bank' : 'Source Bank'}
+              required
+              onEnterSelect={() => {
+                // Pre-existing UX: move focus to Save after picking
+                // a bank with Enter, so the operator can press Enter
+                // again to commit.
+                setTimeout(
+                  () => modalBankTransferSaveRef.current?.focus(),
+                  50,
+                );
+              }}
+            />
 
             {/* Summary */}
             <div className="pt-2 border-t border-gray-200">

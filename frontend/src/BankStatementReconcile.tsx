@@ -25,6 +25,8 @@ import {
 } from 'lucide-react';
 import apiClient, { authFetch, friendlyError } from './api-shim';
 import { LIVE_VERSION } from './PageHeader';
+import { useBankAccounts } from './hooks/useBankAccounts';
+import { BankAccountPicker } from './components/BankAccountPicker';
 
 // SAM port shims — replace react-router-dom and VoiceContext with the
 // minimum the page needs.
@@ -552,11 +554,10 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
   }, [importedStatementData]);
 
   // Bank accounts for transfers
-  interface BankAccount {
-    code: string;
-    name: string;
-  }
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  // Bank accounts come from the shared useBankAccounts hook — one
+  // source of truth for the dropdown, so endpoint / response-shape
+  // changes can't desync this page from the rest of the app.
+  const { accounts: bankAccounts } = useBankAccounts();
 
   // Nominal accounts for NL posting
   interface NominalAccount {
@@ -776,36 +777,22 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
     return cleanup;
   }, [enrichedUnmatched, voiceLineIndex, createEntryModal.open, ignoreConfirm, registerCommands, openAssignForLine]);
 
-  // Fetch bank accounts and nominal accounts on mount
+  // Auto-select first bank when the shared hook delivers the list,
+  // provided no other init is in flight (initialReconcileData /
+  // resumeStatement carry their own bank choice).
   useEffect(() => {
-    authFetch('/api/cashbook/bank-accounts')
-      .then(res => res.json())
-      .then(data => {
-        // The cashbook endpoint returns the array under `banks`; older
-        // code expected `accounts` (or `bank_accounts`). Accept any of
-        // the three so a future BE change doesn't silently empty the
-        // dropdown — the bank-transfer modal on this page relies on
-        // bankAccounts being populated. Without this, the "Source Bank"
-        // dropdown on a Transfer In (and "Destination Bank" on a
-        // Transfer Out) shows no options because `accounts` is
-        // undefined in the response.
-        const list = Array.isArray(data?.banks)
-          ? data.banks
-          : Array.isArray(data?.accounts)
-            ? data.accounts
-            : Array.isArray(data?.bank_accounts)
-              ? data.bank_accounts
-              : null;
-        if (data.success && list) {
-          setBankAccounts(list);
-          // Auto-select first bank if none selected AND no initial data pending
-          if (list.length > 0 && !selectedBank && !initialReconcileData && !resumeStatement) {
-            setSelectedBank(list[0].code);
-          }
-        }
-      })
-      .catch(err => console.error('Failed to fetch bank accounts:', err));
+    if (
+      bankAccounts.length > 0 &&
+      !selectedBank &&
+      !initialReconcileData &&
+      !resumeStatement
+    ) {
+      setSelectedBank(bankAccounts[0].code);
+    }
+  }, [bankAccounts, selectedBank, initialReconcileData, resumeStatement]);
 
+  // Fetch nominal accounts and related config on mount
+  useEffect(() => {
     authFetch('/api/gocardless/nominal-accounts')
       .then(res => res.json())
       .then(data => {
@@ -5237,27 +5224,19 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
                       </div>
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      {createEntryModal.statementLine && createEntryModal.statementLine.statement_amount < 0
+                  <BankAccountPicker
+                    value={newEntryForm.destBank}
+                    onChange={(code) =>
+                      setNewEntryForm({ ...newEntryForm, destBank: code })
+                    }
+                    excludeCodes={selectedBank ? [selectedBank] : []}
+                    label={
+                      createEntryModal.statementLine &&
+                      createEntryModal.statementLine.statement_amount < 0
                         ? 'Destination Bank (receiving)'
-                        : 'Source Bank (sending)'}
-                    </label>
-                    <select
-                      value={newEntryForm.destBank}
-                      onChange={e => setNewEntryForm({ ...newEntryForm, destBank: e.target.value })}
-                      className="w-full border border-gray-300 rounded px-3 py-2"
-                    >
-                      <option value="">Select bank account...</option>
-                      {bankAccounts
-                        .filter(b => b.code !== selectedBank)
-                        .map(b => (
-                          <option key={b.code} value={b.code}>
-                            {b.code} - {b.name}
-                          </option>
-                        ))}
-                    </select>
-                  </div>
+                        : 'Source Bank (sending)'
+                    }
+                  />
                 </div>
               )}
 
