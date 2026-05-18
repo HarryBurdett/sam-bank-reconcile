@@ -22,6 +22,7 @@
 import type { Knex } from 'knex';
 import { getReconciliationStatus } from './reconciliation-status.js';
 import { checkOrphanedTransactions } from './transaction-orphan-check.js';
+import { repairOrphanTransactionLinks } from './orphan-line-relink.js';
 
 export interface BankRestoreSummary {
   bank_code: string;
@@ -43,6 +44,16 @@ export interface BankRestoreSummary {
   divergence_direction?: 'restore' | 'extra' | null;
   orphan_line_count: number;
   orphan_statement_count: number;
+  /** When > 0, bank_statement_transactions for this bank reference
+   *  parent import_ids that don't exist (the legacy-seeder orphan
+   *  bug). Fixable by /api/reconcile/bank/:code/repair-orphan-links
+   *  (dry-run preview via GET, apply via POST). The recover button
+   *  calls this automatically as part of the recovery sequence. */
+  orphan_link_count?: number;
+  /** When orphan_link_count > 0, how many of them can be relinked
+   *  by period+balance match. The remainder are archived rather
+   *  than relinked. */
+  orphan_link_repairable?: number;
   needs_recovery: boolean;
 }
 
@@ -76,14 +87,25 @@ export async function checkRestoreAcrossAllBanks(
     for (const b of banks) {
       const code = (b.code ?? '').trim();
       if (!code) continue;
-      const [status, orphans] = await Promise.all([
+      const [status, orphans, orphanLinks] = await Promise.all([
         getReconciliationStatus(operaDb, code, appDb, null),
         checkOrphanedTransactions(operaDb, appDb, code),
+        // Orphan-link check: bank_statement_transactions rows whose
+        // import_id no longer resolves to any bank_statement_imports
+        // row. Detect via dry-run — no mutation.
+        repairOrphanTransactionLinks(appDb, code, { dryRun: true }),
       ]);
       const divDetected = !!status.opera_divergence_detected;
       const orphanLines = orphans.success ? orphans.orphan_line_count : 0;
       const orphanStmts = orphans.success ? orphans.statement_count : 0;
-      const needs = divDetected || orphanLines > 0;
+      const orphanLinkRows = orphanLinks.success
+        ? orphanLinks.orphan_groups.reduce((s, g) => s + g.row_count, 0)
+        : 0;
+      const orphanLinkRepairable = orphanLinks.success
+        ? orphanLinks.relinked_rows
+        : 0;
+      const needs =
+        divDetected || orphanLines > 0 || orphanLinkRows > 0;
       if (needs) affected += 1;
       results.push({
         bank_code: code,
@@ -94,6 +116,8 @@ export async function checkRestoreAcrossAllBanks(
         divergence_direction: status.opera_divergence_direction ?? null,
         orphan_line_count: orphanLines,
         orphan_statement_count: orphanStmts,
+        orphan_link_count: orphanLinkRows,
+        orphan_link_repairable: orphanLinkRepairable,
         needs_recovery: needs,
       });
     }

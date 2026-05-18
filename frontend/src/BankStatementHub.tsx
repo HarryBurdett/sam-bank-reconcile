@@ -143,6 +143,12 @@ interface RestoreCheckBank {
   divergence_direction?: 'restore' | 'extra' | null;
   orphan_line_count: number;
   orphan_statement_count: number;
+  /** bank_statement_transactions rows pointing at a parent that
+   *  doesn't exist in bank_statement_imports (the legacy-seeder
+   *  orphan bug). Heal via /repair-orphan-links — called
+   *  automatically by the recover button. */
+  orphan_link_count?: number;
+  orphan_link_repairable?: number;
   needs_recovery: boolean;
 }
 interface RestoreCheckResponse {
@@ -314,8 +320,15 @@ export function BankStatementHub() {
       (s, b) => s + (b.orphan_line_count ?? 0),
       0,
     );
+    const totalOrphanLinks = affected.reduce(
+      (s, b) => s + (b.orphan_link_count ?? 0),
+      0,
+    );
     const divergenceBanks = affected.filter((b) => b.divergence_detected).length;
     const summaryLine = [
+      totalOrphanLinks > 0
+        ? `${totalOrphanLinks} mis-linked transaction row(s)`
+        : null,
       totalOrphanLines > 0
         ? `${totalOrphanLines} orphaned line(s)`
         : null,
@@ -340,12 +353,41 @@ export function BankStatementHub() {
       let totalLines = 0;
       let totalStatements = 0;
       let totalPromoted = 0;
+      let totalRelinked = 0;
       const errors: string[] = [];
       for (const b of affected) {
-        // Clear orphan lines first (if any) — the recover-from-restore
-        // expects the line-level state to be consistent before it
-        // resets reconciled flags. Either endpoint is a no-op when
-        // its target state is already clean.
+        // Three-stage recovery, in order:
+        //   1. repair-orphan-links — relink bank_statement_transactions
+        //      rows whose parent vanished (legacy-seeder bug). Must
+        //      run BEFORE the other recoveries because they expect
+        //      child rows to point at valid parents.
+        //   2. recover-orphan-transactions — clear posted_entry_number
+        //      on lines whose Opera entry is gone.
+        //   3. recover-from-restore — bidirectional divergence
+        //      recovery (clears stale flags OR promotes
+        //      Opera-already-has-it rows).
+        // Each endpoint is a no-op when its target state is clean,
+        // so the operator can click Recover repeatedly without harm.
+        if ((b.orphan_link_count ?? 0) > 0) {
+          try {
+            const resp = await authFetch(
+              `/api/reconcile/bank/${encodeURIComponent(b.bank_code)}/repair-orphan-links`,
+              { method: 'POST' },
+            );
+            const data = await resp.json();
+            if (data.success) {
+              totalRelinked += Number(data.relinked_rows ?? 0);
+            } else {
+              errors.push(
+                `${b.bank_code} (orphan-links): ${data.error ?? 'unknown error'}`,
+              );
+            }
+          } catch (err: any) {
+            errors.push(
+              `${b.bank_code} (orphan-links): ${err?.message ?? String(err)}`,
+            );
+          }
+        }
         if ((b.orphan_line_count ?? 0) > 0) {
           try {
             const resp = await authFetch(
@@ -389,6 +431,9 @@ export function BankStatementHub() {
         }
       }
       const partsCleared = [
+        totalRelinked > 0
+          ? `${totalRelinked} transaction row(s) relinked to correct parent statements`
+          : null,
         totalLines > 0 ? `${totalLines} orphaned line(s)` : null,
         totalStatements > 0
           ? `${totalStatements} stale reconciled statement(s)`
@@ -400,7 +445,7 @@ export function BankStatementHub() {
       const nextStep =
         totalLines > 0 || totalStatements > 0
           ? ' Re-import the affected statements to re-post them to Opera.'
-          : totalPromoted > 0
+          : totalPromoted > 0 || totalRelinked > 0
             ? ' Opera and SAM are now in sync.'
             : '';
       const headline =
@@ -864,6 +909,13 @@ export function BankStatementHub() {
                       {b.description} — rec balance £{b.reconciled_balance.toFixed(2)}
                       {b.orphan_line_count > 0 && (
                         <> · {b.orphan_line_count} orphaned line(s) across {b.orphan_statement_count} statement(s)</>
+                      )}
+                      {(b.orphan_link_count ?? 0) > 0 && (
+                        <> · {b.orphan_link_count} transaction row(s) need re-link to parent statement{' '}
+                          {(b.orphan_link_repairable ?? 0) > 0
+                            ? `(${b.orphan_link_repairable} auto-repairable)`
+                            : '(none auto-repairable — will be archived)'}
+                        </>
                       )}
                       {b.divergence_detected && (
                         <> · {b.divergence_direction === 'extra'
