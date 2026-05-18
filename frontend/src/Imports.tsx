@@ -555,14 +555,27 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         if (data.success) {
           const enabled = data.folder_enabled || false;
           setFolderEnabled(enabled);
-          // Default to unified folder view when folders are configured
-          if (enabled) {
+          // Default to unified folder view when folders are configured —
+          // but ONLY when this Imports component wasn't opened from the
+          // Hub via initialStatement. When the Hub passes initialStatement,
+          // the statementSource is authoritative ('email' / 'pdf') and
+          // must not be overridden to 'folder' by this async effect.
+          // Previously, the override caused the Import button dispatch to
+          // fall through to handleBankImport (CSV path) for email-source
+          // imports — the FE would then POST /import-with-overrides
+          // with an empty filepath and the user saw "file_path or bytes
+          // is required" instead of the import succeeding.
+          if (enabled && !initialStatement) {
             setStatementSource('folder');
           }
         }
         setFolderSettingsLoaded(true);
       })
       .catch(() => setFolderSettingsLoaded(true));
+    // initialStatement is intentionally read once at effect setup time —
+    // the dependency is empty because we only want this fetch to fire
+    // on mount, not whenever initialStatement changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // =====================

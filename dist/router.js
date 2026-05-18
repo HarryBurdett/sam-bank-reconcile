@@ -2308,6 +2308,18 @@ export function createRouter(ctx) {
             const emailIdRaw = req.query.email_id ?? body.email_id;
             const attachmentIdRaw = req.query.attachment_id ??
                 body.attachment_id;
+            // Temporary diagnostic logging — every hit to this endpoint
+            // logs URL + key parameters so we can see exactly what the
+            // FE is sending when the user reports "file_path or bytes
+            // is required". Remove once the bug class is fully closed.
+            ctx.logger.info?.(`[import-from-pdf] url=${req.originalUrl} ` +
+                `query.file_path=${JSON.stringify(req.query.file_path)} ` +
+                `body.file_path=${JSON.stringify(body.file_path)} ` +
+                `query.filepath=${JSON.stringify(req.query.filepath)} ` +
+                `body.filepath=${JSON.stringify(body.filepath)} ` +
+                `email_id=${JSON.stringify(emailIdRaw)} ` +
+                `attachment_id=${JSON.stringify(attachmentIdRaw)} ` +
+                `bankEmailAttachments=${adapter.bankEmailAttachments ? 'wired' : 'NULL'}`);
             // Server-side rescue: if a stale FE bundle hits this endpoint
             // with no file_path but supplied email_id + attachment_id,
             // route through the email path instead. Without this guard
