@@ -137,6 +137,159 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     expect(executor.postBankImport).not.toHaveBeenCalled();
   });
 
+  it('preserves reconciled rows across cycle-merge with newest-first extraction order', async () => {
+    const appDb = await makeAppDb();
+    const [firstId] = await appDb('bank_statement_imports').insert({
+      bank_code: 'BC010', period_start: '2026-05-01', period_end: '2026-05-08',
+      opening_balance: 125912.72, closing_balance: 100000,
+      is_reconciled: 0, filename: 'May 1-8.pdf', source: 'email',
+      target_system: 'opera_se',
+      records_imported: 12, transactions_imported: 12,
+      total_receipts: 0, total_payments: 120,
+    }).returning('id');
+    const firstImportId = typeof firstId === 'number' ? firstId : (firstId as { id: number }).id;
+
+    // Pre-existing pull-1 lines, with line_numbers 1-12 in extraction order.
+    // Lines 1-8 are reconciled with posted_entry_number stamped (Monzo
+    // "reconciled" through Opera).
+    for (let i = 1; i <= 12; i++) {
+      await appDb('bank_statement_transactions').insert({
+        import_id: firstImportId,
+        line_number: i,
+        post_date: `2026-05-${String(i).padStart(2, '0')}`,
+        description: `Line ${i}`,
+        amount: -10,
+        is_reconciled: i <= 8 ? 1 : 0,
+        posted_entry_number: i <= 8 ? `STAMP-${i}` : null,
+        posted_at: i <= 8 ? '2026-05-08T12:00:00' : null,
+      });
+    }
+
+    // Pull-2 (May 1-22) extracted in NEWEST-FIRST order (Monzo's natural
+    // ordering): 4 new lines (May 19, 18, 17, 16) at positions 1-4, then
+    // 12 dup lines (May 12 .. May 1) at positions 5-16.
+    const extraction: PdfExtractionResult = {
+      bank_name: 'Monzo', account_number: '12345678', sort_code: '04-00-04',
+      statement_date: '2026-05-22',
+      period_start: '2026-05-01', period_end: '2026-05-22',
+      opening_balance: 125912.72, closing_balance: 75000,
+      transactions: [
+        ...Array.from({ length: 4 }, (_, i) => ({
+          date: `2026-05-${19 - i}`, name: `New ${i + 1}`, memo: `New ${i + 1}`,
+          amount: -20, type: 'debit', balance: 75000,
+        })),
+        ...Array.from({ length: 12 }, (_, i) => ({
+          date: `2026-05-${String(12 - i).padStart(2, '0')}`,
+          name: `Line ${12 - i}`, memo: `Line ${12 - i}`,
+          amount: -10, type: 'debit', balance: 100000,
+        })),
+      ],
+    };
+
+    const extractor: PdfExtractor = {
+      extractFromPdf: vi.fn().mockResolvedValue(extraction),
+    };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true, records_imported: 4, records_failed: 0,
+        skipped_count: 12, errors: [], warnings: [], posted_lines: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({ overlapError: null, resumeImportId: null }),
+    };
+
+    const result = await importBankStatementFromPdf(
+      makeOperaDb(), appDb,
+      { filePath: '/tmp/May 1-22.pdf', bankCode: 'BC010', filename: 'May 1-22.pdf' },
+      extractor, executor, lock, overlap,
+    );
+    expect(result.success).toBe(true);
+
+    // Critical: the 8 previously-reconciled rows (now at positions 8-16,
+    // since extraction is newest-first) must STILL have their
+    // posted_entry_number and is_reconciled preserved.
+    const reconciledNow = await appDb('bank_statement_transactions')
+      .where({ import_id: firstImportId })
+      .andWhere('is_reconciled', 1)
+      .select('description', 'posted_entry_number');
+    expect(reconciledNow).toHaveLength(8);
+    for (const r of reconciledNow) {
+      // The reconciled rows should be the original "Line 1" .. "Line 8"
+      // (now stored at new line_number positions due to reorder).
+      const m = (r.description as string).match(/^Line (\d+)$/);
+      expect(m).not.toBeNull();
+      const n = Number(m![1]);
+      expect(n).toBeLessThanOrEqual(8);
+      expect(r.posted_entry_number).toBe(`STAMP-${n}`);
+    }
+  });
+
+  it('accumulates running totals on cycle-merge UPDATE', async () => {
+    const appDb = await makeAppDb();
+    await appDb('bank_statement_imports').insert({
+      bank_code: 'BC010', period_start: '2026-05-01', period_end: '2026-05-08',
+      opening_balance: 125912.72, closing_balance: 100000,
+      is_reconciled: 0, filename: 'May 1-8.pdf', source: 'email',
+      target_system: 'opera_se',
+      records_imported: 5, transactions_imported: 5,
+      total_receipts: 200.50, total_payments: 100.00,
+    });
+    const extraction: PdfExtractionResult = {
+      bank_name: 'Monzo', account_number: '1', sort_code: '04-00-04',
+      statement_date: '2026-05-22',
+      period_start: '2026-05-01', period_end: '2026-05-22',
+      opening_balance: 125912.72, closing_balance: 75000,
+      transactions: [{
+        date: '2026-05-22', name: 'New', memo: 'New',
+        amount: -50, type: 'debit', balance: 75000,
+      }],
+    };
+    const extractor: PdfExtractor = {
+      extractFromPdf: vi.fn().mockResolvedValue(extraction),
+    };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true, records_imported: 3, records_failed: 0,
+        skipped_count: 0, errors: [], warnings: [], posted_lines: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({ overlapError: null, resumeImportId: null }),
+    };
+
+    const result = await importBankStatementFromPdf(
+      makeOperaDb(), appDb,
+      { filePath: '/tmp/X.pdf', bankCode: 'BC010', filename: 'X.pdf' },
+      extractor, executor, lock, overlap,
+    );
+    expect(result.success).toBe(true);
+
+    // Note: totalReceipts/totalPayments are computed inside
+    // importBankStatementFromPdf from result.posted_lines, which is
+    // empty in this mock, so the test asserts only that pre-existing
+    // values are PRESERVED (prev + 0 = prev), not the addition.
+    // The accumulation logic (prev + new) is the relevant assertion —
+    // records_imported should be 5 + 3 = 8.
+    const row = await appDb('bank_statement_imports')
+      .where({ bank_code: 'BC010', period_start: '2026-05-01' })
+      .first();
+    expect(row?.records_imported).toBe(5 + 3); // 8
+    expect(row?.transactions_imported).toBe(5 + 3); // 8
+    // total_receipts/total_payments: prev was 200.50 / 100.00, new is 0/0
+    // (empty posted_lines), so preserved at the original values.
+    expect(row?.total_receipts).toBe(200.50);
+    expect(row?.total_payments).toBe(100.00);
+  });
+
   it('UPDATEs the existing cycle row when an unreconciled cycle exists', async () => {
     const appDb = await makeAppDb();
     // Pre-existing UNreconciled cycle row from a prior pull (May 1-8).

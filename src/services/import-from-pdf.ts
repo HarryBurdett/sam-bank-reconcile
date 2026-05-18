@@ -826,13 +826,19 @@ export async function importBankStatementFromPdf(
         }
         // Branch 3: fresh INSERT (unchanged from before — traditional
         // banks always land here; cumulative banks land here only on
-        // the FIRST pull of a cycle).
+        // the FIRST pull of a cycle). Faithful port of legacy
+        // routes.py:4502-4526 — write the audit row so the
+        // scan-all-banks gating chain sees the import.
         if (!importId) {
           const [insertedId] = (await appDb('bank_statement_imports')
             .insert({
               bank_code: bankCode,
               source: 'file',
               source_ref: input.filename ?? input.filePath,
+              // Statement-info columns read downstream by
+              // statement-tracking.ts, bank-reconciliation-status.ts,
+              // and the scan-all-banks gating chain. Faithful to
+              // legacy email/storage.py:1615.
               statement_date: extracted.statement_date ?? null,
               account_number: extracted.account_number ?? null,
               sort_code: extracted.sort_code ?? null,
@@ -856,51 +862,79 @@ export async function importBankStatementFromPdf(
               : (insertedId as { id: number })?.id;
         }
 
-        // Per-line tracking. For a fresh import (first pull), insert
-        // all extracted lines. For a cycle-merge (second+ pull within
-        // the same cycle), only append lines whose fingerprint isn't
-        // already stored — preserves the original lines' is_reconciled,
-        // posted_entry_number, etc.
+        // Per-line tracking. We rebuild the entire bank_statement_transactions
+        // set for this import_id on every call. This keeps stored line_number
+        // aligned with the position in extracted.transactions — which is
+        // critical because the executor reports posted_lines[].line_number as
+        // (position + 1), and the stamping step below matches by line_number.
+        //
+        // To preserve reconciled-row state across a cycle-merge re-import
+        // (Monzo etc.), we fingerprint each previously-stored row and carry
+        // over its posted_entry_number, posted_at, and is_reconciled fields
+        // when the same fingerprint appears in the new extraction.
+        //
+        // Faithful to legacy email/storage.py:1615 — these statement-info
+        // columns (post_date/description/amount/balance) are read downstream
+        // by statement-tracking.ts, bank-reconciliation-status.ts, and the
+        // scan-all-banks gating chain.
         if (importId) {
-          // Build fingerprint set of already-stored lines for this
-          // import_id. Empty set on first pull.
+          // 1. Snapshot existing rows for this import_id, indexed by fingerprint.
           const existingLines = (await appDb('bank_statement_transactions')
             .where({ import_id: importId })
-            .select('post_date', 'amount', 'description')) as Array<{
+            .select(
+              'post_date',
+              'amount',
+              'description',
+              'posted_entry_number',
+              'posted_at',
+              'is_reconciled',
+            )) as Array<{
             post_date: string | null;
             amount: number;
             description: string | null;
+            posted_entry_number: string | null;
+            posted_at: string | null;
+            is_reconciled: number;
           }>;
-          const existingFingerprints = new Set(
-            existingLines.map((r) =>
-              fingerprintTransactionLine(
-                (r.post_date ?? '').slice(0, 10),
-                Number(r.amount ?? 0),
-                r.description,
-              ),
-            ),
-          );
+          const existingByFingerprint = new Map<
+            string,
+            {
+              posted_entry_number: string | null;
+              posted_at: string | null;
+              is_reconciled: number;
+            }
+          >();
+          for (const r of existingLines) {
+            const fp = fingerprintTransactionLine(
+              (r.post_date ?? '').slice(0, 10),
+              Number(r.amount ?? 0),
+              r.description,
+            );
+            existingByFingerprint.set(fp, {
+              posted_entry_number: r.posted_entry_number,
+              posted_at: r.posted_at,
+              is_reconciled: r.is_reconciled,
+            });
+          }
 
-          // Walk the freshly-extracted lines; insert only those not
-          // already present (by fingerprint). Renumber line_number
-          // continuing from existing max.
-          const maxLineRow = (await appDb('bank_statement_transactions')
+          // 2. Wipe existing rows.
+          await appDb('bank_statement_transactions')
             .where({ import_id: importId })
-            .max<{ m: number | null }[]>({ m: 'line_number' })
-            .first()) as { m: number | null } | undefined;
-          let nextLineNumber = Number(maxLineRow?.m ?? 0) + 1;
+            .delete();
 
-          const rowsToInsert: Array<Record<string, unknown>> = [];
-          for (const t of extracted.transactions) {
+          // 3. Rebuild from extracted.transactions, preserving state when
+          //    a fingerprint matches a prior row. line_number = i+1 so the
+          //    executor's posted_lines[].line_number stamping works.
+          const allRows = extracted.transactions.map((t, idx) => {
             const fp = fingerprintTransactionLine(
               (t.date ?? '').slice(0, 10),
               Number(t.amount ?? 0),
               (t.memo ?? t.name ?? '').toString(),
             );
-            if (existingFingerprints.has(fp)) continue;
-            rowsToInsert.push({
+            const preserved = existingByFingerprint.get(fp);
+            return {
               import_id: importId,
-              line_number: nextLineNumber++,
+              line_number: idx + 1,
               post_date: (t.date ?? '').slice(0, 10) || null,
               description: (t.memo ?? t.name ?? '').toString().slice(0, 500),
               amount: Number(t.amount ?? 0),
@@ -908,12 +942,13 @@ export async function importBankStatementFromPdf(
               transaction_type: String(t.type ?? ''),
               reference:
                 (t as unknown as { reference?: string | null }).reference ?? null,
-              posted_entry_number: null,
-              posted_at: null,
-            });
-          }
-          if (rowsToInsert.length > 0) {
-            await appDb('bank_statement_transactions').insert(rowsToInsert);
+              posted_entry_number: preserved?.posted_entry_number ?? null,
+              posted_at: preserved?.posted_at ?? null,
+              is_reconciled: preserved?.is_reconciled ?? 0,
+            };
+          });
+          if (allRows.length > 0) {
+            await appDb('bank_statement_transactions').insert(allRows);
           }
 
           // Stamp the posted lines with their Opera entry numbers.
