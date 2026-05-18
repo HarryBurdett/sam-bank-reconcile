@@ -92,6 +92,7 @@ import {
   updateRepeatEntryDate,
   listRepeatEntries,
 } from './services/repeat-entries.js';
+import { checkRecurringEntries } from './services/check-recurring-entries.js';
 import {
   scanEmailsForBankStatements,
   type BankMailboxAdapter,
@@ -849,6 +850,40 @@ export function createRouter(ctx: AppContext): Router {
     } catch (err: any) {
       ctx.logger.error('Set recurring-entries mode failed', err);
       res.status(500).json({ success: false, error: friendlyDbError(err) });
+    }
+  });
+
+  /**
+   * GET /api/recurring-entries/check/:bank_code
+   *
+   * Check for due recurring entries (arhead/arline) on this bank.
+   * Surfaced by BankStatementHub at "Process click" time so the
+   * operator can post in Opera before loading the preview.
+   *
+   * Faithful port of `check_recurring_entries`
+   * (api/main.py:10320-10567, worktree admiring-borg-888ae1).
+   */
+  router.get('/api/recurring-entries/check/:bank_code', async (req: Request, res: Response) => {
+    const operaDb = getOperaDb(req, res);
+    if (!operaDb) return;
+    const appDb = getAppDb(req, res);
+    if (!appDb) return;
+    try {
+      const result = await checkRecurringEntries(
+        operaDb,
+        appDb,
+        String(req.params.bank_code ?? ''),
+      );
+      if (!result.success) {
+        res.status(400).json(result);
+        return;
+      }
+      res.json(result);
+    } catch (err: any) {
+      ctx.logger.error('Check recurring entries failed', err);
+      res
+        .status(500)
+        .json({ success: false, error: friendlyDbError(err) });
     }
   });
 
