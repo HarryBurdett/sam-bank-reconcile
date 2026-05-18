@@ -136,4 +136,115 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     // bailed out before reaching the posting step.
     expect(executor.postBankImport).not.toHaveBeenCalled();
   });
+
+  it('UPDATEs the existing cycle row when an unreconciled cycle exists', async () => {
+    const appDb = await makeAppDb();
+    // Pre-existing UNreconciled cycle row from a prior pull (May 1-8).
+    const [firstId] = await appDb('bank_statement_imports')
+      .insert({
+        bank_code: 'BC010',
+        period_start: '2026-05-01',
+        period_end: '2026-05-08',
+        opening_balance: 125912.72,
+        closing_balance: 100000,
+        is_reconciled: 0,
+        filename: 'May 1-8.pdf',
+        source: 'email',
+        target_system: 'opera_se',
+        records_imported: 12,
+        transactions_imported: 12,
+      })
+      .returning('id');
+    const firstImportId = typeof firstId === 'number' ? firstId : (firstId as { id: number }).id;
+
+    // Pre-existing transactions on the first pull (12 lines, May 1-8).
+    for (let i = 1; i <= 12; i++) {
+      await appDb('bank_statement_transactions').insert({
+        import_id: firstImportId,
+        line_number: i,
+        post_date: `2026-05-0${i <= 9 ? i : i}`,
+        description: `Line ${i}`,
+        amount: -10,
+      });
+    }
+
+    // The new pull (May 1-22) extends to May 22 with new lines.
+    const extraction: PdfExtractionResult = {
+      bank_name: 'Monzo',
+      account_number: '12345678', sort_code: '04-00-04',
+      statement_date: '2026-05-22',
+      period_start: '2026-05-01',
+      period_end: '2026-05-22',
+      opening_balance: 125912.72,
+      closing_balance: 75000,
+      transactions: [
+        // 12 same lines as before — should NOT be re-inserted
+        ...Array.from({ length: 12 }, (_, i) => ({
+          date: `2026-05-0${i + 1 <= 9 ? i + 1 : i + 1}`,
+          name: `Line ${i + 1}`, memo: `Line ${i + 1}`,
+          amount: -10, type: 'debit', balance: 100000,
+        })),
+        // 4 NEW lines for May 16-22
+        ...Array.from({ length: 4 }, (_, i) => ({
+          date: `2026-05-${16 + i}`,
+          name: `New ${i + 1}`, memo: `New ${i + 1}`,
+          amount: -20, type: 'debit', balance: 75000,
+        })),
+      ],
+    };
+
+    const extractor: PdfExtractor = {
+      extractFromPdf: vi.fn().mockResolvedValue(extraction),
+    };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true,
+        records_imported: 4,  // executor posts 4 new lines
+        records_failed: 0,
+        skipped_count: 12,
+        errors: [], warnings: [],
+        posted_lines: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({
+        overlapError: null, resumeImportId: null,
+      }),
+    };
+
+    const result = await importBankStatementFromPdf(
+      makeOperaDb(),
+      appDb,
+      {
+        filePath: '/tmp/May 1-22.pdf',
+        bankCode: 'BC010',
+        filename: 'May 1-22.pdf',
+      },
+      extractor, executor, lock, overlap,
+    );
+
+    expect(result.success).toBe(true);
+
+    // Critical assertion: only ONE bank_statement_imports row exists
+    // for this cycle (the original, now UPDATEd).
+    const rows = await appDb('bank_statement_imports')
+      .where({ bank_code: 'BC010', period_start: '2026-05-01' })
+      .select('id', 'period_end', 'closing_balance', 'transactions_imported');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(firstImportId);
+    expect(rows[0]?.period_end).toBe('2026-05-22');
+    expect(rows[0]?.closing_balance).toBe(75000);
+
+    // bank_statement_transactions should now have 16 rows
+    // (12 original + 4 newly-appended), all under firstImportId.
+    const lineRows = await appDb('bank_statement_transactions')
+      .where({ import_id: firstImportId })
+      .count<{ c: number }[]>({ c: '*' })
+      .first();
+    expect(Number(lineRows?.c)).toBe(16);
+  });
 });
