@@ -58,6 +58,14 @@ function isPlainErr(e: unknown): string {
  * Joins by `ae_entry = at_entry AND ae_acnt = at_acnt` — the
  * cashbook primary key. Mismatch on count, value, or fingerprint
  * throws.
+ *
+ * For single-line postings (default), expects exactly 1 atran row
+ * and validates atran.at_value individually. For multi-line entries
+ * (e.g. recurring with N detail lines), pass expectedAtranCount = N
+ * and the helper validates that:
+ *   - Row count matches expectedAtranCount
+ *   - Sum of atran.at_value across all rows equals expectedSignedPence
+ *   - All rows have uniform at_type and at_pstdate (Opera requirement)
  */
 export async function assertAentryAtran(
   trx: Knex,
@@ -68,8 +76,14 @@ export async function assertAentryAtran(
     expectedAtType: number;
     expectedDate: string;
     expectedReferPrefix?: string; // first 20 chars of fingerprint
+    /**
+     * Number of atran rows expected for this entry. Default 1 = current
+     * single-line behaviour. Multi-line callers pass `lines.length`.
+     */
+    expectedAtranCount?: number;
   },
 ): Promise<void> {
+  const expectedCount = opts.expectedAtranCount ?? 1;
   let rows: Array<{
     ae_value: number | null;
     at_value: number | null;
@@ -85,8 +99,8 @@ export async function assertAentryAtran(
          t.at_pstdate AS at_pstdate,
          t.at_type AS at_type,
          RTRIM(t.at_refer) AS at_refer
-       FROM aentry a WITH (NOLOCK)
-       JOIN atran t WITH (NOLOCK)
+       FROM aentry a
+       JOIN atran t
          ON t.at_entry = a.ae_entry AND t.at_acnt = a.ae_acnt
        WHERE RTRIM(a.ae_entry) = ?
          AND RTRIM(a.ae_acnt) = ?`,
@@ -111,53 +125,58 @@ export async function assertAentryAtran(
       { entryNumber: opts.entryNumber, phase: 'in-trx' },
     );
   }
-  // We expect exactly one cashbook+nominal row per atran row. Multiple
-  // matches would mean an unexpected duplicate INSERT — fail loud.
-  if (rows.length > 1) {
+  if (rows.length !== expectedCount) {
     throw new PostingVerificationError(
-      `aentry+atran matched ${rows.length} rows for entry=${opts.entryNumber} — expected 1`,
+      `aentry+atran count mismatch for ${opts.entryNumber}: got ${rows.length}, expected ${expectedCount}`,
       { entryNumber: opts.entryNumber, phase: 'in-trx' },
     );
   }
-  const r = rows[0]!;
-  const ae = Number(r.ae_value ?? NaN);
-  const at = Number(r.at_value ?? NaN);
+
+  const ae = Number(rows[0]!.ae_value ?? NaN);
   if (!Number.isFinite(ae) || ae !== opts.expectedSignedPence) {
     throw new PostingVerificationError(
       `aentry.ae_value mismatch for ${opts.entryNumber}: stored=${ae} expected=${opts.expectedSignedPence}`,
       { entryNumber: opts.entryNumber, phase: 'in-trx' },
     );
   }
-  if (!Number.isFinite(at) || at !== opts.expectedSignedPence) {
+
+  // For multi-line: sum atran.at_value must equal expectedSignedPence.
+  // For single-line: that reduces to the row's at_value.
+  const atSum = rows.reduce((acc, r) => acc + Number(r.at_value ?? 0), 0);
+  if (atSum !== opts.expectedSignedPence) {
     throw new PostingVerificationError(
-      `atran.at_value mismatch for ${opts.entryNumber}: stored=${at} expected=${opts.expectedSignedPence}`,
+      `Σatran.at_value mismatch for ${opts.entryNumber}: stored=${atSum} expected=${opts.expectedSignedPence}`,
       { entryNumber: opts.entryNumber, phase: 'in-trx' },
     );
   }
-  if (Number(r.at_type) !== opts.expectedAtType) {
-    throw new PostingVerificationError(
-      `atran.at_type mismatch for ${opts.entryNumber}: stored=${r.at_type} expected=${opts.expectedAtType}`,
-      { entryNumber: opts.entryNumber, phase: 'in-trx' },
-    );
+
+  for (const r of rows) {
+    if (Number(r.at_type) !== opts.expectedAtType) {
+      throw new PostingVerificationError(
+        `atran.at_type mismatch for ${opts.entryNumber}: stored=${r.at_type} expected=${opts.expectedAtType}`,
+        { entryNumber: opts.entryNumber, phase: 'in-trx' },
+      );
+    }
+    const storedDate =
+      r.at_pstdate instanceof Date
+        ? r.at_pstdate.toISOString().slice(0, 10)
+        : typeof r.at_pstdate === 'string'
+          ? r.at_pstdate.slice(0, 10)
+          : null;
+    if (storedDate !== opts.expectedDate) {
+      throw new PostingVerificationError(
+        `atran.at_pstdate mismatch for ${opts.entryNumber}: stored=${storedDate} expected=${opts.expectedDate}`,
+        { entryNumber: opts.entryNumber, phase: 'in-trx' },
+      );
+    }
   }
-  const storedDate =
-    r.at_pstdate instanceof Date
-      ? r.at_pstdate.toISOString().slice(0, 10)
-      : typeof r.at_pstdate === 'string'
-        ? r.at_pstdate.slice(0, 10)
-        : null;
-  if (storedDate !== opts.expectedDate) {
-    throw new PostingVerificationError(
-      `atran.at_pstdate mismatch for ${opts.entryNumber}: stored=${storedDate} expected=${opts.expectedDate}`,
-      { entryNumber: opts.entryNumber, phase: 'in-trx' },
-    );
-  }
+
   if (
     opts.expectedReferPrefix &&
-    (r.at_refer ?? '').trim() !== opts.expectedReferPrefix.trim()
+    (rows[0]!.at_refer ?? '').trim() !== opts.expectedReferPrefix.trim()
   ) {
     throw new PostingVerificationError(
-      `atran.at_refer mismatch for ${opts.entryNumber}: stored="${r.at_refer}" expected="${opts.expectedReferPrefix}"`,
+      `atran.at_refer mismatch for ${opts.entryNumber}: stored="${rows[0]!.at_refer}" expected="${opts.expectedReferPrefix}"`,
       { entryNumber: opts.entryNumber, phase: 'in-trx' },
     );
   }
