@@ -90,6 +90,17 @@ async function readBalancesFromExtractionCache(appDb, filePath, logger) {
         const closing = typeof info.closing_balance === 'number' ? info.closing_balance : null;
         if (opening === null || closing === null)
             return null;
+        // Capture transaction-content signals for the content-based
+        // dedup pass: count of parsed lines and the latest post_date in
+        // the statement. Used to pick the truly latest restatement when
+        // two PDFs share a period (Monzo same-day refreshes).
+        const txns = Array.isArray(parsed.transactions) ? parsed.transactions : [];
+        let maxDate = '';
+        for (const t of txns) {
+            const d = (t.date ?? '').toString().slice(0, 10);
+            if (d && d > maxDate)
+                maxDate = d;
+        }
         return {
             opening_balance: opening,
             closing_balance: closing,
@@ -97,6 +108,8 @@ async function readBalancesFromExtractionCache(appDb, filePath, logger) {
             period_end: typeof info.period_end === 'string' ? info.period_end : null,
             sort_code: typeof info.sort_code === 'string' ? info.sort_code : null,
             account_number: typeof info.account_number === 'string' ? info.account_number : null,
+            transaction_count: txns.length,
+            max_transaction_date: maxDate || null,
         };
     }
     catch (err) {
@@ -617,6 +630,10 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                                 extracted.sort_code;
                             stmt.account_number =
                                 extracted.account_number;
+                            stmt.transaction_count =
+                                extracted.transaction_count;
+                            stmt.max_transaction_date =
+                                extracted.max_transaction_date;
                             stmt.extraction_status =
                                 'cached';
                         }
@@ -751,64 +768,40 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                 stage2.push(stmt);
                 continue;
             }
-            // Tiebreak between same-period-key PDFs.
-            // 1. Prefer the file without an `_N` counter suffix (the
-            //    original — when one is `attachment_1.pdf`, the other
-            //    `attachment.pdf`, the bare one wins).
-            // 2. When both have suffixes (typical for Monzo, which always
-            //    appends a generation id like `_8732`/`_8841`), prefer
-            //    the one with the LATER `received_at` — bank statements
-            //    issued later are restated/refreshed versions that
-            //    supersede earlier ones for the same period.
-            // 3. If received_at is missing/equal, prefer the LARGER
-            //    numeric suffix (Monzo's file IDs are monotonically
-            //    increasing per cycle).
-            // 4. Final tiebreaker: keep the first seen.
+            // Stage 2 only handles the trivial "bare-vs-suffixed" case
+            // here (attachment.pdf vs attachment_1.pdf — the bare one is
+            // the original, the suffixed is an inbox copy/forward).
+            //
+            // When BOTH have `_N` suffixes (Monzo's same-period
+            // restatements: _8732 vs _8841 — both are valid pulls of the
+            // same May 1-18 cycle, the later one is typically the
+            // refreshed version with more transactions), we keep BOTH
+            // through stage 2 and let the post-extraction content-based
+            // dedup decide. That pass compares parsed transaction count
+            // and max-txn-date — the truly latest restatement always wins
+            // on content, regardless of inbox order or file-ID heuristics.
             const existingHasSuffix = /_\d+\.pdf$/i.test(existing.filename);
             const stmtHasSuffix = /_\d+\.pdf$/i.test(stmt.filename);
-            const extractSuffix = (fn) => {
-                const m = fn.match(/_(\d+)\.pdf$/i);
-                return m ? Number(m[1]) : Number.NaN;
-            };
-            let stmtWins = false;
-            let replaceReason = '';
             if (existingHasSuffix && !stmtHasSuffix) {
-                // Rule 1 — bare name beats suffixed copy.
-                stmtWins = true;
-                replaceReason = 'bare-filename';
-            }
-            else if (existingHasSuffix && stmtHasSuffix) {
-                // Rule 2 — later received_at wins for same-period restatements.
-                const existingRx = existing.received_at
-                    ? Date.parse(String(existing.received_at))
-                    : Number.NaN;
-                const stmtRx = stmt.received_at
-                    ? Date.parse(String(stmt.received_at))
-                    : Number.NaN;
-                if (Number.isFinite(stmtRx) && Number.isFinite(existingRx) && stmtRx !== existingRx) {
-                    stmtWins = stmtRx > existingRx;
-                    replaceReason = stmtWins ? 'later-received_at' : '';
-                }
-                else {
-                    // Rule 3 — larger numeric suffix wins (Monzo monotonic IDs).
-                    const exN = extractSuffix(existing.filename);
-                    const stN = extractSuffix(stmt.filename);
-                    if (Number.isFinite(exN) && Number.isFinite(stN) && exN !== stN) {
-                        stmtWins = stN > exN;
-                        replaceReason = stmtWins ? 'higher-suffix' : '';
-                    }
-                }
-            }
-            if (stmtWins) {
+                // Bare name supersedes suffixed copy.
                 const idx = stage2.indexOf(existing);
                 if (idx >= 0)
                     stage2.splice(idx, 1);
                 byPeriod.set(periodKey, stmt);
                 stage2.push(stmt);
-                logger.info(`period-dedup[${bank.bank_code}]: kept ${stmt.filename} (${replaceReason}), dropped ${existing.filename}`);
+                logger.info(`period-dedup[${bank.bank_code}]: kept ${stmt.filename} (bare-filename), dropped ${existing.filename}`);
+            }
+            else if (!existingHasSuffix && stmtHasSuffix) {
+                // Existing is the bare original — keep it, drop the suffixed copy.
+                logger.info(`period-dedup[${bank.bank_code}]: dropped duplicate ${stmt.filename} (suffixed copy of ${existing.filename})`);
             }
             else {
-                logger.info(`period-dedup[${bank.bank_code}]: dropped duplicate ${stmt.filename} (period ${periodKey} already present as ${existing.filename})`);
+                // Both suffixed (or both bare) — DEFER the decision to the
+                // post-extraction content-based pass. Keep both candidates
+                // visible through stage 2; the later pass will pick by
+                // parsed transaction count.
+                stage2.push(stmt);
+                logger.info(`period-dedup[${bank.bank_code}]: keeping both ${existing.filename} and ${stmt.filename} for content-based dedup post-extraction`);
             }
         }
         // Stage 3: start-date supersession (e.g. partial Feb superseded
@@ -1193,6 +1186,25 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                             target.closing_balance = extracted.closing_balance;
                             target.period_start = extracted.period_start ?? null;
                             target.period_end = extracted.period_end ?? null;
+                            // Capture parsed-content signals for the post-extract
+                            // content-based dedup pass: count of transactions and
+                            // the latest post_date in the statement. The
+                            // same-period restatement with MORE transactions / a
+                            // later max-date is the truly latest pull regardless of
+                            // inbox order.
+                            const txns = Array.isArray(extracted.transactions)
+                                ? extracted.transactions
+                                : [];
+                            target.transaction_count =
+                                txns.length;
+                            let maxDate = '';
+                            for (const t of txns) {
+                                const d = (t.date ?? '').toString().slice(0, 10);
+                                if (d && d > maxDate)
+                                    maxDate = d;
+                            }
+                            target.max_transaction_date =
+                                maxDate || null;
                             target.extraction_status =
                                 'extracted';
                             target.extraction_error =
@@ -1263,6 +1275,73 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                 s.closing_balance != null) {
                 s.extraction_status = 'cached';
             }
+        }
+    }
+    // ---- Content-based dedup pass ----
+    // Stage 2 (filename-period-key) kept BOTH same-period duplicates
+    // through when their filename suffixes couldn't tiebreak them
+    // (typical Monzo case: _8732 and _8841 both legitimate file IDs
+    // for the same May 1-18 cycle). Now that eager-extract has
+    // parsed every PDF, we can pick the truly latest restatement by
+    // CONTENT — the one with the most transactions / latest
+    // transaction date wins, regardless of inbox arrival order or
+    // filename heuristics.
+    //
+    // Ranking order:
+    //   1. Higher transaction_count wins (more bank activity captured).
+    //   2. Tiebreak: later max_transaction_date.
+    //   3. Tiebreak: later received_at (proxy for "newest pull").
+    //   4. Final: keep first-seen.
+    //
+    // The dedup is intentionally a no-op when only one candidate
+    // exists per (period_start, period_end) — so traditional banks
+    // (where every statement has a unique period) bypass it entirely.
+    for (const bank of Object.values(banksWithStatements)) {
+        const byPeriodKey = new Map();
+        for (const s of bank.statements) {
+            if (!s.period_start || !s.period_end)
+                continue;
+            const key = `${s.period_start}|${s.period_end}`;
+            const group = byPeriodKey.get(key);
+            if (group)
+                group.push(s);
+            else
+                byPeriodKey.set(key, [s]);
+        }
+        const droppedFilenames = new Set();
+        for (const [key, group] of byPeriodKey) {
+            if (group.length < 2)
+                continue;
+            // Pick the winner by content.
+            const ranked = group.slice().sort((a, b) => {
+                const aCount = Number(a.transaction_count ?? 0);
+                const bCount = Number(b.transaction_count ?? 0);
+                if (aCount !== bCount)
+                    return bCount - aCount;
+                const aMax = String(a.max_transaction_date ?? '');
+                const bMax = String(b.max_transaction_date ?? '');
+                if (aMax !== bMax)
+                    return aMax < bMax ? 1 : -1;
+                const aRx = a.received_at ? Date.parse(String(a.received_at)) : 0;
+                const bRx = b.received_at ? Date.parse(String(b.received_at)) : 0;
+                if (aRx !== bRx)
+                    return bRx - aRx;
+                return 0;
+            });
+            const winner = ranked[0];
+            for (const loser of ranked.slice(1)) {
+                droppedFilenames.add(loser.filename);
+                logger.info(`content-dedup[${bank.bank_code}]: period ${key} — kept ${winner.filename} ` +
+                    `(txns=${winner.transaction_count ?? '?'}, ` +
+                    `max_date=${winner.max_transaction_date ?? '?'}), ` +
+                    `dropped ${loser.filename} ` +
+                    `(txns=${loser.transaction_count ?? '?'}, ` +
+                    `max_date=${loser.max_transaction_date ?? '?'})`);
+            }
+        }
+        if (droppedFilenames.size > 0) {
+            bank.statements = bank.statements.filter((s) => !droppedFilenames.has(s.filename));
+            bank.statement_count = bank.statements.length;
         }
     }
     // ---- Chain-complete check ----
