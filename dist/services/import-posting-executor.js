@@ -1916,4 +1916,18 @@ export const bankImportPostingExecutor = {
         };
     },
 };
+/**
+ * Internals reused by the recurring-entry posting flow
+ * (src/services/post-recurring-entry.ts). The recurring-entry post
+ * needs the same aentry/atran/ntran/anoml/stran/ptran/VAT insert
+ * scaffolding as a regular bank-import row, so we expose the
+ * single-line post helpers + the prepared-row shape rather than
+ * duplicating ~600 lines of careful SQL.
+ *
+ * NOT a stable public API — internal to bank-reconcile services only.
+ * Callers MUST run these inside a transaction (`trx`) they own and
+ * must NOT use them concurrently with the bank-import flow on the
+ * same trx.
+ */
+export { postOneTransaction as _postOneTransaction_internal, postNominalEntry as _postNominalEntry_internal, pence as _pence_internal, nowParts as _nowParts_internal, dateAsYmd as _dateAsYmd_internal, resolveCbtype as _resolveCbtype_internal, loadBankInfo as _loadBankInfo_internal, };
 //# sourceMappingURL=import-posting-executor.js.map

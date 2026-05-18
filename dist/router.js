@@ -36,6 +36,7 @@ import { persistImportDecisions } from './services/persist-decisions.js';
 import { confirmStatementMatches, } from './services/confirm-matches.js';
 import { updateRepeatEntryDate, listRepeatEntries, } from './services/repeat-entries.js';
 import { checkRecurringEntries } from './services/check-recurring-entries.js';
+import { postRecurringEntriesBatch, } from './services/post-recurring-entry.js';
 import { scanEmailsForBankStatements, } from './services/scan-emails.js';
 import { importBankStatementFromPdf, } from './services/import-from-pdf.js';
 import { checkBatch as checkDuplicateBatch, } from './services/duplicate-detection.js';
@@ -743,6 +744,65 @@ export function createRouter(ctx) {
         }
         catch (err) {
             ctx.logger.error('Check recurring entries failed', err);
+            res
+                .status(500)
+                .json({ success: false, error: friendlyDbError(err) });
+        }
+    });
+    /**
+     * POST /api/recurring-entries/post
+     *
+     * Post selected recurring entries to Opera SE. Mirrors the legacy
+     * `post_recurring_entries` (api/main.py:10569-10662).
+     *
+     *   { "bank_code": "BB005",
+     *     "entries": [
+     *       { "entry_ref": "REC0000002", "override_date": null }
+     *     ]
+     *   }
+     *
+     * Composite entry refs ("REC0000002:2026-05-15") target a specific
+     * outstanding cycle; the date portion becomes the override_date if
+     * no explicit one is supplied.
+     *
+     * Single-line entries are posted via the same aentry/atran/ntran/
+     * anoml machinery the bank-import flow uses. Multi-line recurring
+     * journals (rare — multiple analytical hits under one aentry
+     * header) are declined with a clear "post in Opera" error rather
+     * than silently miscoded.
+     */
+    router.post('/api/recurring-entries/post', async (req, res) => {
+        const operaDb = getOperaDb(req, res);
+        if (!operaDb)
+            return;
+        try {
+            const body = (req.body ?? {});
+            const bankCode = String(body.bank_code ?? body.bankCode ?? '').trim();
+            const rawEntries = Array.isArray(body.entries) ? body.entries : [];
+            const entries = rawEntries
+                .map((e) => {
+                const o = (e ?? {});
+                const ref = String(o.entry_ref ?? '').trim();
+                const overrideRaw = o.override_date;
+                const override = overrideRaw == null || overrideRaw === '' ? null : String(overrideRaw);
+                return { entry_ref: ref, override_date: override };
+            })
+                .filter((e) => e.entry_ref);
+            const result = await postRecurringEntriesBatch(operaDb, {
+                bankCode,
+                entries,
+                inputBy: typeof body.inputBy === 'string' && body.inputBy.trim()
+                    ? body.inputBy.trim()
+                    : undefined,
+            });
+            if (!result.success && result.error && result.results.length === 0) {
+                res.status(400).json(result);
+                return;
+            }
+            res.json(result);
+        }
+        catch (err) {
+            ctx.logger.error('Post recurring entries failed', err);
             res
                 .status(500)
                 .json({ success: false, error: friendlyDbError(err) });
