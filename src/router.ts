@@ -2331,12 +2331,71 @@ export function createRouter(ctx: AppContext): Router {
                 enriched.tracking_updated_import_id = resolvedId;
               }
             } else {
-              enriched.tracking_warning =
-                `Could not locate a bank_statement_imports row matching ` +
-                `bank_code=${bankCode} closing_balance=${closingBalance} — ` +
-                `Opera posted successfully but SAM's is_reconciled ` +
-                `flag is unflipped. The next 'Scan All Banks' will ` +
-                `auto-recover via the divergence banner.`;
+              // No matching audit row exists — create one. This
+              // happens when the prior Import step found every
+              // transaction already-in-Opera and consequently
+              // skipped writing the audit row (faithful-port guard
+              // at import-from-pdf.ts:691: "only persist when
+              // records_imported > 0 || deferred_count > 0").
+              // Without this self-creation, the operator hits a
+              // confusing "Scan All Banks to auto-recover" warning
+              // even though everything is fine — Opera has the
+              // postings, reconcile completed, the only gap is
+              // SAM's local bookkeeping. Create the row in the
+              // already-reconciled state so the workflow
+              // continues seamlessly.
+              const filename =
+                (body as { filename?: string }).filename ?? null;
+              const periodStart =
+                typeof body.period_start === 'string' ? body.period_start : null;
+              const periodEnd =
+                typeof body.period_end === 'string' ? body.period_end : null;
+              try {
+                const [insertedId] = (await appDb('bank_statement_imports')
+                  .insert({
+                    bank_code: bankCode,
+                    statement_date: statementDate,
+                    closing_balance: closingBalance,
+                    source: 'reconcile_synthesised',
+                    source_ref: filename,
+                    filename,
+                    period_start: periodStart,
+                    period_end: periodEnd,
+                    is_reconciled: isReconciled,
+                    reconciled_count: result.records_reconciled ?? 0,
+                    reconciled_at: appDb.fn.now(),
+                    reconciled_by: req.user?.userId ?? 'system',
+                    imported_at: appDb.fn.now(),
+                    imported_by: req.user?.userId ?? 'system',
+                    target_system: 'opera_se',
+                    transactions_imported: result.records_reconciled ?? 0,
+                  })
+                  .returning('id')) as unknown as Array<{ id: number } | number>;
+                const newId =
+                  typeof insertedId === 'number'
+                    ? insertedId
+                    : (insertedId as { id?: number })?.id;
+                if (newId) {
+                  enriched.tracking_updated_import_id = Number(newId);
+                  ctx.logger.info?.(
+                    `[reconcile-complete] created bank_statement_imports id=${newId} ` +
+                      `for bank=${bankCode} closing=${closingBalance} ` +
+                      `(prior import didn't write an audit row)`,
+                  );
+                }
+              } catch (createErr) {
+                const msg =
+                  createErr instanceof Error
+                    ? createErr.message
+                    : String(createErr);
+                ctx.logger.warn?.(
+                  `[reconcile-complete] could not self-create audit row: ${msg}`,
+                );
+                enriched.tracking_warning =
+                  `Reconciliation completed in Opera but SAM couldn't ` +
+                  `record the audit row (${msg}). Run Scan All Banks ` +
+                  `and click Recover to clean up the local tracking.`;
+              }
             }
           } catch (dbErr: unknown) {
             const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
