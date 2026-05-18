@@ -355,6 +355,27 @@ export async function importBankStatementFromPdf(
           `same cycle, unreconcile the cycle first via the Reconcile page.`,
       };
     }
+    // Shorter-pull guard: if the existing cycle row's period_end
+    // is LATER than the new pull's period_end, the operator is
+    // trying to import an older pull (out of order). Refuse —
+    // merging would either shrink period_end or skip new lines
+    // that aren't actually new.
+    if (
+      cycleRow &&
+      cycleRow.period_end &&
+      extracted.period_end &&
+      cycleRow.period_end > extracted.period_end
+    ) {
+      return {
+        success: false,
+        error:
+          `The ${bankCode} statement cycle starting ${extracted.period_start} ` +
+          `has already imported a later pull (through ${cycleRow.period_end}). ` +
+          `This pull only covers up to ${extracted.period_end}, so it has ` +
+          `nothing new to add. Re-import the latest pull (period_end >= ` +
+          `${cycleRow.period_end}) instead.`,
+      };
+    }
   }
 
   const lockKey = `bank-import:${bankCode}`;

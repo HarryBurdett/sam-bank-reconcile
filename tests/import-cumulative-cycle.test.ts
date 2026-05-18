@@ -290,6 +290,56 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     expect(row?.total_payments).toBe(100.00);
   });
 
+  it('refuses a shorter pull when a longer one is already imported', async () => {
+    const appDb = await makeAppDb();
+    // Existing cycle row: May 1-22 (longer pull already imported)
+    await appDb('bank_statement_imports').insert({
+      bank_code: 'BC010',
+      period_start: '2026-05-01',
+      period_end: '2026-05-22',
+      closing_balance: 75000,
+      is_reconciled: 0,
+    });
+
+    // Operator tries to import a SHORTER pull (May 1-15)
+    const extraction: PdfExtractionResult = {
+      bank_name: 'Monzo', account_number: '1', sort_code: '04-00-04',
+      statement_date: '2026-05-15',
+      period_start: '2026-05-01',
+      period_end: '2026-05-15',  // EARLIER than existing
+      opening_balance: 125912.72, closing_balance: 90000,
+      transactions: [],
+    };
+    const extractor: PdfExtractor = {
+      extractFromPdf: vi.fn().mockResolvedValue(extraction),
+    };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true, records_imported: 0, records_failed: 0,
+        skipped_count: 0, errors: [], warnings: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({
+        overlapError: null, resumeImportId: null,
+      }),
+    };
+    const result = await importBankStatementFromPdf(
+      makeOperaDb(), appDb,
+      { filePath: '/tmp/May 1-15.pdf', bankCode: 'BC010',
+        filename: 'May 1-15.pdf' },
+      extractor, executor, lock, overlap,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/already imported a later pull/i);
+    expect(executor.postBankImport).not.toHaveBeenCalled();
+  });
+
   it('UPDATEs the existing cycle row when an unreconciled cycle exists', async () => {
     const appDb = await makeAppDb();
     // Pre-existing UNreconciled cycle row from a prior pull (May 1-8).
