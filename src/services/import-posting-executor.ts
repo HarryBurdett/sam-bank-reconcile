@@ -69,7 +69,7 @@ import {
   type NacntType,
 } from '../_shared/index.js';
 
-type TxnAction =
+export type TxnAction =
   | 'sales_receipt'
   | 'purchase_payment'
   | 'sales_refund'

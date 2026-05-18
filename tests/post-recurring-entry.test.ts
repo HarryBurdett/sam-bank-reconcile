@@ -14,8 +14,8 @@
  *   - entry not found for this bank
  *   - exhausted templates (ae_posted >= ae_topost) are refused
  *   - unsupported ae_type (e.g. 7) is refused with a clear message
- *   - multi-line entries (line_count > 1) are declined with a "post
- *     in Opera" message (the recurring-journal escape hatch)
+ *   - multi-line entries (line_count > 1) are accepted and forwarded
+ *     to postOperaCashbookEntry (the unified core helper)
  *   - missing posting date is refused
  *   - composite-key parsing (`REC0000002:2026-05-15`) extracts the
  *     date and uses it as the override
@@ -197,7 +197,7 @@ describe('postRecurringEntry — validation + state checks', () => {
     expect(r.error).toMatch(/unsupported recurring entry type 7/i);
   });
 
-  it('declines multi-line entries with a clear "post in Opera" message', async () => {
+  it('accepts multi-line entries (forwards to core helper)', async () => {
     await seedHead(db, {
       ae_entry: 'REC0000020',
       ae_acnt: 'BB005',
@@ -223,9 +223,13 @@ describe('postRecurringEntry — validation + state checks', () => {
       bankCode: 'BB005',
       entryRef: 'REC0000020',
     });
+    // Multi-line is no longer declined; the helper now forwards to the
+    // core posting function. In this sqlite test harness it'll fail at
+    // some downstream insert (no full Opera schema), but the error
+    // must NOT be the "multi-line" decline.
     expect(r.success).toBe(false);
-    expect(r.error).toMatch(/multi-line/i);
-    expect(r.error).toMatch(/from Opera/i);
+    expect(r.error).not.toMatch(/multi-line/i);
+    expect(r.error).not.toMatch(/post in opera/i);
   });
 
   it('refuses when there is no posting date (no nxtpost, no override, no composite-key date)', async () => {

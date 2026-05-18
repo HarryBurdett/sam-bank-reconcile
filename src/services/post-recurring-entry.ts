@@ -16,17 +16,11 @@
  *   2. Validates state (active, supported ae_type, not exhausted).
  *   3. Determines the posting date (override or ae_nxtpost).
  *   4. Runs period validation (closed period blocks the post).
- *   5. For single-line: builds a PreparedTransaction in the same
- *      shape the bank-import executor uses, then calls the internal
- *      post* helpers exported from import-posting-executor.ts. After
+ *   5. Builds a PreparedEntryHeader + PreparedEntryLine[] array (one
+ *      per arline row) and calls postOperaCashbookEntry — the unified
+ *      1..N-lines core helper shared with the bank-import flow. After
  *      a successful post, bumps arhead.ae_posted++ and advances
  *      ae_nxtpost — atomic with the post via the same transaction.
- *   6. For multi-line: returns a clear error directing the operator
- *      to Opera. Multi-line recurring journals (multiple
- *      analytical hits under one aentry header) need dedicated
- *      multi-atran-per-aentry logic that doesn't exist in our
- *      single-line post* helpers yet. Surfaced as an honest decline
- *      rather than silent miscoding.
  *
  * Operator-facing flow: BankStatementHub's "Post recurring entries
  * now" button calls POST /api/recurring-entries/post with a list of
@@ -46,10 +40,10 @@ import {
   type PostingLedgerType,
 } from './period-posting-decision.js';
 import {
-  _postOneTransaction_internal as postOneTransaction,
-  _postNominalEntry_internal as postNominalEntry,
-  _dateAsYmd_internal as dateAsYmd,
-  type _PreparedTransaction_internal as PreparedTransaction,
+  postOperaCashbookEntry,
+  type PreparedEntryHeader,
+  type PreparedEntryLine,
+  type TxnAction,
 } from './import-posting-executor.js';
 
 export interface PostRecurringEntryInput {
@@ -162,7 +156,7 @@ function advanceByFrequency(from: Date, freq: string, every: number): Date {
   return addMonthsUtc(from, step);
 }
 
-const AE_TYPE_TO_ACTION: Record<number, PreparedTransaction['action']> = {
+const AE_TYPE_TO_ACTION: Record<number, Exclude<TxnAction, 'bank_transfer' | 'skip' | 'defer'>> = {
   1: 'nominal_payment',
   2: 'nominal_receipt',
   3: 'sales_refund',
@@ -305,22 +299,6 @@ export async function postRecurringEntry(
   }
 
   // ------------------------------------------------------------------
-  // Multi-line fallback
-  // ------------------------------------------------------------------
-  if (lineRows.length > 1) {
-    return {
-      success: false,
-      entry_ref: input.entryRef,
-      error:
-        `Recurring entry ${entryRef} has ${lineRows.length} lines. ` +
-        `Multi-line recurring entries must be posted from ` +
-        `Opera Cashbook → Repeat Entries → Post.`,
-    };
-  }
-
-  const line = lineRows[0]!;
-
-  // ------------------------------------------------------------------
   // Determine posting date
   // ------------------------------------------------------------------
   const postDate =
@@ -381,86 +359,60 @@ export async function postRecurringEntry(
   }
 
   // ------------------------------------------------------------------
-  // Build PreparedTransaction. Sign convention matches the bank-import
-  // flow: receipts +ve, payments -ve.
-  // ------------------------------------------------------------------
-  const isReceipt = aeType === 2 || aeType === 4 || aeType === 6;
-  const grossPence = Math.abs(Number(line.at_value ?? 0));
-  const grossPounds = grossPence / 100;
-  const signedAmount = isReceipt ? grossPounds : -grossPounds;
+  // No multi-line decline — postOperaCashbookEntry handles 1..N lines.
 
-  const reference = ((line.at_entref ?? '') as string).trim() || aeDesc;
-  const memo = ((line.at_comment ?? '') as string).trim() || aeDesc;
-  const cbtype = ((line.at_cbtype ?? '') as string).trim() ||
-    (aeType === 2 ? 'NR' : 'NP');
-  const vatCodeRaw = ((line.at_vatcde ?? '') as string).trim();
-  const vatVal = Number(line.at_vatval ?? 0);
-  const hasVat =
-    vatCodeRaw.length > 0 &&
-    !['0', 'N', 'Z', 'E'].includes(vatCodeRaw.toUpperCase()) &&
-    Math.abs(vatVal) > 0;
-
-  const prepared: PreparedTransaction = {
-    index: 1,
-    date: dateAsYmd(postDate),
-    amount: signedAmount,
+  // Build header + lines for the core helper.
+  const header: PreparedEntryHeader = {
+    date: postDate,
+    action: action as Exclude<TxnAction, 'bank_transfer'>,
+    cbtype: null, // core helper resolves from line[0].at_cbtype or defaults
+    reference: entryRef,
+    comment: aeDesc,
+    inputBy,
+    memo: aeDesc,
     name: aeDesc,
-    memo,
-    action,
-    matchedAccount: ((line.at_account ?? '') as string).trim() || null,
-    cbtype,
-    reference: reference.slice(0, 20),
-    vatCode: hasVat ? vatCodeRaw : null,
-    netAmount: null, // executor recomputes from rate
   };
-
-  if (!prepared.matchedAccount) {
+  const lines: PreparedEntryLine[] = lineRows.map((ln) => ({
+    atAccount: (ln.at_account ?? '').toString().trim(),
+    absPence: Math.abs(Number(ln.at_value ?? 0)),
+    vatCode: ((ln.at_vatcde ?? '') as string).trim() || null,
+    vatPence: Math.abs(Number(ln.at_vatval ?? 0)),
+    reference:
+      ((ln.at_entref ?? '') as string).trim() ||
+      entryRef,
+    comment: ((ln.at_comment ?? '') as string).trim() || aeDesc,
+    project: ((ln.at_project ?? '') as string).trim(),
+    department: ((ln.at_job ?? '') as string).trim(),
+    netOverride: null,
+  }));
+  if (lines.some((l) => !l.atAccount)) {
     return {
       success: false,
       entry_ref: input.entryRef,
-      error: `Recurring entry ${entryRef} line has no at_account`,
+      error: `Recurring entry ${entryRef} has a line with empty at_account`,
     };
   }
 
-  // ------------------------------------------------------------------
-  // Atomic post: aentry + atran + ntran/anoml + stran/ptran (if any) +
-  // VAT (if any) + arhead advancement. Deadlock-retry mirrors the
-  // bank-import flow's policy.
-  // ------------------------------------------------------------------
+  // Atomic post: aentry + per-line inserts + arhead advancement.
   let entryNumber: string | null = null;
   try {
     await executeWithDeadlockRetry(operaDb, async (trx) => {
-      let result: { entry_number: string; transaction_ref?: string };
-      if (action === 'nominal_payment' || action === 'nominal_receipt') {
-        result = await postNominalEntry({
-          trx,
-          bankCode,
-          txn: prepared,
-          defaults,
-          decision,
-        });
-      } else {
-        result = await postOneTransaction({
-          trx,
-          bankCode,
-          txn: prepared,
-          defaults,
-          decision,
-        });
-      }
+      const result = await postOperaCashbookEntry({
+        trx,
+        bankCode,
+        header,
+        lines,
+        defaults,
+        decision,
+      });
       entryNumber = result.entry_number;
 
-      // Advance the schedule. Mirrors legacy
-      // `_advance_recurring_entry_in_txn`:
-      //   1. ae_posted += 1
-      //   2. ae_lstpost = post_date
-      //   3. ae_nxtpost = first cycle AFTER post_date (skips intervening
-      //      occurrences if the operator posted late)
+      // Advance arhead schedule (unchanged from previous single-line
+      // path) — bumps ae_posted, advances ae_nxtpost past intervening
+      // cycles, stamps audit columns.
       const currentNxtYmd = aeNxtpostYmd ?? postDate;
       let nextDate = ymdToUtcDate(currentNxtYmd);
       const postDateUtc = ymdToUtcDate(postDate);
-      // Cap the loop — a misconfigured very-old start could otherwise
-      // iterate forever. 480 covers 40 years of monthly cycles.
       for (let i = 0; i < 480 && nextDate.getTime() <= postDateUtc.getTime(); i++) {
         nextDate = advanceByFrequency(nextDate, aeFreq, aeEvery);
       }
@@ -501,7 +453,6 @@ export async function postRecurringEntry(
     entry_number: entryNumber,
     message: `Posted recurring ${typeName}: ${entryRef} → entry ${entryNumber}`,
     warnings: [
-      `Amount: £${grossPounds.toFixed(2)}`,
       `Posted on ${postDate}; next cycle bumped in arhead`,
     ],
   };
