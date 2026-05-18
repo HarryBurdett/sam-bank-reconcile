@@ -2122,6 +2122,78 @@ async function postBankTransfer(args: PostOneArgs): Promise<{
 }
 
 // ---------------------------------------------------------------------
+// postOperaCashbookEntry — unified 1..N-lines core helper.
+//
+// This is the new entry posting primitive. It will eventually do the
+// full aentry + per-line atran / stran-ptran / ntran / anoml / VAT
+// inserts and run entry-level verification — that's task 4. In this
+// transitional commit it does only the simple cases:
+//   - lines.length === 1 → translate back to PreparedTransaction and
+//     delegate to the existing postOneTransaction / postNominalEntry,
+//     proving the new entry shape can express what those need.
+//   - lines.length > 1 → throw a clear "not yet implemented" error so
+//     no caller silently ships through this code path before task 4.
+//
+// postOneTransaction and postNominalEntry remain the source of truth
+// for the SQL inserts until tasks 5-6 invert the dependency direction.
+// ---------------------------------------------------------------------
+
+export async function postOperaCashbookEntry(
+  args: PostEntryArgs,
+): Promise<PostEntryResult> {
+  const { trx, bankCode, header, lines, defaults, decision } = args;
+  if (!Array.isArray(lines) || lines.length === 0) {
+    throw new Error(
+      `postOperaCashbookEntry: lines array must have ≥1 entry (got ${lines?.length ?? 0})`,
+    );
+  }
+  for (const ln of lines) {
+    if (!ln.atAccount || !ln.atAccount.trim()) {
+      throw new Error(
+        `postOperaCashbookEntry: every line needs atAccount (line ${lines.indexOf(ln) + 1} has '${ln.atAccount}')`,
+      );
+    }
+  }
+
+  // Transitional: multi-line is the focus of task 4. Throw clearly
+  // rather than letting a half-built path corrupt Opera.
+  if (lines.length > 1) {
+    throw new Error(
+      'postOperaCashbookEntry: multi-line support not yet implemented — pending task 4',
+    );
+  }
+
+  // Single-line path: translate the unified shape back to
+  // PreparedTransaction and delegate to the existing post* functions.
+  // Tasks 5-6 will invert this direction.
+  const ln = lines[0]!;
+  const absAmount = ln.absPence / 100;
+  const isReceipt =
+    header.action === 'sales_receipt' ||
+    header.action === 'purchase_refund' ||
+    header.action === 'nominal_receipt';
+  const signedAmount = isReceipt ? absAmount : -absAmount;
+  const prepared: PreparedTransaction = {
+    index: 1,
+    date: header.date,
+    amount: signedAmount,
+    name: header.name,
+    memo: header.memo || ln.comment || header.comment,
+    action: header.action,
+    matchedAccount: ln.atAccount,
+    cbtype: header.cbtype,
+    reference: ln.reference || header.reference,
+    vatCode: ln.vatCode,
+    netAmount: ln.netOverride,
+  };
+
+  if (header.action === 'nominal_payment' || header.action === 'nominal_receipt') {
+    return postNominalEntry({ trx, bankCode, txn: prepared, defaults, decision });
+  }
+  return postOneTransaction({ trx, bankCode, txn: prepared, defaults, decision });
+}
+
+// ---------------------------------------------------------------------
 // Public executor
 // ---------------------------------------------------------------------
 
