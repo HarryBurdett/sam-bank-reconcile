@@ -3331,15 +3331,37 @@ export function createRouter(ctx: AppContext): Router {
     const { scanAllBanksFaithful } = await import(
       './services/scan-all-banks.js'
     );
-    res.json(
-      await scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
-        daysBack,
-        validateBalances,
-        extractOnMiss,
-        extractor,
-        emailAttachments,
-      }),
+    const { withScanLock, ScanInProgressError } = await import(
+      './_shared/scan-lock.js'
     );
+    // Per-company lock — second concurrent scan for the same
+    // tenant is refused with 409 rather than queued. Stops the
+    // FE from racing itself when the operator clicks Re-scan
+    // before the previous spinner finishes.
+    const lockKey = ctx.tenantId ?? 'unknown-tenant';
+    try {
+      const result = await withScanLock(lockKey, () =>
+        scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
+          daysBack,
+          validateBalances,
+          extractOnMiss,
+          extractor,
+          emailAttachments,
+        }),
+      );
+      res.json(result);
+    } catch (err: unknown) {
+      if (err instanceof ScanInProgressError) {
+        res.status(409).json({
+          success: false,
+          error: err.message,
+          error_kind: 'scan_in_progress',
+          elapsed_ms: err.elapsedMs,
+        });
+        return;
+      }
+      throw err;
+    }
   });
 
   /**
