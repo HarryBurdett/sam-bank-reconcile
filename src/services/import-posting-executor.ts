@@ -107,6 +107,99 @@ interface PreparedTransaction {
   netAmount: number | null;
 }
 
+// ---------------------------------------------------------------------
+// Unified prepared-entry shape — used by postOperaCashbookEntry
+// (the core posting helper that handles 1..N lines uniformly).
+//
+// Mirrors Opera SE's actual transaction model: one aentry header
+// (PreparedEntryHeader) plus 1..N atran detail lines
+// (PreparedEntryLine[]). The bank-import flow passes a single-line
+// array via the postOneTransaction / postNominalEntry thin
+// wrappers; the recurring-entry orchestrator passes 1..N lines
+// directly.
+// ---------------------------------------------------------------------
+
+export interface PreparedEntryHeader {
+  /** YYYY-MM-DD posting date — shared across all lines. */
+  date: string;
+  /**
+   * All lines share one ae_type → one action.
+   * `bank_transfer` is intentionally excluded — paired source+dest
+   * doesn't fit the 1..N-lines model; use postBankTransfer for that.
+   */
+  action: Exclude<TxnAction, 'bank_transfer'>;
+  /** Cashbook type override (e.g. 'NR', 'NP'). Null → resolveCbtype defaults. */
+  cbtype: string | null;
+  /** Header-level reference (ae_entref). Used at aentry + as line default. */
+  reference: string | null;
+  /**
+   * Header-level description (ae_comment). For bank-import: row name+memo.
+   * For recurring: arhead.ae_desc.
+   */
+  comment: string;
+  /** Audit user. 'BANK_IMP' for bank-import; 'RECUR' for recurring. ≤8 chars. */
+  inputBy: string;
+  /**
+   * Header-level memo (txn.memo for bank-import; ae_desc for recurring).
+   * Used in atran/anoml/ntran comment columns when the line carries no
+   * comment of its own. Falls through to per-line comment for actual
+   * INSERT values.
+   */
+  memo: string;
+  /** Header-level payee/party name when known (txn.name for bank-import). */
+  name: string;
+}
+
+export interface PreparedEntryLine {
+  /** Per-line at_account: nominal / customer / supplier code. Required. */
+  atAccount: string;
+  /**
+   * Per-line absolute amount in pence (always positive). Direction
+   * comes from the header action — receipt actions become positive
+   * signed pence in atran/aentry; payment actions become negative.
+   */
+  absPence: number;
+  /** Per-line VAT code (empty / 0 / N / Z / E → no VAT). */
+  vatCode: string | null;
+  /** Per-line VAT pence (absolute). Zero when no VAT. */
+  vatPence: number;
+  /** Per-line reference; falls back to header.reference. ≤20 chars. */
+  reference: string;
+  /** Per-line at_comment / nt_cmnt; falls back to header.comment. */
+  comment: string;
+  /** Per-line project (8 chars). */
+  project: string;
+  /** Per-line department / job (8 chars). */
+  department: string;
+  /**
+   * Operator-provided net override for VAT-bearing lines (rare). Null →
+   * net is computed from gross + VAT rate (per legacy
+   * opera_sql_import.py:3756).
+   */
+  netOverride: number | null;
+}
+
+export interface PostEntryArgs {
+  trx: Knex;
+  bankCode: string;
+  header: PreparedEntryHeader;
+  /** Length ≥ 1. */
+  lines: PreparedEntryLine[];
+  defaults: { sl_control: string; pl_control: string };
+  decision: PeriodPostingDecision;
+}
+
+export interface PostEntryResult {
+  entry_number: string;
+  /**
+   * Same fingerprint shape the bank-import flow returns from
+   * postOneTransaction / postNominalEntry — used by the bank-import
+   * executor to stamp `posted_lines[].fingerprint`. For recurring-entry
+   * callers, it's informational.
+   */
+  fingerprint: string;
+}
+
 const AT_TYPE_FOR_ACTION: Record<string, number> = {
   sales_receipt: 4,
   purchase_payment: 5,
