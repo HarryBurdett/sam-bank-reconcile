@@ -173,6 +173,7 @@ import {
   listCsvFiles,
   listPdfFiles,
   getPdfContent,
+  rawFilePreview,
   scanFolder,
   fetchEmailsToFolder,
   scanAllBanks,
@@ -3771,15 +3772,28 @@ export function createRouter(ctx: AppContext): Router {
   // Raw / multiformat preview endpoints (LLM/parser-bound)
   // ---------------------------------------------------------------
 
+  /**
+   * GET /api/bank-import/raw-preview?file_path=…&lines=50
+   *   (the FE also calls this with `?filepath=…`; we accept both)
+   *
+   * "View File" button for file-source imports (CSV / OFX / QIF /
+   * PDFs dropped into a watched folder). Returns:
+   *   - `{ success, is_pdf: true, pdf_data: <base64>, filename, size }`
+   *     when the path ends in .pdf — FE opens it in a new tab
+   *   - `{ success, lines: string[] }` for plain-text files — FE
+   *     renders the "Raw File Contents (first 50 lines)" modal
+   *
+   * The old implementation routed every file through
+   * `rawPreviewFromPdf` (an LLM-bound text-extraction endpoint),
+   * which returned `{ success: false, error: 'ctx.llm not
+   * configured' }` whenever the host hadn't wired an LLM — i.e.
+   * always on the standalone host. Replaced with a direct read.
+   */
   router.get('/api/bank-import/raw-preview', async (req, res) => {
-    const llm = (ctx.llm as LlmService | undefined) ?? null;
-    res.json(
-      await rawPreviewFromPdf(
-        llm,
-        null,
-        String(req.query.file_path ?? '') || null,
-      ),
-    );
+    const reader = getPdfReader();
+    const filePath = String(req.query.file_path ?? req.query.filepath ?? '');
+    const lines = Number(req.query.lines ?? 50);
+    res.json(await rawFilePreview(reader, filePath, Number.isFinite(lines) ? lines : 50));
   });
 
   /**

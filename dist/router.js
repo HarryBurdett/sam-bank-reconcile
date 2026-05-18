@@ -53,7 +53,7 @@ import { getBankReconciliationStatus, getUnreconciledEntriesForBank, getStatemen
 import { recordDeferredTransaction, listDeferredItems, deleteDeferredItems, deleteIgnoredTransactionByRecordId, } from './services/deferred-items.js';
 import { listCashbookBankAccounts, createCashbookEntry, createBankTransfer, autoMatchStatementLines, } from './services/cashbook-create.js';
 import { archiveStatement, listArchivedStatements, restoreStatement, getArchivedStatementPdf, deleteArchivedStatement, manageStatements, } from './services/statement-archive.js';
-import { listCsvFiles, listPdfFiles, getPdfContent, scanFolder, fetchEmailsToFolder, rawPreviewFromPdf, previewMultiformat, validateCsv, getStatementReview, } from './services/misc-endpoints.js';
+import { listCsvFiles, listPdfFiles, getPdfContent, rawFilePreview, scanFolder, fetchEmailsToFolder, previewMultiformat, validateCsv, getStatementReview, } from './services/misc-endpoints.js';
 import { importBankStatementFromEmail, } from './services/bank-import-from-email.js';
 import { defaultMultiformatParser } from './services/default-multiformat-parser.js';
 import { createDefaultBankPdfExtractor } from './services/default-bank-pdf-extractor.js';
@@ -3210,9 +3210,28 @@ export function createRouter(ctx) {
     // ---------------------------------------------------------------
     // Raw / multiformat preview endpoints (LLM/parser-bound)
     // ---------------------------------------------------------------
+    /**
+     * GET /api/bank-import/raw-preview?file_path=…&lines=50
+     *   (the FE also calls this with `?filepath=…`; we accept both)
+     *
+     * "View File" button for file-source imports (CSV / OFX / QIF /
+     * PDFs dropped into a watched folder). Returns:
+     *   - `{ success, is_pdf: true, pdf_data: <base64>, filename, size }`
+     *     when the path ends in .pdf — FE opens it in a new tab
+     *   - `{ success, lines: string[] }` for plain-text files — FE
+     *     renders the "Raw File Contents (first 50 lines)" modal
+     *
+     * The old implementation routed every file through
+     * `rawPreviewFromPdf` (an LLM-bound text-extraction endpoint),
+     * which returned `{ success: false, error: 'ctx.llm not
+     * configured' }` whenever the host hadn't wired an LLM — i.e.
+     * always on the standalone host. Replaced with a direct read.
+     */
     router.get('/api/bank-import/raw-preview', async (req, res) => {
-        const llm = ctx.llm ?? null;
-        res.json(await rawPreviewFromPdf(llm, null, String(req.query.file_path ?? '') || null));
+        const reader = getPdfReader();
+        const filePath = String(req.query.file_path ?? req.query.filepath ?? '');
+        const lines = Number(req.query.lines ?? 50);
+        res.json(await rawFilePreview(reader, filePath, Number.isFinite(lines) ? lines : 50));
     });
     /**
      * GET /api/bank-import/raw-preview-email?email_id=N&attachment_id=…

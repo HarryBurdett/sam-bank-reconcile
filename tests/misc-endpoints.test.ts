@@ -1,8 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   listCsvFiles,
   listPdfFiles,
   getPdfContent,
+  rawFilePreview,
   scanFolder,
   fetchEmailsToFolder,
   scanAllBanks,
@@ -149,6 +153,70 @@ describe('fetchEmailsToFolder', () => {
       { emailId: 2, attachmentId: 'b' },
     ]);
     expect(r.downloaded).toBe(2);
+  });
+});
+
+describe('rawFilePreview', () => {
+  it('rejects when file_path is empty', async () => {
+    const r = await rawFilePreview(null, '', 50);
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error).toMatch(/file_path/i);
+  });
+
+  it('returns base64 pdf_data for .pdf paths via the PdfContentReader', async () => {
+    const reader: PdfContentReader = {
+      readBytes: async () => new Uint8Array([1, 2, 3]),
+    };
+    const r = await rawFilePreview(reader, '/x/Monzo_Statement.pdf', 50);
+    expect(r.success).toBe(true);
+    if (r.success && 'is_pdf' in r) {
+      expect(r.is_pdf).toBe(true);
+      expect(r.pdf_data).toBe('AQID');
+      expect(r.filename).toBe('Monzo_Statement.pdf');
+      expect(r.size).toBe(3);
+    }
+  });
+
+  it('reads first N lines of a text file from disk (csv/ofx/qif)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rawprev-'));
+    const path = join(dir, 'sample.csv');
+    writeFileSync(
+      path,
+      'date,amount,desc\n2026-05-01,100.00,first\n2026-05-02,-50.00,second\n2026-05-03,25.00,third\n',
+      'utf8',
+    );
+    try {
+      const r = await rawFilePreview(null, path, 50);
+      expect(r.success).toBe(true);
+      if (r.success && 'lines' in r) {
+        expect(r.lines[0]).toBe('date,amount,desc');
+        expect(r.lines[1]).toBe('2026-05-01,100.00,first');
+        expect(r.lines.length).toBeGreaterThanOrEqual(4);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('caps the lines parameter at 500 (defensive)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rawprev-'));
+    const path = join(dir, 'big.csv');
+    writeFileSync(path, Array.from({ length: 1000 }, (_, i) => `line${i}`).join('\n'), 'utf8');
+    try {
+      const r = await rawFilePreview(null, path, 100000);
+      expect(r.success).toBe(true);
+      if (r.success && 'lines' in r) {
+        expect(r.lines.length).toBeLessThanOrEqual(500);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns success: false with a friendly error when the file is missing', async () => {
+    const r = await rawFilePreview(null, '/no/such/file.csv', 50);
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error).toBeDefined();
   });
 });
 

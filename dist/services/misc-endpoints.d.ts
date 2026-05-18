@@ -49,6 +49,43 @@ export interface PdfContentReader {
         path: string;
     }): Promise<Uint8Array | null>;
 }
+/**
+ * Read the first `lines` rows of a file as text, OR if the file is a
+ * PDF, return its base64 bytes for inline preview.
+ *
+ * Drives `GET /api/bank-import/raw-preview` — the "View File" button
+ * on the Bank Statement Processing page for file-source imports
+ * (CSV / OFX / QIF dropped into a watched folder). The legacy
+ * implementation routed everything through `rawPreviewFromPdf`
+ * (LLM-bound text extraction), which 503'd when the standalone host
+ * doesn't have `ctx.llm`. Replaced with a direct text-or-pdf-bytes
+ * read so the button works without an LLM.
+ *
+ * Returns one of:
+ *   - `{ success: true, is_pdf: true, pdf_data, filename, size }`
+ *     when the file is a PDF (FE opens in a new tab)
+ *   - `{ success: true, lines: string[] }` for plain-text files (FE
+ *     renders in the "Raw File Contents" modal)
+ *
+ * Uses Node's `fs.promises` directly because the file paths handed
+ * in are always local to the host (folder-backed storage adapter on
+ * the standalone host; SAM-proper file abstraction would need its
+ * own adapter, which we'd plumb through `ctx` like the
+ * `PdfContentReader`).
+ */
+export declare function rawFilePreview(reader: PdfContentReader | null, filePath: string, lines: number): Promise<{
+    success: true;
+    is_pdf: true;
+    pdf_data: string;
+    filename: string;
+    size: number;
+} | {
+    success: true;
+    lines: string[];
+} | {
+    success: false;
+    error: string;
+}>;
 export declare function getPdfContent(reader: PdfContentReader | null, filePath: string): Promise<{
     success: boolean;
     /**

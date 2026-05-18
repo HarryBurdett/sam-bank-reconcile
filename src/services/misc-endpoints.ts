@@ -90,6 +90,73 @@ export interface PdfContentReader {
   readBytes(opts: { path: string }): Promise<Uint8Array | null>;
 }
 
+/**
+ * Read the first `lines` rows of a file as text, OR if the file is a
+ * PDF, return its base64 bytes for inline preview.
+ *
+ * Drives `GET /api/bank-import/raw-preview` — the "View File" button
+ * on the Bank Statement Processing page for file-source imports
+ * (CSV / OFX / QIF dropped into a watched folder). The legacy
+ * implementation routed everything through `rawPreviewFromPdf`
+ * (LLM-bound text extraction), which 503'd when the standalone host
+ * doesn't have `ctx.llm`. Replaced with a direct text-or-pdf-bytes
+ * read so the button works without an LLM.
+ *
+ * Returns one of:
+ *   - `{ success: true, is_pdf: true, pdf_data, filename, size }`
+ *     when the file is a PDF (FE opens in a new tab)
+ *   - `{ success: true, lines: string[] }` for plain-text files (FE
+ *     renders in the "Raw File Contents" modal)
+ *
+ * Uses Node's `fs.promises` directly because the file paths handed
+ * in are always local to the host (folder-backed storage adapter on
+ * the standalone host; SAM-proper file abstraction would need its
+ * own adapter, which we'd plumb through `ctx` like the
+ * `PdfContentReader`).
+ */
+export async function rawFilePreview(
+  reader: PdfContentReader | null,
+  filePath: string,
+  lines: number,
+): Promise<
+  | { success: true; is_pdf: true; pdf_data: string; filename: string; size: number }
+  | { success: true; lines: string[] }
+  | { success: false; error: string }
+> {
+  if (!filePath || !filePath.trim()) {
+    return { success: false, error: 'file_path is required' };
+  }
+  const lower = filePath.toLowerCase();
+  // PDF branch — same shape as getPdfContent so the FE handler can
+  // route either response into openPdfInNewTab uniformly.
+  if (lower.endsWith('.pdf')) {
+    const result = await getPdfContent(reader, filePath);
+    if (!result.success || !result.pdf_data) {
+      return { success: false, error: result.error ?? 'PDF read failed' };
+    }
+    return {
+      success: true,
+      is_pdf: true,
+      pdf_data: result.pdf_data,
+      filename: result.filename ?? 'document.pdf',
+      size: result.size ?? 0,
+    };
+  }
+  // Text branch — first N lines of the file, decoded as utf-8.
+  try {
+    const { promises: fs } = await import('node:fs');
+    const content = await fs.readFile(filePath, 'utf8');
+    const allLines = content.split(/\r?\n/);
+    const cap = Math.max(1, Math.min(lines, 500));
+    return { success: true, lines: allLines.slice(0, cap) };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message ?? String(err),
+    };
+  }
+}
+
 export async function getPdfContent(
   reader: PdfContentReader | null,
   filePath: string,
