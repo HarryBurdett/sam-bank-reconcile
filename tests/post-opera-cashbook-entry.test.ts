@@ -76,6 +76,11 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS nacnt (
     na_acnt TEXT, na_type TEXT, na_subt TEXT, na_desc TEXT
   )`,
+  // ztax — read by getVatRateForCode
+  `CREATE TABLE IF NOT EXISTS ztax (
+    tx_code TEXT, tx_trantyp TEXT, tx_ctrytyp TEXT,
+    tx_rate1 REAL, tx_rate2 REAL, tx_rate2dy TEXT, tx_nominal TEXT
+  )`,
 ];
 
 // ---------------------------------------------------------------------------
@@ -399,6 +404,28 @@ function makeDecision(postToNominal = false) {
   };
 }
 
+/**
+ * Seed a VAT rate row into ztax so getVatRateForCode returns the expected rate.
+ * tx_ctrytyp must be 'H' (home country) to match the WHERE clause.
+ */
+async function seedVatRate(
+  db: Knex,
+  code: string,
+  trantyp: string,
+  rate: number,
+  nominal: string,
+): Promise<void> {
+  await db('ztax').insert({
+    tx_code: code,
+    tx_trantyp: trantyp,
+    tx_ctrytyp: 'H',
+    tx_rate1: rate,
+    tx_rate2: null,
+    tx_rate2dy: null,
+    tx_nominal: nominal,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -594,6 +621,82 @@ describe('postOperaCashbookEntry multi-line shape', () => {
       decision: makeDecision(false),
     };
     await expect(postOperaCashbookEntry(args)).rejects.toThrow('lines array must have');
+  });
+
+  it('writes one aentry + 3 atran for a 2-line nominal entry where line 1 has VAT', async () => {
+    // line 1: £100 gross (£83.33 net + £16.67 VAT at 20%) — 2 atran rows
+    // line 2: £250, no VAT — 1 atran row
+    // total atran: 3 rows; ae_value = -35000 (payment)
+    await seedVatRate(db, '1', 'P', 20, 'V100');
+    // Seed VAT nominal account so loadNominalName doesn't fail
+    await db('nacnt').insert({ na_acnt: 'V100', na_type: 'P ', na_subt: 'PV', na_desc: 'VAT' });
+
+    const header: PreparedEntryHeader = {
+      date: '2026-05-15',
+      action: 'nominal_payment',
+      cbtype: 'NP',
+      reference: 'REC0000099',
+      comment: 'VAT mixed test',
+      inputBy: 'RECUR',
+      memo: 'VAT mixed test',
+      name: 'VAT mixed test',
+    };
+    const lines: PreparedEntryLine[] = [
+      {
+        atAccount: 'N100',
+        absPence: 10000, // £100 gross; VAT = round(100*20/120*100)/100 = £16.67 → 1667 pence
+        vatCode: '1',
+        vatPence: 1667,
+        reference: 'REF1',
+        comment: 'Postage',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'N200',
+        absPence: 25000, // £250, no VAT
+        vatCode: null,
+        vatPence: 0,
+        reference: 'REF2',
+        comment: 'Stationery',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+    ];
+
+    const args: PostEntryArgs = {
+      trx,
+      bankCode: 'BB005',
+      header,
+      lines,
+      defaults: { sl_control: 'B0010', pl_control: 'B0020' },
+      decision: makeDecision(false),
+    };
+
+    const result = await postOperaCashbookEntry(args);
+    expect(result.entry_number).toBeTruthy();
+
+    // aentry: one row, ae_value = -35000
+    const aentry = await db('aentry')
+      .where({ ae_entry: result.entry_number, ae_acnt: 'BB005' })
+      .first();
+    expect(aentry?.ae_value).toBe(-35000);
+
+    // atran: 3 rows (line 1 net + VAT split = 2; line 2 = 1)
+    const atrans = await db('atran')
+      .where({ at_acnt: 'BB005' })
+      .orderBy('id', 'asc');
+    expect(atrans).toHaveLength(3);
+
+    // Sum of at_value across all 3 rows must equal ae_value
+    const atranSum = atrans.reduce((acc: number, r: { at_value: number }) => acc + Number(r.at_value), 0);
+    expect(atranSum).toBe(-35000);
+
+    // anoml: (2 lines × 2 legs) + 1 extra for VAT leg = 5 anoml rows
+    const anomlRows = await db('anoml').select('ax_nacnt', 'ax_value');
+    expect(anomlRows).toHaveLength(5);
   });
 
   it('single-line nominal_payment still works (delegation to full path)', async () => {

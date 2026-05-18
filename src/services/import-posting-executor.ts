@@ -3046,13 +3046,16 @@ export async function postOperaCashbookEntry(
   // ---------------------------------------------------------------------------
   // 4. Entry-level verification asserts (Phase A, in-trx).
   // ---------------------------------------------------------------------------
+  // For nominal entries each VAT-bearing line produces 2 atran rows (net +
+  // VAT split). Sales/purchase entries have no atran VAT split (1 row each).
+  const totalAtranCount = lines.length + (isNominal ? vatLineCount : 0);
   await assertAentryAtran(trx, {
     entryNumber,
     bankAccount: bankCode,
     expectedSignedPence: totalSignedPence,
     expectedAtType: at_type,
     expectedDate: header.date,
-    expectedAtranCount: lines.length,
+    expectedAtranCount: totalAtranCount,
   });
 
   if (isSales || isPurchase) {
