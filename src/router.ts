@@ -581,6 +581,68 @@ export function createRouter(ctx: AppContext): Router {
   });
 
   /**
+   * GET|POST /api/reconcile/bank/:bank_code/repair-orphan-links
+   *
+   * Heals bank_statement_transactions rows whose import_id points to
+   * a bank_statement_imports.id that no longer exists. The legacy-DB
+   * seeder created these orphans in bulk by not preserving parent ids
+   * during the legacy → SAM port. Without this repair, the line-level
+   * reconcile state for already-reconciled statements can't be
+   * displayed or revised.
+   *
+   *   GET  — dry run (reports orphan groups + intended matches,
+   *          but does NOT mutate).
+   *   POST — actually apply the relinks.
+   */
+  router.get('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
+    const appDb = getAppDb(req, res);
+    if (!appDb) return;
+    try {
+      const bankCode = String(req.params.bank_code ?? '').trim();
+      if (!bankCode) {
+        res.status(400).json({ success: false, error: 'Missing bank_code' });
+        return;
+      }
+      const { repairOrphanTransactionLinks } = await import(
+        './services/orphan-line-relink.js'
+      );
+      const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+        dryRun: true,
+      });
+      res.json(result);
+    } catch (err: any) {
+      ctx.logger.error('Orphan-link dry-run failed', err);
+      res.status(500).json({ success: false, error: friendlyDbError(err) });
+    }
+  });
+
+  router.post('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
+    const appDb = getAppDb(req, res);
+    if (!appDb) return;
+    try {
+      const bankCode = String(req.params.bank_code ?? '').trim();
+      if (!bankCode) {
+        res.status(400).json({ success: false, error: 'Missing bank_code' });
+        return;
+      }
+      const { repairOrphanTransactionLinks } = await import(
+        './services/orphan-line-relink.js'
+      );
+      const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+        dryRun: false,
+      });
+      if (!result.success) {
+        res.status(500).json(result);
+        return;
+      }
+      res.json(result);
+    } catch (err: any) {
+      ctx.logger.error('Orphan-link repair failed', err);
+      res.status(500).json({ success: false, error: friendlyDbError(err) });
+    }
+  });
+
+  /**
    * POST /api/reconcile/bank/:bank_code/ignore-transaction
    *
    * Mark a bank statement line as "already in Opera, ignore for reconcile".
