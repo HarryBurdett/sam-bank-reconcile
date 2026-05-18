@@ -2,17 +2,34 @@
  * Repeat-entry detection — match a bank transaction against an
  * unposted Opera repeat entry in arhead/arline.
  *
- * Faithful port of `_check_repeat_entry`
- * (sql_rag/bank_import.py:943-1134) including the alias fast-path
- * (961-1020) and the amount/reference/date matching (1022-1134).
+ * Port of `_check_repeat_entry` (sql_rag/bank_import.py:943-1134),
+ * with one deliberate divergence from legacy:
+ *
+ *   Amount matches are STRICTLY EQUAL — no tolerance, no ±1p,
+ *   no ±10p. Accounting amounts have no tolerance: £54.99 is not
+ *   £55.00, ever. The legacy 10p window produced false positives
+ *   like "£54.99 Amazon purchase" being classified as the £55.00
+ *   'Bounce HB' subscription on BC010 — different transactions,
+ *   same banker's-rounding distance.
+ *
+ *   Both sides of the comparison are integer pence values
+ *   (Opera's `arline.at_value` is stored as integer pence; the
+ *   bank line's pounds amount goes through `Math.round(× 100)`).
+ *   SQL `=` and JS `===` are correct.
+ *
+ *   If a foreign-currency repeat genuinely needs flexibility on
+ *   the GBP equivalent, the operator creates an alias — the
+ *   alias fast-path bypasses amount checking entirely (the
+ *   operator opted in to that mapping).
  *
  * Two phases:
  *   1. Alias fast-path: if `repeat_entry_aliases` has a previously
  *      learned mapping for this payee + bank, validate the linked
- *      arhead row is still active and use it.
+ *      arhead row is still active and use it. The alias bypasses
+ *      amount strictness — the operator opted in to this mapping.
  *   2. Otherwise scan arhead+arline rows for this bank where the
  *      entry is unposted (ae_topost=0 or ae_posted<ae_topost) and
- *      either the amount matches within 10p OR a search-term LIKE
+ *      either the amount matches EXACTLY OR a search-term LIKE
  *      hits ae_desc / at_comment. Prefer amount matches; secondary
  *      ordering by date proximity to ae_nxtpost.
  *
@@ -216,14 +233,18 @@ export async function checkRepeatEntry(
 
     if (terms.length > 0) {
       query = query.andWhere(function matchAmountOrTerms(this: Knex.QueryBuilder) {
-        this.whereRaw('ABS(ABS(l.at_value) - ?) < 10', [amountPenceAbs]);
+        // Strict integer-pence equality. Accounting amounts have no
+        // tolerance — £54.99 ≠ £55.00, ever. Both at_value (Opera)
+        // and amountPenceAbs (bank line via Math.round) are
+        // integers, so SQL `=` is the right operator.
+        this.whereRaw('ABS(l.at_value) = ?', [amountPenceAbs]);
         for (const t of terms) {
           this.orWhereRaw(`UPPER(h.ae_desc) LIKE '%${t}%'`)
               .orWhereRaw(`UPPER(l.at_comment) LIKE '%${t}%'`);
         }
       });
     } else {
-      query = query.andWhereRaw('ABS(ABS(l.at_value) - ?) < 10', [amountPenceAbs]);
+      query = query.andWhereRaw('ABS(l.at_value) = ?', [amountPenceAbs]);
     }
 
     const rows = (await query.limit(20)) as unknown as ArlineRow[];
@@ -232,7 +253,9 @@ export async function checkRepeatEntry(
     // Score in JS: amount-match > ref-match; then date proximity.
     const txnTs = Date.parse(`${txn.date}T00:00:00Z`);
     const scored = rows.map((r) => {
-      const amountMatch = Math.abs(Math.abs(Number(r.at_value)) - amountPenceAbs) < 10;
+      // Strict integer-pence equality — same rule as the SQL filter.
+      // No tolerance: accounting amounts must match exactly.
+      const amountMatch = Math.abs(Number(r.at_value)) === amountPenceAbs;
       const desc = (r.ae_desc ?? '').toString().toUpperCase();
       const comment = (r.at_comment ?? '').toString().toUpperCase();
       let refMatch = false;
@@ -260,15 +283,24 @@ export async function checkRepeatEntry(
     });
 
     const best = scored[0]!;
+
+    // Finance-grade gate: a repeat match requires the bank line's
+    // amount to equal the Opera repeat's amount EXACTLY (within
+    // float-safe pence). A reference-only hit with a different
+    // amount is by definition a different transaction — even if
+    // the payee text overlaps. The user might have e.g. "Card
+    // Payment to Amazon" matching a different £-value repeat;
+    // we must not classify that as a repeat.
+    if (!best.amountMatch) return NO_MATCH;
+
     const nextDate = dateToYmd(best.row.ae_nxtpost);
     if (!withinToleranceDays(txn.date, nextDate)) return NO_MATCH;
 
-    const kind: RepeatEntryMatch['match_kind'] = best.amountMatch
-      ? 'amount'
-      : best.refMatch
-        ? 'reference'
-        : 'unknown';
-    return buildMatch(best.row, kind);
+    // All matches at this point are amount-exact (the guard above
+    // rejected anything else). The kind stays 'amount' regardless
+    // of whether the reference also overlapped — they're treated
+    // the same downstream.
+    return buildMatch(best.row, 'amount');
   } catch {
     return NO_MATCH;
   }

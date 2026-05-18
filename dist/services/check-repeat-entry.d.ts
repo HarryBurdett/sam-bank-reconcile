@@ -2,17 +2,34 @@
  * Repeat-entry detection — match a bank transaction against an
  * unposted Opera repeat entry in arhead/arline.
  *
- * Faithful port of `_check_repeat_entry`
- * (sql_rag/bank_import.py:943-1134) including the alias fast-path
- * (961-1020) and the amount/reference/date matching (1022-1134).
+ * Port of `_check_repeat_entry` (sql_rag/bank_import.py:943-1134),
+ * with one deliberate divergence from legacy:
+ *
+ *   Amount matches are STRICTLY EQUAL — no tolerance, no ±1p,
+ *   no ±10p. Accounting amounts have no tolerance: £54.99 is not
+ *   £55.00, ever. The legacy 10p window produced false positives
+ *   like "£54.99 Amazon purchase" being classified as the £55.00
+ *   'Bounce HB' subscription on BC010 — different transactions,
+ *   same banker's-rounding distance.
+ *
+ *   Both sides of the comparison are integer pence values
+ *   (Opera's `arline.at_value` is stored as integer pence; the
+ *   bank line's pounds amount goes through `Math.round(× 100)`).
+ *   SQL `=` and JS `===` are correct.
+ *
+ *   If a foreign-currency repeat genuinely needs flexibility on
+ *   the GBP equivalent, the operator creates an alias — the
+ *   alias fast-path bypasses amount checking entirely (the
+ *   operator opted in to that mapping).
  *
  * Two phases:
  *   1. Alias fast-path: if `repeat_entry_aliases` has a previously
  *      learned mapping for this payee + bank, validate the linked
- *      arhead row is still active and use it.
+ *      arhead row is still active and use it. The alias bypasses
+ *      amount strictness — the operator opted in to this mapping.
  *   2. Otherwise scan arhead+arline rows for this bank where the
  *      entry is unposted (ae_topost=0 or ae_posted<ae_topost) and
- *      either the amount matches within 10p OR a search-term LIKE
+ *      either the amount matches EXACTLY OR a search-term LIKE
  *      hits ae_desc / at_comment. Prefer amount matches; secondary
  *      ordering by date proximity to ae_nxtpost.
  *

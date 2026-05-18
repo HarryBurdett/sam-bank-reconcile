@@ -108,7 +108,11 @@ export async function checkRepeatEntry(operaDb, appDb, txn) {
         });
         if (terms.length > 0) {
             query = query.andWhere(function matchAmountOrTerms() {
-                this.whereRaw('ABS(ABS(l.at_value) - ?) < 10', [amountPenceAbs]);
+                // Strict integer-pence equality. Accounting amounts have no
+                // tolerance — £54.99 ≠ £55.00, ever. Both at_value (Opera)
+                // and amountPenceAbs (bank line via Math.round) are
+                // integers, so SQL `=` is the right operator.
+                this.whereRaw('ABS(l.at_value) = ?', [amountPenceAbs]);
                 for (const t of terms) {
                     this.orWhereRaw(`UPPER(h.ae_desc) LIKE '%${t}%'`)
                         .orWhereRaw(`UPPER(l.at_comment) LIKE '%${t}%'`);
@@ -116,7 +120,7 @@ export async function checkRepeatEntry(operaDb, appDb, txn) {
             });
         }
         else {
-            query = query.andWhereRaw('ABS(ABS(l.at_value) - ?) < 10', [amountPenceAbs]);
+            query = query.andWhereRaw('ABS(l.at_value) = ?', [amountPenceAbs]);
         }
         const rows = (await query.limit(20));
         if (!rows.length)
@@ -124,7 +128,9 @@ export async function checkRepeatEntry(operaDb, appDb, txn) {
         // Score in JS: amount-match > ref-match; then date proximity.
         const txnTs = Date.parse(`${txn.date}T00:00:00Z`);
         const scored = rows.map((r) => {
-            const amountMatch = Math.abs(Math.abs(Number(r.at_value)) - amountPenceAbs) < 10;
+            // Strict integer-pence equality — same rule as the SQL filter.
+            // No tolerance: accounting amounts must match exactly.
+            const amountMatch = Math.abs(Number(r.at_value)) === amountPenceAbs;
             const desc = (r.ae_desc ?? '').toString().toUpperCase();
             const comment = (r.at_comment ?? '').toString().toUpperCase();
             let refMatch = false;
@@ -152,15 +158,23 @@ export async function checkRepeatEntry(operaDb, appDb, txn) {
             return a.dateGap - b.dateGap;
         });
         const best = scored[0];
+        // Finance-grade gate: a repeat match requires the bank line's
+        // amount to equal the Opera repeat's amount EXACTLY (within
+        // float-safe pence). A reference-only hit with a different
+        // amount is by definition a different transaction — even if
+        // the payee text overlaps. The user might have e.g. "Card
+        // Payment to Amazon" matching a different £-value repeat;
+        // we must not classify that as a repeat.
+        if (!best.amountMatch)
+            return NO_MATCH;
         const nextDate = dateToYmd(best.row.ae_nxtpost);
         if (!withinToleranceDays(txn.date, nextDate))
             return NO_MATCH;
-        const kind = best.amountMatch
-            ? 'amount'
-            : best.refMatch
-                ? 'reference'
-                : 'unknown';
-        return buildMatch(best.row, kind);
+        // All matches at this point are amount-exact (the guard above
+        // rejected anything else). The kind stays 'amount' regardless
+        // of whether the reference also overlapped — they're treated
+        // the same downstream.
+        return buildMatch(best.row, 'amount');
     }
     catch {
         return NO_MATCH;
