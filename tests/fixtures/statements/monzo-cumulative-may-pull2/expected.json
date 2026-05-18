@@ -1,0 +1,9 @@
+{
+  "opening_balance": 82557.56,
+  "closing_balance": 11396.95,
+  "transaction_count": 18,
+  "statement_date": "2026-05-21",
+  "period_start": "2026-05-01",
+  "period_end": "2026-05-21",
+  "notes": "Cumulative Monzo pull 2 of 2 (May 1-21). Extends pull-1 (May 1-14) by 5 additional transactions May 15-21. Tests that the solver handles a cumulative pull with the same period_start and an extended period_end. Closing 11396.95 = pull-1 closing 11146.95 + 5 new lines (net £250 outflow). Opening (82557.56) derived from chain — same as pull-1."
+}

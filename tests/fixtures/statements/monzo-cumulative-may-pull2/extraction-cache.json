@@ -1,0 +1,184 @@
+{
+  "statement_info": {
+    "bank_name": "monzo",
+    "account_number": "XXXXXXXX",
+    "sort_code": "XX-XX-XX",
+    "statement_date": "2026-05-21",
+    "period_start": "2026-05-01",
+    "period_end": "2026-05-21",
+    "format": "summary_and_transactions",
+    "transaction_order": "newest_first",
+    "summary": {
+      "opening_balance": null,
+      "closing_balance": 11396.95,
+      "total_in": 12149.25,
+      "total_out": 83559.86
+    },
+    "opening_balance": null,
+    "closing_balance": 11396.95
+  },
+  "transactions": [
+    {
+      "date": "2026-05-15",
+      "description": "Card Payment to Test 1",
+      "money_out": 50.0,
+      "money_in": null,
+      "balance": 11096.95,
+      "type": "card_payment",
+      "reference": null
+    },
+    {
+      "date": "2026-05-17",
+      "description": "Card Payment to Test 2",
+      "money_out": 25.0,
+      "money_in": null,
+      "balance": 11071.95,
+      "type": "card_payment",
+      "reference": null
+    },
+    {
+      "date": "2026-05-18",
+      "description": "Transfer in",
+      "money_out": null,
+      "money_in": 500.0,
+      "balance": 11571.95,
+      "type": "transfer",
+      "reference": null
+    },
+    {
+      "date": "2026-05-20",
+      "description": "Direct Debit Test",
+      "money_out": 100.0,
+      "money_in": null,
+      "balance": 11471.95,
+      "type": "dd",
+      "reference": null
+    },
+    {
+      "date": "2026-05-21",
+      "description": "Card Payment to Test 3",
+      "money_out": 75.0,
+      "money_in": null,
+      "balance": 11396.95,
+      "type": "card_payment",
+      "reference": null
+    },
+    {
+      "date": "2026-05-14",
+      "description": "Transfer from Pot",
+      "money_out": null,
+      "money_in": 10000,
+      "balance": 11146.95,
+      "type": "Transfer",
+      "reference": null
+    },
+    {
+      "date": "2026-05-13",
+      "description": "Diskel (Faster Payments)",
+      "money_out": 859.2,
+      "money_in": null,
+      "balance": 1146.95,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-13",
+      "description": "Zahara Systems Ltd (Faster Payments)",
+      "money_out": 128.77,
+      "money_in": null,
+      "balance": 2006.15,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-13",
+      "description": "INTSYS UK LTD (Faster Payments) Reference: HOLDSWORTH",
+      "money_out": null,
+      "money_in": 128.77,
+      "balance": 2134.92,
+      "type": "FP",
+      "reference": "HOLDSWORTH"
+    },
+    {
+      "date": "2026-05-12",
+      "description": "HMRC E VAT (Direct Debit) Reference: 000918477993",
+      "money_out": 679.25,
+      "money_in": null,
+      "balance": 2006.15,
+      "type": "DD",
+      "reference": "000918477993"
+    },
+    {
+      "date": "2026-05-08",
+      "description": "CLOUGH JENNIFER (Faster Payments) Reference: HOLDSWORTH HLDGS",
+      "money_out": null,
+      "money_in": 145.6,
+      "balance": 2685.4,
+      "type": "FP",
+      "reference": "HOLDSWORTH HLDGS"
+    },
+    {
+      "date": "2026-05-07",
+      "description": "R Burdett (Faster Payments)",
+      "money_out": 30000,
+      "money_in": null,
+      "balance": 2539.8,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-07",
+      "description": "INTSYS UK LTD (Faster Payments)",
+      "money_out": 50000,
+      "money_in": null,
+      "balance": 32539.8,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-04",
+      "description": "Systems Cloud Group Ltd (Faster Payments)",
+      "money_out": 1000.8,
+      "money_in": null,
+      "balance": 82539.8,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-04",
+      "description": "Diskel (Faster Payments)",
+      "money_out": 859.2,
+      "money_in": null,
+      "balance": 83540.6,
+      "type": "FP",
+      "reference": null
+    },
+    {
+      "date": "2026-05-01",
+      "description": "CONTRACT CLE (Faster Payments) Reference: Contract Cleaning",
+      "money_out": null,
+      "money_in": 1483.68,
+      "balance": 84399.8,
+      "type": "FP",
+      "reference": "Contract Cleaning"
+    },
+    {
+      "date": "2026-05-01",
+      "description": "GC C1 (Faster Payments) Reference: CLOUDSIS-YZBXDV6GS",
+      "money_out": null,
+      "money_in": 391.2,
+      "balance": 82916.12,
+      "type": "FP",
+      "reference": "CLOUDSIS-YZBXDV6GS"
+    },
+    {
+      "date": "2026-05-01",
+      "description": "HISCOX UNDERWRITIN (Direct Debit) Reference: 1794414/0056152985",
+      "money_out": 32.64,
+      "money_in": null,
+      "balance": 82524.92,
+      "type": "DD",
+      "reference": "1794414/0056152985"
+    }
+  ]
+}
