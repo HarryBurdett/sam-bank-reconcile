@@ -412,7 +412,14 @@ function isBalanceOnlyLine(description: string | null | undefined): boolean {
   return BALANCE_LINE_DESCRIPTIONS.has(description.trim().toLowerCase());
 }
 
-function parseResultJson(
+/**
+ * Exposed for the fixture-based regression harness — lets tests run
+ * a saved Gemini extraction through the solver without calling the
+ * live API. Keeps the deterministic part of the pipeline (parsing,
+ * balance solving, summary detection) testable in CI even when no
+ * GEMINI_API_KEY is configured.
+ */
+export function parseResultJson(
   parsed: Record<string, unknown>,
   logger?: AppLogger,
 ): PdfExtractionResult {

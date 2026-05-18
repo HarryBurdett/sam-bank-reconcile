@@ -1,0 +1,9 @@
+{
+  "opening_balance": 82557.56,
+  "closing_balance": 11146.95,
+  "transaction_count": 13,
+  "statement_date": "2026-05-14",
+  "period_start": "2026-05-01",
+  "period_end": "2026-05-14",
+  "notes": "Cloudsis Monzo May 2026 statement. Format: summary_and_transactions, transaction_order: newest_first. Gemini returns opening_balance=null in the summary block — opening must be derived by walking the balance chain back from the oldest transaction (82524.92 + 32.64 outflow = 82557.56). This regression test guards against any future change to the solver that breaks the 'opening is null, derive from chain' code path."
+}
