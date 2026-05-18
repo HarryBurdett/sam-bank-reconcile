@@ -50,6 +50,14 @@ import { buildOperaSePeriodReconciliationDs, checkPeriodReconciled, } from './pe
 import { markStatementReconciled } from './statement-files.js';
 import { autoCleanResolvedDefers } from './deferred-items.js';
 import { checkChainComplete } from './scan-chain-check.js';
+import { classifyExtractionError, getGeminiBreaker, } from '../_shared/extraction-error.js';
+// Shared Gemini circuit breaker — same instance used by every call
+// site (scan loop, /extract endpoint, future bulk import). Opens
+// after 3 consecutive auth/quota failures. When open, subsequent
+// scans skip Gemini calls entirely and surface the underlying
+// error to the operator. Half-open after 60s — a single test call
+// goes through to detect recovery.
+const geminiBreaker = getGeminiBreaker();
 /**
  * Read opening/closing/period balances from the per-PDF extraction
  * cache when the bank_statement_imports tracking has no row for
@@ -875,9 +883,21 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
             if (recBal === null || recBal === undefined)
                 continue;
             for (const stmt of bank.statements) {
-                // is_imported in legacy maps to status === 'imported' here.
-                if (stmt.status !== 'imported')
+                // Originally legacy only auto-promoted status='imported'
+                // statements. Widened to also include 'ready' and
+                // 'in_progress' state — those are statements SAM has tracked
+                // but hasn't marked reconciled, even though Opera may
+                // already have the entries (the common "Opera ahead of SAM"
+                // case: workflow completed but is_reconciled never flipped).
+                // checkPeriodReconciled still guards behind FULLY_RECONCILED,
+                // so we only promote when Opera genuinely has the period
+                // reconciled — false positives are impossible.
+                const eff = (stmt.state ?? stmt.status);
+                if (stmt.status !== 'imported' &&
+                    eff !== 'ready' &&
+                    eff !== 'in_progress') {
                     continue;
+                }
                 const periodStart = (stmt.period_start ?? null);
                 const periodEnd = (stmt.period_end ?? null);
                 const closing = (stmt.closing_balance ?? null);
@@ -996,79 +1016,148 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
     // pending until the operator clicks Analyse or re-scans.
     const MAX_EAGER_PER_BANK = 8;
     if (extractOnMiss && extractor && appDb) {
-        for (const bank of Object.values(banksWithStatements)) {
-            // Eligible target = any statement missing balances with a
-            // source we can read (folder path or email attachment).
-            // Previously this loop short-circuited on
-            // `bank.extraction_status !== 'incomplete'`, which is true
-            // whenever the FIRST statement has cached balances — leaving
-            // all the other un-extracted statements forever blank in the
-            // FE preview.
-            const targets = bank.statements
-                .filter((s) => (s.opening_balance == null || s.closing_balance == null) &&
-                s.status !== 'imported' &&
-                s.status !== 'already_processed' &&
-                (!!(s.full_path || s.file_path) ||
-                    (s.source === 'email' && s.email_id && s.attachment_id)))
-                .slice(0, MAX_EAGER_PER_BANK);
-            if (targets.length === 0)
-                continue;
-            logger.info(`eager-extract[${bank.bank_code}]: extracting ${targets.length} target(s)`);
-            for (const target of targets) {
-                const filePath = (target.full_path || target.file_path) ?? null;
-                const fromEmail = target.source === 'email' && !filePath;
-                if (fromEmail && !emailAttachments) {
-                    logger.debug(`eager-extract[${bank.bank_code}]: email source but no attachment provider — skipping ${target.filename}`);
-                    continue;
+        // Short-circuit when the breaker is open — recent permanent
+        // failures (e.g. revoked API key, quota exhausted) mean ALL
+        // pending statements should surface the same error, not
+        // hammer Gemini and silently fail one-at-a-time.
+        if (geminiBreaker.isOpen()) {
+            const reason = geminiBreaker.openReason();
+            logger.warn(`eager-extract: ${reason}`);
+            for (const bank of Object.values(banksWithStatements)) {
+                for (const s of bank.statements) {
+                    if (s.opening_balance == null || s.closing_balance == null) {
+                        s.extraction_status = 'failed';
+                        s.extraction_error = reason;
+                    }
                 }
-                try {
-                    let pdfBytes = null;
-                    if (filePath) {
-                        pdfBytes = await readFile(filePath);
-                    }
-                    else if (fromEmail && emailAttachments) {
-                        const downloaded = await emailAttachments.fetchAttachment({
-                            emailId: target.email_id,
-                            attachmentId: target.attachment_id,
-                        });
-                        pdfBytes = downloaded?.bytes ?? null;
-                    }
-                    if (!pdfBytes) {
-                        logger.debug(`eager-extract[${bank.bank_code}]: no bytes for ${target.filename}`);
+            }
+        }
+        else {
+            for (const bank of Object.values(banksWithStatements)) {
+                // Eligible target = any statement missing balances with a
+                // source we can read (folder path or email attachment).
+                const targets = bank.statements
+                    .filter((s) => (s.opening_balance == null || s.closing_balance == null) &&
+                    s.status !== 'imported' &&
+                    s.status !== 'already_processed' &&
+                    (!!(s.full_path || s.file_path) ||
+                        (s.source === 'email' && s.email_id && s.attachment_id)))
+                    .slice(0, MAX_EAGER_PER_BANK);
+                if (targets.length === 0)
+                    continue;
+                logger.info(`eager-extract[${bank.bank_code}]: extracting ${targets.length} target(s)`);
+                for (const target of targets) {
+                    const filePath = (target.full_path || target.file_path) ?? null;
+                    const fromEmail = target.source === 'email' && !filePath;
+                    const now = new Date().toISOString();
+                    target.extraction_attempted_at =
+                        now;
+                    if (fromEmail && !emailAttachments) {
+                        const msg = 'Email attachment provider not configured.';
+                        target.extraction_status =
+                            'failed';
+                        target.extraction_error = msg;
                         continue;
                     }
-                    const extracted = await extractor.extractFromPdf({
-                        bytes: pdfBytes,
-                        filename: target.filename,
-                    });
-                    if (typeof extracted.opening_balance === 'number' &&
-                        typeof extracted.closing_balance === 'number') {
-                        target.opening_balance = extracted.opening_balance;
-                        target.closing_balance = extracted.closing_balance;
-                        target.period_start = extracted.period_start ?? null;
-                        target.period_end = extracted.period_end ?? null;
-                        target.extraction_status =
-                            'extracted';
-                        target.status = 'ready';
-                        // The Gemini extractor caches the RAW response itself
-                        // (gemini-pdf-extractor.ts:cachePut). We deliberately do
-                        // NOT write here — earlier versions wrote the PROCESSED
-                        // BankTransaction[] shape, which loses money_in/money_out
-                        // and corrupts subsequent reads (every txn shows £0.00).
-                        void pdfBytes;
+                    try {
+                        let pdfBytes = null;
+                        if (filePath) {
+                            pdfBytes = await readFile(filePath);
+                        }
+                        else if (fromEmail && emailAttachments) {
+                            const downloaded = await emailAttachments.fetchAttachment({
+                                emailId: target.email_id,
+                                attachmentId: target.attachment_id,
+                            });
+                            pdfBytes = downloaded?.bytes ?? null;
+                        }
+                        if (!pdfBytes) {
+                            target.extraction_status =
+                                'failed';
+                            target.extraction_error =
+                                'Could not read PDF bytes (file missing or attachment fetch failed).';
+                            continue;
+                        }
+                        const extracted = await extractor.extractFromPdf({
+                            bytes: pdfBytes,
+                            filename: target.filename,
+                        });
+                        if (typeof extracted.opening_balance === 'number' &&
+                            typeof extracted.closing_balance === 'number') {
+                            target.opening_balance = extracted.opening_balance;
+                            target.closing_balance = extracted.closing_balance;
+                            target.period_start = extracted.period_start ?? null;
+                            target.period_end = extracted.period_end ?? null;
+                            target.extraction_status =
+                                'extracted';
+                            target.extraction_error =
+                                null;
+                            target.status = 'ready';
+                            geminiBreaker.recordSuccess();
+                        }
+                        else {
+                            target.extraction_status =
+                                'failed';
+                            target.extraction_error =
+                                'Extraction returned without an opening or closing balance — statement may be unreadable.';
+                        }
+                        // The Gemini extractor caches the RAW response itself.
                     }
-                }
-                catch (extErr) {
-                    logger.warn(`eager extraction failed for ${filePath}: ${extErr instanceof Error ? extErr.message : String(extErr)}`);
-                }
-            } // end inner for-of targets
-            // Re-evaluate the bank's extraction_status after all eager
-            // extractions for this bank: complete when the first (next-in-
-            // sequence) statement now has both balances populated.
-            const nextHasBalances = bank.statements[0]?.opening_balance != null &&
-                bank.statements[0]?.closing_balance != null;
-            if (nextHasBalances)
-                bank.extraction_status = 'complete';
+                    catch (extErr) {
+                        const cls = classifyExtractionError(extErr);
+                        geminiBreaker.recordFailure(extErr);
+                        target.extraction_status =
+                            cls.transient ? 'pending' : 'failed';
+                        target.extraction_error =
+                            cls.message;
+                        logger.warn(`eager-extract[${bank.bank_code}]: ${target.filename} → ${cls.kind} (${cls.transient ? 'transient — will retry next scan' : 'permanent — operator action needed'}): ${cls.cause ?? cls.message}`);
+                        // If the breaker just opened, mark all remaining targets
+                        // in this scan with the same error rather than hammering.
+                        if (geminiBreaker.isOpen()) {
+                            const reason = geminiBreaker.openReason();
+                            for (const bank2 of Object.values(banksWithStatements)) {
+                                for (const s of bank2.statements) {
+                                    if (s.opening_balance == null ||
+                                        s.closing_balance == null) {
+                                        const cur = s
+                                            .extraction_status;
+                                        if (cur !== 'extracted' && cur !== 'cached') {
+                                            s.extraction_status =
+                                                'failed';
+                                            s.extraction_error =
+                                                reason;
+                                        }
+                                    }
+                                }
+                            }
+                            break; // exit inner targets loop
+                        }
+                    }
+                } // end inner for-of targets
+                // Re-evaluate the bank's extraction_status after all eager
+                // extractions for this bank: complete when the first (next-in-
+                // sequence) statement now has both balances populated.
+                const nextHasBalances = bank.statements[0]?.opening_balance != null &&
+                    bank.statements[0]?.closing_balance != null;
+                if (nextHasBalances)
+                    bank.extraction_status = 'complete';
+                // If the breaker is now open, stop scanning further banks.
+                if (geminiBreaker.isOpen())
+                    break;
+            }
+        } // end else (breaker closed)
+    }
+    // Mark statements that have cached balances (i.e. were read from
+    // extraction_cache, not freshly extracted) with extraction_status
+    // 'cached' so the FE can show that distinction.
+    for (const bank of Object.values(banksWithStatements)) {
+        for (const s of bank.statements) {
+            const cur = s.extraction_status;
+            if (!cur &&
+                s.opening_balance != null &&
+                s.closing_balance != null) {
+                s.extraction_status = 'cached';
+            }
         }
     }
     // ---- Chain-complete check ----

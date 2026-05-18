@@ -438,6 +438,66 @@ export function createRouter(ctx) {
         }
     });
     /**
+     * GET|POST /api/reconcile/bank/:bank_code/repair-orphan-links
+     *
+     * Heals bank_statement_transactions rows whose import_id points to
+     * a bank_statement_imports.id that no longer exists. The legacy-DB
+     * seeder created these orphans in bulk by not preserving parent ids
+     * during the legacy → SAM port. Without this repair, the line-level
+     * reconcile state for already-reconciled statements can't be
+     * displayed or revised.
+     *
+     *   GET  — dry run (reports orphan groups + intended matches,
+     *          but does NOT mutate).
+     *   POST — actually apply the relinks.
+     */
+    router.get('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
+        const appDb = getAppDb(req, res);
+        if (!appDb)
+            return;
+        try {
+            const bankCode = String(req.params.bank_code ?? '').trim();
+            if (!bankCode) {
+                res.status(400).json({ success: false, error: 'Missing bank_code' });
+                return;
+            }
+            const { repairOrphanTransactionLinks } = await import('./services/orphan-line-relink.js');
+            const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+                dryRun: true,
+            });
+            res.json(result);
+        }
+        catch (err) {
+            ctx.logger.error('Orphan-link dry-run failed', err);
+            res.status(500).json({ success: false, error: friendlyDbError(err) });
+        }
+    });
+    router.post('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
+        const appDb = getAppDb(req, res);
+        if (!appDb)
+            return;
+        try {
+            const bankCode = String(req.params.bank_code ?? '').trim();
+            if (!bankCode) {
+                res.status(400).json({ success: false, error: 'Missing bank_code' });
+                return;
+            }
+            const { repairOrphanTransactionLinks } = await import('./services/orphan-line-relink.js');
+            const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+                dryRun: false,
+            });
+            if (!result.success) {
+                res.status(500).json(result);
+                return;
+            }
+            res.json(result);
+        }
+        catch (err) {
+            ctx.logger.error('Orphan-link repair failed', err);
+            res.status(500).json({ success: false, error: friendlyDbError(err) });
+        }
+    });
+    /**
      * POST /api/reconcile/bank/:bank_code/ignore-transaction
      *
      * Mark a bank statement line as "already in Opera, ignore for reconcile".
@@ -1933,27 +1993,82 @@ export function createRouter(ctx) {
                 periodStart: typeof body.period_start === 'string' ? body.period_start : null,
                 periodEnd: typeof body.period_end === 'string' ? body.period_end : null,
             });
-            // App-DB tracking update on success
-            if (result.success && importId !== null && Number.isFinite(importId)) {
+            // App-DB tracking update on success. The previous version
+            // silently swallowed errors here — when the FE didn't pass
+            // import_id (file-picker path) or the UPDATE hit a transient
+            // failure, Opera got posted but SAM's is_reconciled flag
+            // never flipped, leaving the operator with a stuck
+            // "Opera reconciled outside SAM" banner. We now:
+            //   1. Fall back to looking up the row by bank_code +
+            //      statement_date + closing_balance when importId is
+            //      missing, so file-picker reconciles also flip the
+            //      flag.
+            //   2. Surface UPDATE failures as result.tracking_warning
+            //      rather than swallowing — the FE can show a toast +
+            //      retry via /recover-from-restore later.
+            const enriched = result;
+            if (result.success) {
                 try {
                     const newRecBal = result.new_reconciled_balance ?? null;
                     const statementActuallyComplete = !result.partial ||
                         (newRecBal !== null &&
                             Math.abs(newRecBal - closingBalance) < 0.01);
                     const isReconciled = statementActuallyComplete ? 1 : 0;
-                    await appDb('bank_statement_imports')
-                        .where({ id: importId })
-                        .update({
-                        is_reconciled: isReconciled,
-                        reconciled_count: result.records_reconciled ?? 0,
-                        reconciled_at: appDb.fn.now(),
-                    });
+                    // Resolve target row — prefer the explicit importId,
+                    // otherwise look up by bank + statement_date + closing.
+                    // statement_date might come in as 'YYYY-MM-DD' or
+                    // 'DD-MON-YY' from the FE — try the raw string first.
+                    let resolvedId = importId !== null && Number.isFinite(importId) ? importId : null;
+                    if (resolvedId === null) {
+                        const row = (await appDb('bank_statement_imports')
+                            .select('id')
+                            .where('bank_code', bankCode)
+                            .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
+                            closingBalance,
+                        ])
+                            .orderBy('id', 'desc')
+                            .first());
+                        if (row?.id)
+                            resolvedId = Number(row.id);
+                    }
+                    if (resolvedId !== null) {
+                        const updated = Number(await appDb('bank_statement_imports')
+                            .where({ id: resolvedId })
+                            .update({
+                            is_reconciled: isReconciled,
+                            reconciled_count: result.records_reconciled ?? 0,
+                            reconciled_at: appDb.fn.now(),
+                        }));
+                        if (updated === 0) {
+                            enriched.tracking_warning =
+                                `bank_statement_imports row ${resolvedId} not found ` +
+                                    `during tracking update — Opera posted successfully ` +
+                                    `but SAM's is_reconciled flag is unflipped. ` +
+                                    `Use the recover-from-restore action to repair.`;
+                        }
+                        else {
+                            enriched.tracking_updated_import_id = resolvedId;
+                        }
+                    }
+                    else {
+                        enriched.tracking_warning =
+                            `Could not locate a bank_statement_imports row matching ` +
+                                `bank_code=${bankCode} closing_balance=${closingBalance} — ` +
+                                `Opera posted successfully but SAM's is_reconciled ` +
+                                `flag is unflipped. The next 'Scan All Banks' will ` +
+                                `auto-recover via the divergence banner.`;
+                    }
                 }
                 catch (dbErr) {
-                    ctx.logger.warn?.('Could not update bank_statement_imports tracking row', dbErr);
+                    const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+                    ctx.logger.warn?.('Could not update bank_statement_imports tracking row: ' + msg);
+                    enriched.tracking_warning =
+                        `Opera posting succeeded but SAM tracking update failed: ` +
+                            `${msg}. The next 'Scan All Banks' will auto-recover via ` +
+                            `the divergence banner.`;
                 }
             }
-            res.json(result);
+            res.json(enriched);
         }
         catch (err) {
             ctx.logger.error('Complete reconciliation failed', err);
@@ -2821,13 +2936,34 @@ export function createRouter(ctx) {
         const validateBalances = req.query.validate_balances !== 'false';
         const extractOnMiss = req.query.extract_on_miss !== 'false';
         const { scanAllBanksFaithful } = await import('./services/scan-all-banks.js');
-        res.json(await scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
-            daysBack,
-            validateBalances,
-            extractOnMiss,
-            extractor,
-            emailAttachments,
-        }));
+        const { withScanLock, ScanInProgressError } = await import('./_shared/scan-lock.js');
+        // Per-company lock — second concurrent scan for the same
+        // tenant is refused with 409 rather than queued. Stops the
+        // FE from racing itself when the operator clicks Re-scan
+        // before the previous spinner finishes.
+        const lockKey = ctx.tenantId ?? 'unknown-tenant';
+        try {
+            const result = await withScanLock(lockKey, () => scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
+                daysBack,
+                validateBalances,
+                extractOnMiss,
+                extractor,
+                emailAttachments,
+            }));
+            res.json(result);
+        }
+        catch (err) {
+            if (err instanceof ScanInProgressError) {
+                res.status(409).json({
+                    success: false,
+                    error: err.message,
+                    error_kind: 'scan_in_progress',
+                    elapsed_ms: err.elapsedMs,
+                });
+                return;
+            }
+            throw err;
+        }
     });
     /**
      * GET /api/bank-import/restore-check

@@ -26,8 +26,30 @@ export interface BankRestoreSummary {
     reconciled_balance: number;
     divergence_detected: boolean;
     divergence_message: string | null;
+    /** Direction of statement-level divergence:
+     *    'restore' — Opera's nk_recbal is LOWER than SAM's most-recent
+     *                reconciled closing. Likely an Opera DB restore
+     *                from backup. recover-from-restore can usually
+     *                auto-resolve by clearing stale reconciled flags.
+     *    'extra'   — Opera's nk_recbal is HIGHER than SAM's most-recent
+     *                reconciled closing. Someone reconciled entries
+     *                in Opera outside SAM, OR a SAM-imported statement
+     *                got posted to Opera but its is_reconciled flag
+     *                never set. No safe auto-recovery; needs review.
+     *    null      — no statement-level divergence detected. */
+    divergence_direction?: 'restore' | 'extra' | null;
     orphan_line_count: number;
     orphan_statement_count: number;
+    /** When > 0, bank_statement_transactions for this bank reference
+     *  parent import_ids that don't exist (the legacy-seeder orphan
+     *  bug). Fixable by /api/reconcile/bank/:code/repair-orphan-links
+     *  (dry-run preview via GET, apply via POST). The recover button
+     *  calls this automatically as part of the recovery sequence. */
+    orphan_link_count?: number;
+    /** When orphan_link_count > 0, how many of them can be relinked
+     *  by period+balance match. The remainder are archived rather
+     *  than relinked. */
+    orphan_link_repairable?: number;
     needs_recovery: boolean;
 }
 export interface RestoreCheckAllResponse {

@@ -37,7 +37,23 @@ export interface StatementCandidate {
     has_draft?: boolean;
     draft_updated_at?: string | null;
     deferred_count?: number;
-    extraction_status?: string;
+    /** Outcome of the most recent extraction attempt for this row.
+     *  - 'cached'    — balances loaded from extraction_cache, no Gemini call
+     *  - 'extracted' — fresh Gemini call succeeded
+     *  - 'failed'    — Gemini call returned a permanent error (key invalid,
+     *                  quota exhausted, PDF unreadable). Operator action needed.
+     *  - 'pending'   — Gemini call returned a transient error (rate limit,
+     *                  5xx). Will retry on next scan automatically.
+     *  - undefined   — never attempted yet (status='pending_extraction'). */
+    extraction_status?: 'cached' | 'extracted' | 'failed' | 'pending' | string;
+    /** Human-readable explanation of an extraction failure or pending
+     *  state. Surfaced in the FE so the operator knows WHY balances
+     *  are missing. Null when extraction_status is success or never-
+     *  attempted. */
+    extraction_error?: string | null;
+    /** ISO timestamp of the last extraction attempt. Lets the FE show
+     *  "last tried 2 min ago" instead of just a static failure. */
+    extraction_attempted_at?: string | null;
     import_sequence?: number;
 }
 export interface BankWithStatements {

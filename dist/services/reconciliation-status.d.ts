@@ -53,6 +53,13 @@ export interface ReconciliationStatus {
     sequential_gating_self?: boolean;
     opera_divergence_detected?: boolean;
     opera_divergence_message?: string | null;
+    /** 'restore' — Opera's reconciled balance is LOWER than SAM's
+     *  most-recent reconciled closing (Opera DB likely restored).
+     *  'extra'   — Opera's reconciled balance is HIGHER (someone
+     *  reconciled outside SAM, or a SAM-imported statement got
+     *  posted to Opera but its `is_reconciled` flag never set).
+     *  null      — no divergence detected. */
+    opera_divergence_direction?: 'restore' | 'extra' | null;
     stale_reconciled_statements?: StaleReconciledStatement[];
     error?: string;
 }
@@ -61,21 +68,41 @@ export interface OperaDivergenceRecoveryResult {
     success: boolean;
     cleared: number;
     cleared_imports?: StaleReconciledStatement[];
+    /** Set when the recovery took the "extra" direction path: number
+     *  of unreconciled SAM statements that got promoted to
+     *  is_reconciled=1 because their closing matched Opera's
+     *  current nk_recbal. */
+    promoted?: number;
+    promoted_imports?: StaleReconciledStatement[];
+    /** Recovery direction actually applied. */
+    direction?: 'restore' | 'extra' | 'none';
     error?: string;
 }
 /**
- * Find the SAM-reconciled statement whose closing balance matches
- * Opera's current `nk_recbal` (the anchor), then mark every statement
- * reconciled AFTER it as un-reconciled. This handles the legitimate
- * Opera-restore case without false positives from the natural
- * up-and-down movement of the reconciled balance between statements.
+ * Bidirectional Opera-divergence recovery.
  *
- * Refuses to act if no anchor matches — that's the corner case the
- * user flagged where Opera could coincidentally land on a value SAM
- * never saw. In that case the caller is told to investigate manually.
+ * Two scenarios, both handled symmetrically:
  *
- * Returns the rows that were cleared so the caller can list them in
- * the UI.
+ *   restore (SAM ahead of Opera) — Opera's nk_recbal is LOWER than
+ *     SAM's most-recent reconciled closing. Likely Opera DB
+ *     restored from backup. Find the SAM "anchor" statement whose
+ *     closing == nk_recbal and mark every statement reconciled
+ *     AFTER it as un-reconciled.
+ *
+ *   extra (Opera ahead of SAM) — Opera's nk_recbal is HIGHER than
+ *     SAM's most-recent reconciled closing. Either someone
+ *     reconciled in Opera Cashbook outside SAM, or (the common
+ *     case) a SAM reconcile workflow completed but failed to
+ *     flip is_reconciled=1 on the import row (silent UPDATE
+ *     failure or missing import_id at the FE). Find SAM
+ *     unreconciled statements whose closing chains forward to
+ *     Opera's nk_recbal, promote them to is_reconciled=1.
+ *
+ * Both directions refuse to act when there's no safe match
+ * (returns success=true, cleared=0 + a diagnostic message),
+ * so the operator can investigate the corner cases manually.
  */
-export declare function recoverFromOperaDivergence(operaDb: Knex, appDb: Knex, bankCode: string): Promise<OperaDivergenceRecoveryResult>;
+export declare function recoverFromOperaDivergence(operaDb: Knex, appDb: Knex, bankCode: string, opts?: {
+    user?: string;
+}): Promise<OperaDivergenceRecoveryResult>;
 //# sourceMappingURL=reconciliation-status.d.ts.map

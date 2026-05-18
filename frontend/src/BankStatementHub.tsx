@@ -945,7 +945,9 @@ export function BankStatementHub() {
                     ? 'Only click this if Opera was actually restored from a backup.'
                     : onlyOrphans
                       ? 'Clears tracking for posted lines whose Opera entries are gone.'
-                      : 'Reviews each affected bank — may report "manual review needed" for cases SAM cannot safely auto-resolve (e.g. Opera ahead of SAM).'}
+                      : onlyExtra
+                        ? 'Syncs SAM\'s reconciled-flag state to Opera\'s. Safe — only flips statements whose closing balance already matches Opera\'s nk_recbal.'
+                        : 'Repairs every affected bank — relinks orphan transactions, clears stale tracking, or syncs SAM to Opera as appropriate per bank. Any unresolvable cases are flagged for manual review with a clear next step.'}
                 </span>
               </div>
               {restoreRecoveryResult && (
