@@ -74,6 +74,17 @@ import type {
 import type { PdfExtractor } from './import-from-pdf.js';
 import type { EmailAttachmentProvider } from './preview-from-email.js';
 import { checkChainComplete } from './scan-chain-check.js';
+import {
+  classifyExtractionError,
+  CircuitBreaker,
+} from '../_shared/extraction-error.js';
+
+// Module-scoped Gemini circuit breaker. Opens after 3 consecutive
+// auth/quota failures (i.e. errors that won't get better by retrying
+// soon). When open, subsequent scans skip Gemini calls entirely and
+// surface the underlying error to the operator. Half-open after
+// 60s — a single test call goes through to detect recovery.
+const geminiBreaker = new CircuitBreaker('gemini', 3, 60_000);
 
 interface BankRow {
   bank_code: string;
@@ -1252,14 +1263,25 @@ export async function scanAllBanksFaithful(
   // pending until the operator clicks Analyse or re-scans.
   const MAX_EAGER_PER_BANK = 8;
   if (extractOnMiss && extractor && appDb) {
+    // Short-circuit when the breaker is open — recent permanent
+    // failures (e.g. revoked API key, quota exhausted) mean ALL
+    // pending statements should surface the same error, not
+    // hammer Gemini and silently fail one-at-a-time.
+    if (geminiBreaker.isOpen()) {
+      const reason = geminiBreaker.openReason();
+      logger.warn(`eager-extract: ${reason}`);
+      for (const bank of Object.values(banksWithStatements)) {
+        for (const s of bank.statements) {
+          if (s.opening_balance == null || s.closing_balance == null) {
+            (s as unknown as Record<string, unknown>).extraction_status = 'failed';
+            (s as unknown as Record<string, unknown>).extraction_error = reason;
+          }
+        }
+      }
+    } else {
     for (const bank of Object.values(banksWithStatements)) {
       // Eligible target = any statement missing balances with a
       // source we can read (folder path or email attachment).
-      // Previously this loop short-circuited on
-      // `bank.extraction_status !== 'incomplete'`, which is true
-      // whenever the FIRST statement has cached balances — leaving
-      // all the other un-extracted statements forever blank in the
-      // FE preview.
       const targets = bank.statements
         .filter(
           (s) =>
@@ -1275,60 +1297,95 @@ export async function scanAllBanksFaithful(
         `eager-extract[${bank.bank_code}]: extracting ${targets.length} target(s)`,
       );
       for (const target of targets) {
-      const filePath = (target.full_path || target.file_path) ?? null;
-      const fromEmail = target.source === 'email' && !filePath;
-      if (fromEmail && !emailAttachments) {
-        logger.debug(
-          `eager-extract[${bank.bank_code}]: email source but no attachment provider — skipping ${target.filename}`,
-        );
-        continue;
-      }
-      try {
-        let pdfBytes: Uint8Array | null = null;
-        if (filePath) {
-          pdfBytes = await readFile(filePath);
-        } else if (fromEmail && emailAttachments) {
-          const downloaded = await emailAttachments.fetchAttachment({
-            emailId: target.email_id!,
-            attachmentId: target.attachment_id!,
-          });
-          pdfBytes = downloaded?.bytes ?? null;
-        }
-        if (!pdfBytes) {
-          logger.debug(
-            `eager-extract[${bank.bank_code}]: no bytes for ${target.filename}`,
-          );
+        const filePath = (target.full_path || target.file_path) ?? null;
+        const fromEmail = target.source === 'email' && !filePath;
+        const now = new Date().toISOString();
+        (target as unknown as Record<string, unknown>).extraction_attempted_at =
+          now;
+        if (fromEmail && !emailAttachments) {
+          const msg = 'Email attachment provider not configured.';
+          (target as unknown as Record<string, unknown>).extraction_status =
+            'failed';
+          (target as unknown as Record<string, unknown>).extraction_error = msg;
           continue;
         }
-        const extracted = await extractor.extractFromPdf({
-          bytes: pdfBytes,
-          filename: target.filename,
-        });
-        if (
-          typeof extracted.opening_balance === 'number' &&
-          typeof extracted.closing_balance === 'number'
-        ) {
-          target.opening_balance = extracted.opening_balance;
-          target.closing_balance = extracted.closing_balance;
-          target.period_start = extracted.period_start ?? null;
-          target.period_end = extracted.period_end ?? null;
+        try {
+          let pdfBytes: Uint8Array | null = null;
+          if (filePath) {
+            pdfBytes = await readFile(filePath);
+          } else if (fromEmail && emailAttachments) {
+            const downloaded = await emailAttachments.fetchAttachment({
+              emailId: target.email_id!,
+              attachmentId: target.attachment_id!,
+            });
+            pdfBytes = downloaded?.bytes ?? null;
+          }
+          if (!pdfBytes) {
+            (target as unknown as Record<string, unknown>).extraction_status =
+              'failed';
+            (target as unknown as Record<string, unknown>).extraction_error =
+              'Could not read PDF bytes (file missing or attachment fetch failed).';
+            continue;
+          }
+          const extracted = await extractor.extractFromPdf({
+            bytes: pdfBytes,
+            filename: target.filename,
+          });
+          if (
+            typeof extracted.opening_balance === 'number' &&
+            typeof extracted.closing_balance === 'number'
+          ) {
+            target.opening_balance = extracted.opening_balance;
+            target.closing_balance = extracted.closing_balance;
+            target.period_start = extracted.period_start ?? null;
+            target.period_end = extracted.period_end ?? null;
+            (target as unknown as Record<string, unknown>).extraction_status =
+              'extracted';
+            (target as unknown as Record<string, unknown>).extraction_error =
+              null;
+            target.status = 'ready';
+            geminiBreaker.recordSuccess();
+          } else {
+            (target as unknown as Record<string, unknown>).extraction_status =
+              'failed';
+            (target as unknown as Record<string, unknown>).extraction_error =
+              'Extraction returned without an opening or closing balance — statement may be unreadable.';
+          }
+          // The Gemini extractor caches the RAW response itself.
+        } catch (extErr) {
+          const cls = classifyExtractionError(extErr);
+          geminiBreaker.recordFailure(extErr);
           (target as unknown as Record<string, unknown>).extraction_status =
-            'extracted';
-          target.status = 'ready';
-          // The Gemini extractor caches the RAW response itself
-          // (gemini-pdf-extractor.ts:cachePut). We deliberately do
-          // NOT write here — earlier versions wrote the PROCESSED
-          // BankTransaction[] shape, which loses money_in/money_out
-          // and corrupts subsequent reads (every txn shows £0.00).
-          void pdfBytes;
+            cls.transient ? 'pending' : 'failed';
+          (target as unknown as Record<string, unknown>).extraction_error =
+            cls.message;
+          logger.warn(
+            `eager-extract[${bank.bank_code}]: ${target.filename} → ${cls.kind} (${cls.transient ? 'transient — will retry next scan' : 'permanent — operator action needed'}): ${cls.cause ?? cls.message}`,
+          );
+          // If the breaker just opened, mark all remaining targets
+          // in this scan with the same error rather than hammering.
+          if (geminiBreaker.isOpen()) {
+            const reason = geminiBreaker.openReason();
+            for (const bank2 of Object.values(banksWithStatements)) {
+              for (const s of bank2.statements) {
+                if (
+                  s.opening_balance == null ||
+                  s.closing_balance == null
+                ) {
+                  const cur = (s as unknown as Record<string, unknown>)
+                    .extraction_status;
+                  if (cur !== 'extracted' && cur !== 'cached') {
+                    (s as unknown as Record<string, unknown>).extraction_status =
+                      'failed';
+                    (s as unknown as Record<string, unknown>).extraction_error =
+                      reason;
+                  }
+                }
+              }
+            }
+            break; // exit inner targets loop
+          }
         }
-      } catch (extErr) {
-        logger.warn(
-          `eager extraction failed for ${filePath}: ${
-            extErr instanceof Error ? extErr.message : String(extErr)
-          }`,
-        );
-      }
       } // end inner for-of targets
       // Re-evaluate the bank's extraction_status after all eager
       // extractions for this bank: complete when the first (next-in-
@@ -1337,6 +1394,25 @@ export async function scanAllBanksFaithful(
         bank.statements[0]?.opening_balance != null &&
         bank.statements[0]?.closing_balance != null;
       if (nextHasBalances) bank.extraction_status = 'complete';
+      // If the breaker is now open, stop scanning further banks.
+      if (geminiBreaker.isOpen()) break;
+    }
+    } // end else (breaker closed)
+  }
+
+  // Mark statements that have cached balances (i.e. were read from
+  // extraction_cache, not freshly extracted) with extraction_status
+  // 'cached' so the FE can show that distinction.
+  for (const bank of Object.values(banksWithStatements)) {
+    for (const s of bank.statements) {
+      const cur = (s as unknown as Record<string, unknown>).extraction_status;
+      if (
+        !cur &&
+        s.opening_balance != null &&
+        s.closing_balance != null
+      ) {
+        (s as unknown as Record<string, unknown>).extraction_status = 'cached';
+      }
     }
   }
 

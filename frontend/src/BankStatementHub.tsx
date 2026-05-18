@@ -24,8 +24,15 @@ interface StatementEntry {
   status: 'ready' | 'sequence_gap' | 'uncached' | 'pending' | 'already_processed' | 'imported' | 'pending_extraction';
   state?: 'ready' | 'in_progress' | 'imported' | 'reconciled' | 'pending_extraction' | 'sequence_gap' | 'already_processed';
   deferred_count?: number;
-  extraction_status?: 'extracted' | 'cached' | 'pending_extraction' | 'failed';
+  extraction_status?: 'extracted' | 'cached' | 'pending_extraction' | 'failed' | 'pending';
   extraction_failure_reason?: 'rate_limit' | 'extraction_error';
+  /** Human-readable explanation of the most recent extraction failure
+   *  or pending state. Populated by BE when extraction_status is
+   *  'failed' or 'pending'. */
+  extraction_error?: string | null;
+  /** ISO timestamp of the last extraction attempt — drives the
+   *  "last tried N min ago" subtext on failed/pending statements. */
+  extraction_attempted_at?: string | null;
   validation_note?: string;
   opening_balance?: number;
   closing_balance?: number;
@@ -2001,15 +2008,35 @@ function BankCard({ bank, expanded, onToggle, onProcess, onReconcile, onDeleteSt
         </div>
       </button>
 
-      {bank.extraction_status === 'incomplete' && (
-        <div className="px-4 py-2 bg-amber-50 border-t border-amber-200 text-sm text-amber-800 flex items-center gap-2">
-          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-          <span>
-            <strong>{bank.statements_extracted ?? 0}</strong> of <strong>{bank.statements_total ?? 0}</strong> statements extracted.
-            Re-scan to complete (Gemini quota may need a minute or two to recover).
-          </span>
-        </div>
-      )}
+      {bank.extraction_status === 'incomplete' && (() => {
+        // Pull a representative error from the first failed/pending
+        // statement so the operator knows WHY it's incomplete (key
+        // invalid vs quota vs rate-limit). All failures from a single
+        // scan are typically the same root cause.
+        const firstWithError = bank.statements.find(
+          s => (s.extraction_status === 'failed' || s.extraction_status === 'pending') && s.extraction_error
+        );
+        const reason = firstWithError?.extraction_error;
+        const isPermanent = firstWithError?.extraction_status === 'failed';
+        return (
+          <div className={`px-4 py-2 border-t text-sm flex items-start gap-2 ${
+            isPermanent
+              ? 'bg-red-50 border-red-200 text-red-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}>
+            <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-0.5">
+              <span>
+                <strong>{bank.statements_extracted ?? 0}</strong> of <strong>{bank.statements_total ?? 0}</strong> statements extracted.
+                {!reason && ' Re-scan to complete (Gemini quota may need a minute or two to recover).'}
+              </span>
+              {reason && (
+                <span className="text-xs">{reason}</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {importedCount > 0 && (
         <div className="px-4 py-2 text-sm text-amber-700 bg-amber-50 border-t border-amber-100">
@@ -2208,7 +2235,53 @@ function StatementRow({ stmt, isNext, onProcess, onReconcile, onDelete, onView, 
 
   const hasPartialReconcile = inProgressData && (inProgressData.reconciled_count || 0) > 0;
 
+  // Relative-time formatter for extraction_attempted_at — gives the
+  // operator "tried 3 min ago" instead of a static failed badge, so
+  // they can tell whether the breaker has had time to re-test.
+  const formatAttemptedAt = (iso?: string | null): string => {
+    if (!iso) return '';
+    const ts = Date.parse(iso);
+    if (Number.isNaN(ts)) return '';
+    const deltaSec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (deltaSec < 60) return `${deltaSec}s ago`;
+    if (deltaSec < 3600) return `${Math.round(deltaSec / 60)} min ago`;
+    if (deltaSec < 86400) return `${Math.round(deltaSec / 3600)}h ago`;
+    return `${Math.round(deltaSec / 86400)}d ago`;
+  };
+
   const statusBadge = useMemo(() => {
+    // Extraction-level failure trumps the generic status badge — this
+    // is what the operator needs to act on (rotate key, retry later).
+    if (stmt.extraction_status === 'failed') {
+      const tooltip = [
+        stmt.extraction_error ?? 'Extraction failed',
+        stmt.extraction_attempted_at
+          ? `Last tried ${formatAttemptedAt(stmt.extraction_attempted_at)}`
+          : null,
+      ].filter(Boolean).join(' — ');
+      return (
+        <span
+          className="px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 rounded-full cursor-help"
+          title={tooltip}>
+          Failed
+        </span>
+      );
+    }
+    if (stmt.extraction_status === 'pending') {
+      const tooltip = [
+        stmt.extraction_error ?? 'Retry queued',
+        stmt.extraction_attempted_at
+          ? `Last tried ${formatAttemptedAt(stmt.extraction_attempted_at)}`
+          : null,
+      ].filter(Boolean).join(' — ');
+      return (
+        <span
+          className="px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800 rounded-full cursor-help"
+          title={tooltip}>
+          Retrying
+        </span>
+      );
+    }
     switch (stmt.status) {
       case 'ready':
         return <span className="px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700 rounded-full">Ready</span>;
@@ -2227,7 +2300,7 @@ function StatementRow({ stmt, isNext, onProcess, onReconcile, onDelete, onView, 
       default:
         return <span className="px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-500 rounded-full">Pending</span>;
     }
-  }, [stmt.status, stmt.extraction_failure_reason, hasPartialReconcile, inProgressData]);
+  }, [stmt.status, stmt.extraction_status, stmt.extraction_error, stmt.extraction_attempted_at, stmt.extraction_failure_reason, hasPartialReconcile, inProgressData]);
 
   const formatBal = (val: number | undefined | null) => {
     if (val === null || val === undefined) return '—';
@@ -2298,6 +2371,15 @@ function StatementRow({ stmt, isNext, onProcess, onReconcile, onDelete, onView, 
           </div>
           {isImportedWithData && hasPartialImport && (
             <span className="text-[10px] text-orange-600">{inProgressData.transactions_imported}/{inProgressData.stored_transaction_count} posted</span>
+          )}
+          {(stmt.extraction_status === 'failed' || stmt.extraction_status === 'pending') && stmt.extraction_error && (
+            <span
+              className={`text-[10px] max-w-[240px] truncate ${
+                stmt.extraction_status === 'failed' ? 'text-red-600' : 'text-amber-700'
+              }`}
+              title={stmt.extraction_error}>
+              {stmt.extraction_error}
+            </span>
           )}
         </div>
       </td>
