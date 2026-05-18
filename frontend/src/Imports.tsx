@@ -4959,20 +4959,21 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const row = bankTransferModal.transaction.row;
     const txn = bankTransferModal.transaction;
     const source = bankTransferModal.source;
-    // Defensive: if modalDestBank wasn't set via dropdown selection
-    // but modalDestBankSearch exact-matches a bank code (operator
-    // paste / autofill / browser autocomplete that bypassed
-    // onChange), resolve it here at save time. Same rule as the
-    // input's onChange handler.
-    let destBankCode = modalDestBank;
-    if (!destBankCode && modalDestBankSearch) {
-      const trimmed = modalDestBankSearch.trim().toUpperCase();
-      const exactMatch = bankAccounts.find(
-        (b) =>
-          b.code.toUpperCase() === trimmed && b.code !== selectedBankCode,
-      );
-      if (exactMatch) destBankCode = exactMatch.code;
-    }
+    // Resolve via the same render-time logic the modal uses for
+    // its summary + canSave flag. Either modalDestBank (explicit
+    // dropdown selection) or modalDestBankSearch (typed code that
+    // exactly matches a bank). This keeps save behaviour identical
+    // to what the modal displayed at the moment Save was clicked.
+    const trimmedUC = modalDestBankSearch.trim().toUpperCase();
+    const typedMatch =
+      trimmedUC.length > 0
+        ? bankAccounts.find(
+            (b) =>
+              b.code.toUpperCase() === trimmedUC && b.code !== selectedBankCode,
+          )
+        : undefined;
+    const destBankCode = modalDestBank || typedMatch?.code || '';
+    if (!destBankCode) return; // shouldn't happen — canSave gates this
     const destBankName = bankAccounts.find(b => b.code === destBankCode)?.description || '';
 
     // Save the bank transfer detail with all fields
@@ -5046,9 +5047,26 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const amount = txn.amount;
     const isOutgoing = amount < 0;
 
-    // Use component-level state (initialized in openBankTransferModal)
-    const selectedDestBank = bankAccounts.find(b => b.code === modalDestBank);
-    const canSave = !!modalDestBank && !!modalReference && !!modalDate;
+    // Resolve the destination/source bank at render time from
+    // EITHER an explicit dropdown selection (`modalDestBank`) OR
+    // a typed code that exact-matches one of the bank accounts.
+    // Computing here means typing "BB010" immediately reflects
+    // in the summary + enables Save, even before any state
+    // propagation through onChange would have settled.
+    const typedTrimmedUC = modalDestBankSearch.trim().toUpperCase();
+    const typedMatch =
+      typedTrimmedUC.length > 0
+        ? bankAccounts.find(
+            (b) =>
+              b.code.toUpperCase() === typedTrimmedUC &&
+              b.code !== selectedBankCode,
+          )
+        : undefined;
+    const resolvedDestCode = modalDestBank || typedMatch?.code || '';
+    const selectedDestBank = bankAccounts.find(
+      (b) => b.code === resolvedDestCode,
+    );
+    const canSave = !!resolvedDestCode && !!modalReference && !!modalDate;
 
     return (
       <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -5294,11 +5312,11 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
             <div className="pt-2 border-t border-gray-200">
               <div className="flex justify-between items-center text-sm">
                 <span className="text-gray-600">From:</span>
-                <span className="font-medium">{isOutgoing ? selectedBankCode : modalDestBank || '?'}</span>
+                <span className="font-medium">{isOutgoing ? selectedBankCode : resolvedDestCode || '?'}</span>
               </div>
               <div className="flex justify-between items-center text-sm mt-1">
                 <span className="text-gray-600">To:</span>
-                <span className="font-medium">{isOutgoing ? modalDestBank || '?' : selectedBankCode}</span>
+                <span className="font-medium">{isOutgoing ? resolvedDestCode || '?' : selectedBankCode}</span>
               </div>
               <div className="flex justify-between items-center mt-2">
                 <span className="text-gray-600">Amount:</span>
