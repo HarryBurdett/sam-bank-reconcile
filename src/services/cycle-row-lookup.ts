@@ -30,9 +30,17 @@ export async function findExistingCycleRow(
   periodStart: string | null | undefined,
 ): Promise<CycleRow | null> {
   if (!periodStart) return null;
+  // Normalise to YYYY-MM-DD (first 10 chars). SQLite stores DATE
+  // flexibly — some rows have '2026-04-01', others have
+  // '2026-04-01T00:00:00' depending on whether knex passed a Date
+  // or a string at insert time. A strict equality WHERE would miss
+  // matches across the two formats. We compare the first 10 chars
+  // on both sides so the cycle lookup is format-agnostic.
+  const target = String(periodStart).slice(0, 10);
   const row = (await appDb('bank_statement_imports')
     .select('id', 'is_reconciled', 'period_end', 'closing_balance')
-    .where({ bank_code: bankCode, period_start: periodStart })
+    .where({ bank_code: bankCode })
+    .andWhereRaw('SUBSTR(period_start, 1, 10) = ?', [target])
     .orderBy('id', 'desc')
     .first()) as
     | { id: number; is_reconciled: number;

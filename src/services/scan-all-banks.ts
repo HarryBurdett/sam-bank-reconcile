@@ -74,6 +74,7 @@ import type {
 import type { PdfExtractor } from './import-from-pdf.js';
 import type { EmailAttachmentProvider } from './preview-from-email.js';
 import { checkChainComplete } from './scan-chain-check.js';
+import { findExistingCycleRow } from './cycle-row-lookup.js';
 import {
   classifyExtractionError,
   getGeminiBreaker,
@@ -1513,6 +1514,48 @@ export async function scanAllBanksFaithful(
         remaining.push(stmt);
         continue;
       }
+
+      // Cycle-aware pre-check: if there's already a reconciled
+      // bank_statement_imports row for this bank with the SAME
+      // period_start, this candidate is a duplicate or extension of
+      // a cycle that's already been processed end-to-end. Classify
+      // as already_processed and skip the chain check.
+      //
+      // Without this, the legacy chain-check (B) "opening_below_
+      // reconciled" was bypassed by openingUnblocksChain when the
+      // candidate's opening happened to match a reconciled
+      // statement's opening — leaving the candidate visible as
+      // "Ready" even though it represents a cycle that's already
+      // closed in Opera (closing == nk_recbal).
+      if (appDb && stmt.period_start) {
+        try {
+          const cycle = await findExistingCycleRow(
+            appDb,
+            bank.bank_code,
+            stmt.period_start,
+          );
+          if (cycle && cycle.is_reconciled === 1) {
+            stmt.status = 'already_processed';
+            (stmt as unknown as Record<string, unknown>).chain_reason =
+              'cycle_already_reconciled';
+            (stmt as unknown as Record<string, unknown>).skip_reason =
+              `Statement ${stmt.filename}: cycle starting ${stmt.period_start} ` +
+              `already reconciled in SAM (audit row id=${cycle.id}, closing ` +
+              `£${cycle.closing_balance?.toFixed(2) ?? '?'}).`;
+            nonCurrent.already_processed.push(stmt);
+            logger.info(
+              `cycle-check[${bank.bank_code}]: ${stmt.filename} → already_processed (cycle ${stmt.period_start} reconciled as import_id=${cycle.id})`,
+            );
+            continue;
+          }
+        } catch (cycleErr) {
+          logger.warn?.(
+            `cycle-check[${bank.bank_code}]: lookup failed for ${stmt.filename}: ` +
+              `${cycleErr instanceof Error ? cycleErr.message : String(cycleErr)}`,
+          );
+        }
+      }
+
       const result = checkChainComplete({
         openingBalance: stmt.opening_balance,
         closingBalance: stmt.closing_balance,
