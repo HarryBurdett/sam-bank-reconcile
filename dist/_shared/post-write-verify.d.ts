@@ -4,7 +4,7 @@
  * Two-phase verification of a multi-table Opera posting:
  *
  *   (A) `assert*` helpers run INSIDE the trx that just did the
- *       INSERTs. They use `WITH (NOLOCK)` so they take no shared
+ *       INSERTs. Most use `WITH (NOLOCK)` so they take no shared
  *       locks (within our own session, NOLOCK still reads our own
  *       uncommitted inserts — see SQL Server isolation semantics).
  *       A mismatch throws `PostingVerificationError`, which the
@@ -20,11 +20,16 @@
  *       Opera manually before re-running").
  *
  * Lock surface: zero new locks. NOLOCK is used throughout
- * specifically so concurrent Opera UI activity is never blocked
- * by our verification step. Concurrency safety for the actual
- * writes is handled elsewhere — `incrementAtypeEntry` serialises
- * the entry-number allocator with UPDLOCK+ROWLOCK on atype, and
- * balance updates use UPDLOCK+ROWLOCK with additive UPDATE.
+ * EXCEPT in `assertAentryAtran`, which had its NOLOCK hints
+ * dropped for sqlite-test compatibility (perf-only — the function
+ * reads only our own session's inserts within the same trx, which
+ * default isolation handles fine). The other helpers still use
+ * NOLOCK specifically so concurrent Opera UI activity is never
+ * blocked by our verification step. Concurrency safety for the
+ * actual writes is handled elsewhere — `incrementAtypeEntry`
+ * serialises the entry-number allocator with UPDLOCK+ROWLOCK on
+ * atype, and balance updates use UPDLOCK+ROWLOCK with additive
+ * UPDATE.
  */
 import type { Knex } from 'knex';
 export declare class PostingVerificationError extends Error {
@@ -43,6 +48,14 @@ export declare class PostingVerificationError extends Error {
  * Joins by `ae_entry = at_entry AND ae_acnt = at_acnt` — the
  * cashbook primary key. Mismatch on count, value, or fingerprint
  * throws.
+ *
+ * For single-line postings (default), expects exactly 1 atran row
+ * and validates atran.at_value individually. For multi-line entries
+ * (e.g. recurring with N detail lines), pass expectedAtranCount = N
+ * and the helper validates that:
+ *   - Row count matches expectedAtranCount
+ *   - Sum of atran.at_value across all rows equals expectedSignedPence
+ *   - All rows have uniform at_type and at_pstdate (Opera requirement)
  */
 export declare function assertAentryAtran(trx: Knex, opts: {
     entryNumber: string;
@@ -51,6 +64,11 @@ export declare function assertAentryAtran(trx: Knex, opts: {
     expectedAtType: number;
     expectedDate: string;
     expectedReferPrefix?: string;
+    /**
+     * Number of atran rows expected for this entry. Default 1 = current
+     * single-line behaviour. Multi-line callers pass `lines.length`.
+     */
+    expectedAtranCount?: number;
 }): Promise<void>;
 /**
  * Assert that exactly one ledger row (stran for sales, ptran for

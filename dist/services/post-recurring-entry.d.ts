@@ -16,17 +16,11 @@
  *   2. Validates state (active, supported ae_type, not exhausted).
  *   3. Determines the posting date (override or ae_nxtpost).
  *   4. Runs period validation (closed period blocks the post).
- *   5. For single-line: builds a PreparedTransaction in the same
- *      shape the bank-import executor uses, then calls the internal
- *      post* helpers exported from import-posting-executor.ts. After
+ *   5. Builds a PreparedEntryHeader + PreparedEntryLine[] array (one
+ *      per arline row) and calls postOperaCashbookEntry — the unified
+ *      1..N-lines core helper shared with the bank-import flow. After
  *      a successful post, bumps arhead.ae_posted++ and advances
  *      ae_nxtpost — atomic with the post via the same transaction.
- *   6. For multi-line: returns a clear error directing the operator
- *      to Opera. Multi-line recurring journals (multiple
- *      analytical hits under one aentry header) need dedicated
- *      multi-atran-per-aentry logic that doesn't exist in our
- *      single-line post* helpers yet. Surfaced as an honest decline
- *      rather than silent miscoding.
  *
  * Operator-facing flow: BankStatementHub's "Post recurring entries
  * now" button calls POST /api/recurring-entries/post with a list of

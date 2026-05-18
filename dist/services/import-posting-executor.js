@@ -201,441 +201,41 @@ async function postOneTransaction(args) {
             `(row ${txn.index}, name='${txn.name}', amount=${txn.amount}). ` +
             `Override required to pass 'account' for matched rows.`);
     }
-    const dir = deriveTxnDirection(txn.action);
-    // ax_source / nt_posttyp discriminators — legacy writes 'S' for sales
-    // posts (opera_sql_import.py:import_sales_receipt anoml ax_source='S';
-    // ntran nt_posttyp='S') and 'P' for purchase posts (import_purchase_payment
-    // anoml ax_source='P'; ntran nt_posttyp='P'). The pre-port TS hardcoded
-    // 'A' / 'S' regardless of ledger — confirmed wrong by 2026-05-14 audit.
-    const axSource = dir.ledger === 'sales' ? 'S' : 'P';
-    const ntPosttyp = dir.ledger === 'sales' ? 'S' : 'P';
-    const { code: cbtype, desc: cbtypeDesc } = await resolveCbtype(trx, txn.cbtype, dir.receiptOrPayment);
-    // Payment-method string written to stran.st_custref / ptran.pt_supref /
-    // anoml.ax_comment / ntran.nt_trnref. Snapshot e.g. 'BACS' / 'Cheque
-    // Receipt'. Legacy passes the cbtype description through (opera_sql_
-    // import.py:2458, :3306). Slice to 20 to match column width.
-    const paymentMethod = cbtypeDesc.slice(0, 20);
-    const at_type = AT_TYPE_FOR_ACTION[txn.action];
-    const now = nowParts();
-    const { period, year } = await getPeriodForDate(trx, txn.date);
-    const party = dir.ledger === 'sales'
-        ? await loadCustomerInfo(trx, txn.matchedAccount, defaults.sl_control)
-        : await loadSupplierInfo(trx, txn.matchedAccount, defaults.pl_control);
+    if (txn.action === 'bank_transfer') {
+        throw new Error(`postOneTransaction does not handle bank_transfer — use postBankTransfer`);
+    }
+    if (txn.action === 'nominal_payment' || txn.action === 'nominal_receipt') {
+        throw new Error(`postOneTransaction does not handle nominal entries — use postNominalEntry`);
+    }
+    // Translate the legacy single-line PreparedTransaction shape into the
+    // unified PreparedEntryHeader + PreparedEntryLine[] shape consumed by
+    // postOperaCashbookEntry. Single-line input → one-element lines array.
     const absAmount = Math.abs(Number(txn.amount));
-    const signedPence = dir.direction === 'in' ? pence(absAmount) : -pence(absAmount);
-    const entryNumber = await incrementAtypeEntry(trx, cbtype);
-    const aentryId = await getNextId(trx, 'aentry');
-    const journal = await getNextJournal(trx, 1);
-    const atranId = await getNextId(trx, 'atran');
-    const ledgerId = await getNextId(trx, dir.ledger === 'sales' ? 'stran' : 'ptran');
-    const sharedUnique = generateOperaUniqueId();
-    const fingerprint = generateImportFingerprint(txn.name || txn.memo || party.name, txn.amount, txn.date);
-    // 1. aentry (single-line entry, complete=1 always for line-by-line imports)
-    const reference = (txn.reference ?? '').slice(0, 20) || party.name.slice(0, 20);
-    await trx.raw(`INSERT INTO aentry (
-      id, ae_acnt, ae_cntr, ae_cbtype, ae_entry, ae_reclnum,
-      ae_lstdate, ae_frstat, ae_tostat, ae_statln, ae_entref,
-      ae_value, ae_recbal, ae_remove, ae_tmpstat, ae_complet,
-      ae_postgrp, sq_crdate, sq_crtime, sq_cruser, ae_comment,
-      ae_payid, ae_batchid, ae_brwptr, datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', ?, ?, 0,
-      ?, 0, 0, 0, ?,
-      ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMP', ?,
-      0, 0, '  ', ?, ?, 1
-    )`, [
-        aentryId,
-        bankCode,
-        cbtype,
-        entryNumber,
-        txn.date,
-        reference,
-        signedPence,
-        now.date,
-        now.time.slice(0, 8),
-        txn.memo.slice(0, 40),
-        now.iso,
-        now.iso,
-    ]);
-    // 2. atran
-    await trx.raw(`INSERT INTO atran (
-      id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
-      at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
-      at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
-      at_account, at_name, at_comment, at_payee, at_payname,
-      at_sort, at_number, at_remove, at_chqprn, at_chqlst,
-      at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
-      at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
-      at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
-      at_bsref, at_bsname, at_vattycd, at_project, at_job,
-      at_bic, at_iban, at_memo, datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', ?, ?, 'BANK_IMP',
-      ?, ?, ?, 1, ?,
-      0, '   ', 1.0, 0, 2,
-      ?, ?, ?, '        ', '',
-      '        ', '         ', 0, 0, 0,
-      0, 0, '', 0, 0,
-      0, 0, ?, 0, '0       ',
-      ?, 'I', 0, ' ', '      ',
-      '', '', '  ', '        ', '        ',
-      '', '', ?, ?, ?, 1
-    )`, [
-        atranId,
-        bankCode,
-        cbtype,
-        entryNumber,
-        at_type,
-        txn.date,
-        txn.date,
-        signedPence,
-        party.account,
-        party.name.slice(0, 35),
-        txn.memo.slice(0, 35),
-        sharedUnique,
-        // at_refer = operator's bank reference (Opera's stran/ptran browse
-        // shows this column). Pre-port TS stamped the BKIMP fingerprint
-        // here, which clobbered the user-visible reference. Duplicate
-        // detection keys off bank/date/amount/at_type — at_refer was
-        // never load-bearing for dup checking. Audit 2026-05-14.
-        reference.slice(0, 20),
-        txn.memo.slice(0, 200),
-        now.iso,
-        now.iso,
-    ]);
-    // 3. Ledger row (stran for sales, ptran for purchases) — pounds
-    if (dir.ledger === 'sales') {
-        // stran: receipts stored negative (reduce balance); refunds positive (increase)
-        const stValue = dir.direction === 'in' ? -absAmount : absAmount;
-        const stType = dir.direction === 'in' ? 'R' : 'F'; // R=receipt, F=refund
-        await trx.raw(`INSERT INTO stran (
-        id, st_account, st_trdate, st_trref, st_custref, st_trtype,
-        st_trvalue, st_vatval, st_trbal, st_paid, st_crdate,
-        st_advance, st_memo, st_payflag, st_set1day, st_set1,
-        st_set2day, st_set2, st_dueday, st_fcurr, st_fcrate,
-        st_fcdec, st_fcval, st_fcbal, st_fcmult, st_dispute,
-        st_edi, st_editx, st_edivn, st_txtrep, st_binrep,
-        st_advallc, st_cbtype, st_entry, st_unique, st_region,
-        st_terr, st_type, st_fadval, st_delacc, st_euro,
-        st_payadvl, st_eurind, st_origcur, st_fullamt, st_fullcb,
-        st_fullnar, st_cash, st_rcode, st_ruser, st_revchrg,
-        st_nlpdate, st_adjsv, st_fcvat, st_taxpoin,
-        datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?,
-        ?, 0, ?, ' ', ?,
-        'N', ?, 0, 0, 0,
-        0, 0, ?, '   ', 0,
-        0, 0, 0, 0, 0,
-        0, 0, 0, '', 0,
-        0, ?, ?, ?, ?,
-        ?, ?, 0, ?, 0,
-        0, ' ', '   ', 0, '  ',
-        '          ', 0, '    ', '        ', 0,
-        ?, 0, 0, ?,
-        ?, ?, 1
-      )`, [
-            ledgerId,
-            party.account,
-            txn.date,
-            reference,
-            // st_custref: payment-method description from atype (e.g. 'BACS',
-            // 'Cheque Receipt'). Pre-port TS wrote ''. Legacy opera_sql_
-            // import.py:2458 writes `{payment_method[:20]}`. Snapshot
-            // cashbook_sales_receipt_-_bacs_*.json: st_custref='BACS'.
-            paymentMethod,
-            stType,
-            stValue,
-            stValue,
-            txn.date,
-            txn.memo.slice(0, 200),
-            txn.date,
-            cbtype,
-            entryNumber,
-            sharedUnique,
-            party.region.slice(0, 3),
-            party.terr.slice(0, 3),
-            party.type.slice(0, 3),
-            party.account,
-            txn.date,
-            txn.date,
-            now.iso,
-            now.iso,
-        ]);
-        await trx.raw(`UPDATE sname WITH (ROWLOCK)
-       SET sn_currbal = ISNULL(sn_currbal, 0) + ?,
-           sn_nextpay = ISNULL(sn_nextpay, 0) + 1,
-           datemodified = GETDATE()
-       WHERE RTRIM(sn_account) = ?`, [stValue, party.account]);
-    }
-    else {
-        // ptran sign convention (purchase ledger):
-        //   payment:  pt_trvalue = -amount (negative) — reduces balance owed
-        //   refund:   pt_trvalue = +amount (positive) — increases balance owed
-        // Faithful to legacy opera_sql_import.py:3443 (`{-amount_pounds}` for
-        // purchase_payment) and to the canonical snapshot row in
-        // transaction-library/opera_se/purchase_ledger_purchase_payment_bacs_...json
-        // (added_rows[0].pt_trvalue = -599.0 for a £599 payment).
-        //
-        // The corresponding pname.pn_currbal UPDATE below uses `+ ptValue`
-        // (i.e. adds the signed value) — matching legacy `pn_currbal - amount`
-        // because ptValue is already negative for a payment.
-        const ptValue = dir.direction === 'out' ? -absAmount : absAmount;
-        const ptType = dir.direction === 'out' ? 'P' : 'F';
-        // ptran INSERT — 44 columns matching the canonical purchase_payment
-        // row in `~/opera-knowledge-ref/.../transaction-library/opera_se/
-        // purchase_ledger_purchase_payment_bacs_20260401_144136.json`.
-        // Every column name and literal default comes from that snapshot's
-        // added_rows[0]; allocation-touched fields (pt_paid, pt_payflag,
-        // pt_trbal) take their INSERT-time value from the same snapshot's
-        // modified_rows[0].changes.<col>.before. See design doc:
-        // docs/superpowers/specs/2026-05-14-faithful-ptran-insert-design.md
-        await trx.raw(`INSERT INTO ptran (
-        id, pt_account, pt_trdate, pt_trref, pt_supref, pt_trtype,
-        pt_trvalue, pt_vatval, pt_trbal, pt_paid, pt_crdate,
-        pt_advance, pt_payflag, pt_set1day, pt_set1, pt_set2day,
-        pt_set2, pt_held, pt_fcurr, pt_fcrate, pt_fcdec,
-        pt_fcval, pt_fcbal, pt_adval, pt_fadval, pt_fcmult,
-        pt_cbtype, pt_entry, pt_unique, pt_suptype, pt_euro,
-        pt_payadvl, pt_origcur, pt_eurind, pt_revchrg, pt_nlpdate,
-        pt_adjsv, pt_vatset1, pt_vatset2, pt_pyroute, pt_fcvat,
-        datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?,
-        ?, 0, ?, ' ', ?,
-        'N', 0, 0, 0, 0,
-        0, ' ', '   ', 0, 0,
-        0, 0, 0, 0, 0,
-        ?, ?, ?, '   ', 0,
-        0, '   ', ' ', 0, ?,
-        0, 0, 0, 0, 0,
-        ?, ?, 1
-      )`, [
-            ledgerId, // id
-            party.account, // pt_account
-            txn.date, // pt_trdate
-            reference, // pt_trref
-            paymentMethod, // pt_supref (legacy: payment method from cbtype)
-            ptType, // pt_trtype ('P' or 'F')
-            ptValue, // pt_trvalue
-            ptValue, // pt_trbal (= pt_trvalue at INSERT — full unallocated balance)
-            txn.date, // pt_crdate
-            cbtype, // pt_cbtype
-            entryNumber, // pt_entry
-            sharedUnique, // pt_unique
-            txn.date, // pt_nlpdate
-            now.iso, // datecreated
-            now.iso, // datemodified
-        ]);
-        await trx.raw(`UPDATE pname WITH (ROWLOCK)
-       SET pn_currbal = ISNULL(pn_currbal, 0) + ?,
-           pn_nextpay = ISNULL(pn_nextpay, 0) + 1,
-           datemodified = GETDATE()
-       WHERE RTRIM(pn_account) = ?`, [ptValue, party.account]);
-    }
-    // 4. nbank balance update — signed pounds (in for receipts, out for payments)
-    const bankDeltaPounds = dir.direction === 'in' ? absAmount : -absAmount;
-    await updateNbankBalance(trx, bankCode, bankDeltaPounds);
-    // 5. ntran debit/credit pair + nacnt updates + njmemo — GATED on
-    // decision.postToNominal. When RTU is OFF (or the decision builder
-    // chose batch-transfer for any other reason), skip ntran/nacnt and
-    // anoml will carry ax_done=' ' so the nightly NL-transfer job picks
-    // the entry up later. Matches legacy opera_sql_import.py:2334.
-    const bankNtranValue = bankDeltaPounds;
-    const controlValue = -bankNtranValue;
-    if (decision.postToNominal) {
-        const bankType = (await getNacntType(trx, bankCode)) ??
-            { na_type: 'B ', na_subt: 'BC' };
-        const controlType = (await getNacntType(trx, party.controlAccount)) ??
-            { na_type: 'B ', na_subt: 'BB' };
-        const ntranIdStart = await getNextId(trx, 'ntran', 2);
-        // nt_pstid: distinct unique ID per ntran leg. Legacy generates
-        // multiple unique IDs from OperaUniqueIdGenerator (opera_sql_import.py:
-        // 2253).
-        const ntranPstidBank = generateOperaUniqueId();
-        const ntranPstidControl = generateOperaUniqueId();
-        const ntranComment = ((txn.memo || reference) || '').padEnd(50).slice(0, 50);
-        // nt_trnref: party-name + payment-method + (RT) marker. Legacy:
-        //   f"{party_name[:30]:<30}{payment_method:<10}(RT)     "
-        const ntranTrnref = (party.name.slice(0, 30).padEnd(30) +
-            cbtypeDesc.slice(0, 10).padEnd(10) +
-            '(RT)     ').slice(0, 50);
-        // Bank leg (debit when receipt, credit when payment)
-        await trx.raw(`INSERT INTO ntran (
-        id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
-        nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
-        nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
-        nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
-        nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
-        nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
-        nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
-        nt_distrib, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, ?,
-        '', 'BANK_IMP', 'A', ?, ?,
-        ?, ?, ?, ?, 0,
-        0, 0, '   ', 0, 0,
-        0, 0, 'I', '', '        ',
-        '        ', '${ntPosttyp}', 0, ?, 0,
-        0, 0, 0, 0, 0,
-        0, ?, ?, 1
-      )`, [
-            ntranIdStart,
-            bankCode,
-            bankType.na_type,
-            bankType.na_subt,
-            journal,
-            ntranComment,
-            ntranTrnref,
-            txn.date,
-            bankNtranValue,
-            year,
-            period,
-            ntranPstidBank,
-            now.iso,
-            now.iso,
-        ]);
-        await updateNacntBalance(trx, bankCode, bankNtranValue, { period, year });
-        // Control leg (opposite sign)
-        await trx.raw(`INSERT INTO ntran (
-        id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
-        nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
-        nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
-        nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
-        nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
-        nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
-        nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
-        nt_distrib, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, ?,
-        '', 'BANK_IMP', 'A', ?, ?,
-        ?, ?, ?, ?, 0,
-        0, 0, '   ', 0, 0,
-        0, 0, 'I', '', '        ',
-        '        ', '${ntPosttyp}', 0, ?, 0,
-        0, 0, 0, 0, 0,
-        0, ?, ?, 1
-      )`, [
-            ntranIdStart + 1,
-            party.controlAccount,
-            controlType.na_type,
-            controlType.na_subt,
-            journal,
-            ntranComment,
-            ntranTrnref,
-            txn.date,
-            controlValue,
-            year,
-            period,
-            ntranPstidControl,
-            now.iso,
-            now.iso,
-        ]);
-        await updateNacntBalance(trx, party.controlAccount, controlValue, {
-            period,
-            year,
-        });
-        await insertNjmemo(trx, journal, 'Cashbook Ledger Transfer (RT)');
-    }
-    // 6. anoml debit/credit pair (transfer file)
-    const anomlIdStart = await getNextId(trx, 'anoml', 2);
-    // ax_comment: party-name + payment-method suffix. Legacy:
-    //   f"{customer_name[:30]:<30}{payment_method}"
-    // Snapshot e.g. 'Adams Light Engineering Ltd   BACS'. Pre-port TS
-    // hardcoded 'BankImport' suffix.
-    const anomlComment = (party.name.slice(0, 30).padEnd(30) + paymentMethod).slice(0, 40);
-    // ax_done: 'Y' if posted to NL (decision.postToNominal=true) else
-    // ' ' (pending nightly NL transfer). Faithful port of legacy
-    // done_flag = posting_decision.transfer_file_done_flag.
-    const doneFlag = decision.transferFileDoneFlag;
-    await trx.raw(`INSERT INTO anoml (
-      id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
-      ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
-      ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
-      datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', '${axSource}', ?, ?, ?,
-      ?, ?, '   ', 0, 0, 0, 0,
-      'I', ?, '        ', '        ', ?, ?,
-      ?, ?, 1
-    )`, [
-        anomlIdStart,
-        bankCode,
-        txn.date,
-        bankNtranValue,
-        reference,
-        anomlComment,
-        doneFlag,
-        sharedUnique,
-        journal,
-        txn.date,
-        now.iso,
-        now.iso,
-    ]);
-    await trx.raw(`INSERT INTO anoml (
-      id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
-      ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
-      ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
-      datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', '${axSource}', ?, ?, ?,
-      ?, ?, '   ', 0, 0, 0, 0,
-      'I', ?, '        ', '        ', ?, ?,
-      ?, ?, 1
-    )`, [
-        anomlIdStart + 1,
-        party.controlAccount,
-        txn.date,
-        controlValue,
-        reference,
-        anomlComment,
-        doneFlag,
-        sharedUnique,
-        journal,
-        txn.date,
-        now.iso,
-        now.iso,
-    ]);
-    // --- Phase A verification (in-trx, NOLOCK reads of our own writes) ---
-    // Throws PostingVerificationError on mismatch → trx rolls back.
-    await assertAentryAtran(trx, {
-        entryNumber,
-        bankAccount: bankCode,
-        expectedSignedPence: signedPence,
-        expectedAtType: at_type,
-        expectedDate: txn.date,
-        expectedReferPrefix: reference.slice(0, 20),
+    const header = {
+        date: txn.date,
+        action: txn.action,
+        cbtype: txn.cbtype,
+        reference: txn.reference,
+        comment: txn.memo || txn.name || '',
+        inputBy: 'BANK_IMP',
+        memo: txn.memo,
+        name: txn.name,
+    };
+    const line = {
+        atAccount: txn.matchedAccount,
+        absPence: Math.round(absAmount * 100),
+        vatCode: txn.vatCode,
+        vatPence: 0, // bank-import doesn't pre-compute VAT pence; core
+        // helper derives it via getVatRateForCode when vatCode is set.
+        reference: txn.reference ?? '',
+        comment: txn.memo ?? '',
+        project: '',
+        department: '',
+        netOverride: txn.netAmount,
+    };
+    return postOperaCashbookEntry({
+        trx, bankCode, header, lines: [line], defaults, decision,
     });
-    await assertLedgerRow(trx, {
-        ledger: dir.ledger,
-        entryNumber,
-        cbtype,
-        account: party.account,
-        expectedValuePounds: dir.ledger === 'sales'
-            ? // stran: receipts negative, refunds positive (reduces / increases customer balance)
-                dir.direction === 'in' ? -absAmount : absAmount
-            : // ptran: payments negative, refunds positive (reduces / increases supplier balance)
-                dir.direction === 'out' ? -absAmount : absAmount,
-    });
-    // Only verify ntran pair if we actually wrote one. When postToNominal
-    // is false (RTU=OFF), the entry lives in anoml only awaiting nightly
-    // NL transfer — there's nothing to balance-check on ntran.
-    if (decision.postToNominal) {
-        await assertBalancedPair(trx, {
-            table: 'ntran',
-            journal,
-            expectedCount: 2,
-            entryNumber,
-        });
-    }
-    await assertBalancedPair(trx, {
-        table: 'anoml',
-        journal,
-        expectedCount: 2,
-        entryNumber,
-    });
-    return { entry_number: entryNumber, fingerprint };
 }
 /**
  * Read ztax for one VAT code + trantyp, returning the date-effective
@@ -726,533 +326,38 @@ async function loadNominalName(trx, account) {
 // Nominal entry (at_type=1 payment, at_type=2 receipt)
 // ---------------------------------------------------------------------
 async function postNominalEntry(args) {
-    const { trx, bankCode, txn, decision } = args;
+    const { trx, bankCode, txn, defaults, decision } = args;
     if (!txn.matchedAccount) {
         throw new Error('Missing nominal account for nominal entry');
     }
-    const isReceipt = txn.action === 'nominal_receipt';
-    const { code: cbtype, desc: cbtypeDesc } = await resolveCbtype(trx, txn.cbtype, isReceipt ? 'R' : 'P');
-    const paymentMethod = cbtypeDesc.slice(0, 20);
-    const at_type = AT_TYPE_FOR_ACTION[txn.action];
-    const now = nowParts();
-    const { period, year } = await getPeriodForDate(trx, txn.date);
+    if (txn.action !== 'nominal_payment' && txn.action !== 'nominal_receipt') {
+        throw new Error(`postNominalEntry does not handle ${txn.action} — use postOneTransaction`);
+    }
     const absAmount = Math.abs(Number(txn.amount));
-    const signedPence = isReceipt ? pence(absAmount) : -pence(absAmount);
-    // --- VAT lookup (legacy opera_sql_import.py:3741-3758) ---
-    // Payments use input/purchase VAT codes ('P'); receipts use output/
-    // sales ('S'). Failure (lookup error or unknown code) is non-fatal:
-    // hasVat stays false and we post the legacy 1-atran / 2-anoml flow.
-    const vatType = isReceipt ? 'S' : 'P';
-    const vatLookup = txn.vatCode
-        ? await getVatRateForCode(trx, txn.vatCode, vatType, txn.date)
-        : null;
-    const hasVat = !!(vatLookup &&
-        vatLookup.rate > 0 &&
-        vatLookup.nominal &&
-        txn.vatCode);
-    // gross/net/vat in POUNDS (atran/anoml signed-pence done at INSERT
-    // time). Formula matches legacy line 3756:
-    //   vat = round(gross * rate / (100 + rate), 2)
-    //   net = gross - vat
-    const vatPounds = hasVat
-        ? Math.round(((absAmount * vatLookup.rate) / (100 + vatLookup.rate)) * 100) /
-            100
-        : 0;
-    const netPounds = hasVat ? Math.round((absAmount - vatPounds) * 100) / 100 : absAmount;
-    const vatNominalAccount = hasVat ? vatLookup.nominal : '';
-    const entryNumber = await incrementAtypeEntry(trx, cbtype);
-    const aentryId = await getNextId(trx, 'aentry');
-    const journal = await getNextJournal(trx, 1);
-    // atran allocation: 2 IDs when VAT-split, else 1. Matches legacy
-    // multi-ID allocation pattern (opera_sql_import.py:3826).
-    const atranIdStart = await getNextId(trx, 'atran', hasVat ? 2 : 1);
-    const atranIdNet = atranIdStart;
-    const atranIdVat = hasVat ? atranIdStart + 1 : null;
-    const sharedUnique = generateOperaUniqueId();
-    // When VAT splits the atran, each leg gets its own ax_unique to match
-    // its corresponding anoml row (legacy:3848,3877 + 4050,4067,4085).
-    const sharedUniqueVat = hasVat ? generateOperaUniqueId() : null;
-    const fingerprint = generateImportFingerprint(txn.name || txn.memo || txn.matchedAccount, txn.amount, txn.date);
-    const reference = (txn.reference ?? '').slice(0, 20) || (txn.name ?? '').slice(0, 20);
-    // For atran at_name and anoml ax_comment, legacy reads the nominal
-    // account description from nacnt (opera_sql_import.py:3656). Only
-    // looked up on the VAT branch — non-VAT flow preserves existing
-    // behaviour (uses txn.name).
-    const nominalName = hasVat ? await loadNominalName(trx, txn.matchedAccount) : '';
-    // 1. aentry
-    await trx.raw(`INSERT INTO aentry (
-      id, ae_acnt, ae_cntr, ae_cbtype, ae_entry, ae_reclnum,
-      ae_lstdate, ae_frstat, ae_tostat, ae_statln, ae_entref,
-      ae_value, ae_recbal, ae_remove, ae_tmpstat, ae_complet,
-      ae_postgrp, sq_crdate, sq_crtime, sq_cruser, ae_comment,
-      ae_payid, ae_batchid, ae_brwptr, datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', ?, ?, 0,
-      ?, 0, 0, 0, ?,
-      ?, 0, 0, 0, 1,
-      0, ?, ?, 'BANK_IMP', ?,
-      0, 0, '  ', ?, ?, 1
-    )`, [
-        aentryId,
-        bankCode,
-        cbtype,
-        entryNumber,
-        txn.date,
-        reference,
-        signedPence,
-        now.date,
-        now.time.slice(0, 8),
-        txn.memo.slice(0, 40),
-        now.iso,
-        now.iso,
-    ]);
-    // 2. atran — single row (no VAT) OR two rows (NET + VAT split).
-    if (!hasVat) {
-        await trx.raw(`INSERT INTO atran (
-        id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
-        at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
-        at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
-        at_account, at_name, at_comment, at_payee, at_payname,
-        at_sort, at_number, at_remove, at_chqprn, at_chqlst,
-        at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
-        at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
-        at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
-        at_bsref, at_bsname, at_vattycd, at_project, at_job,
-        at_bic, at_iban, at_memo, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, 'BANK_IMP',
-        ?, ?, ?, 1, ?,
-        0, '   ', 1.0, 0, 2,
-        ?, ?, ?, '        ', '',
-        '        ', '         ', 0, 0, 0,
-        0, 0, '', 0, 0,
-        0, 0, ?, 0, '0       ',
-        ?, 'I', 0, ' ', '      ',
-        '', '', '  ', '        ', '        ',
-        '', '', ?, ?, ?, 1
-      )`, [
-            atranIdNet,
-            bankCode,
-            cbtype,
-            entryNumber,
-            at_type,
-            txn.date,
-            txn.date,
-            signedPence,
-            txn.matchedAccount,
-            (txn.name || '').slice(0, 35),
-            txn.memo.slice(0, 35),
-            sharedUnique,
-            reference.slice(0, 20),
-            txn.memo.slice(0, 200),
-            now.iso,
-            now.iso,
-        ]);
-    }
-    else {
-        // VAT-split atran. Legacy opera_sql_import.py:3818-3883.
-        // Line 1 = NET amount to nominal_account (at_cntr='    ').
-        // Line 2 = VAT amount to vat_nominal_account (at_cntr='   1',
-        //          marking the second analysis line — matches Opera
-        //          snapshot row id=17744 in cashbook_nominal_payment
-        //          _20260401_135214.json).
-        const netSignedPence = isReceipt ? pence(netPounds) : -pence(netPounds);
-        const vatSignedPence = isReceipt ? pence(vatPounds) : -pence(vatPounds);
-        // atran row 1 — NET to nominal_account. Legacy:3829-3854.
-        await trx.raw(`INSERT INTO atran (
-        id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
-        at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
-        at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
-        at_account, at_name, at_comment, at_payee, at_payname,
-        at_sort, at_number, at_remove, at_chqprn, at_chqlst,
-        at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
-        at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
-        at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
-        at_bsref, at_bsname, at_vattycd, at_project, at_job,
-        at_bic, at_iban, at_memo, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, 'BANK_IMP',
-        ?, ?, ?, 1, ?,
-        0, '   ', 1.0, 0, 2,
-        ?, ?, ?, '        ', '',
-        '        ', '         ', 0, 0, 0,
-        0, 0, '', 0, 0,
-        0, 0, ?, 0, '0       ',
-        ?, 'I', 0, ' ', '      ',
-        '', '', '  ', '        ', '        ',
-        '', '', ?, ?, ?, 1
-      )`, [
-            atranIdNet,
-            bankCode,
-            cbtype,
-            entryNumber,
-            at_type,
-            txn.date,
-            txn.date,
-            netSignedPence,
-            txn.matchedAccount,
-            nominalName.slice(0, 35),
-            txn.memo.slice(0, 35),
-            sharedUnique,
-            reference.slice(0, 20),
-            txn.memo.slice(0, 200),
-            now.iso,
-            now.iso,
-        ]);
-        // atran row 2 — VAT to vat_nominal_account (at_cntr='   1').
-        // Legacy:3858-3883.
-        await trx.raw(`INSERT INTO atran (
-        id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
-        at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
-        at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
-        at_account, at_name, at_comment, at_payee, at_payname,
-        at_sort, at_number, at_remove, at_chqprn, at_chqlst,
-        at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
-        at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
-        at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
-        at_bsref, at_bsname, at_vattycd, at_project, at_job,
-        at_bic, at_iban, at_memo, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '   1', ?, ?, 'BANK_IMP',
-        ?, ?, ?, 1, ?,
-        0, '   ', 1.0, 0, 2,
-        ?, ?, ?, '        ', '',
-        '        ', '         ', 0, 0, 0,
-        0, 0, '', 0, 0,
-        0, 0, ?, 0, '0       ',
-        ?, 'I', 0, ' ', '      ',
-        '', '', '  ', '        ', '        ',
-        '', '', ?, ?, ?, 1
-      )`, [
-            atranIdVat,
-            bankCode,
-            cbtype,
-            entryNumber,
-            at_type,
-            txn.date,
-            txn.date,
-            vatSignedPence,
-            vatNominalAccount,
-            `${nominalName.slice(0, 31)} VAT`.slice(0, 35),
-            txn.memo.slice(0, 35),
-            sharedUniqueVat,
-            reference.slice(0, 20),
-            txn.memo.slice(0, 200),
-            now.iso,
-            now.iso,
-        ]);
-    }
-    // 3. nbank balance update
-    const bankDeltaPounds = isReceipt ? absAmount : -absAmount;
-    await updateNbankBalance(trx, bankCode, bankDeltaPounds);
-    // 4. ntran debit/credit pair (bank vs nominal) — GATED on
-    // decision.postToNominal. RTU=OFF → skip. With VAT, this is 3 legs:
-    // bank (GROSS), nominal (NET), vat_nominal (VAT). Legacy
-    // opera_sql_import.py:3936-4021.
-    // Direction:
-    //   payment → bank=-gross (credit), nominal=+net (debit),
-    //             vat=+vat (debit/input-tax)
-    //   receipt → bank=+gross (debit),  nominal=-net (credit),
-    //             vat=-vat (credit/output-tax)
-    const nominalNtranValue = isReceipt ? -netPounds : netPounds;
-    const vatNtranValue = isReceipt ? -vatPounds : vatPounds;
-    if (decision.postToNominal) {
-        const bankType = (await getNacntType(trx, bankCode)) ?? { na_type: 'B ', na_subt: 'BC' };
-        const nominalType = (await getNacntType(trx, txn.matchedAccount)) ?? { na_type: 'P ', na_subt: 'PA' };
-        const ntranCount = hasVat ? 3 : 2;
-        const ntranIdStart = await getNextId(trx, 'ntran', ntranCount);
-        // Distinct nt_pstid per leg, matching legacy multi-ID allocation.
-        const ntranPstidBank = generateOperaUniqueId();
-        const ntranPstidNominal = generateOperaUniqueId();
-        const ntranPstidVat = hasVat ? generateOperaUniqueId() : null;
-        const ntranComment = ((txn.memo || reference) || '').padEnd(50).slice(0, 50);
-        const ntranTrnref = ((txn.name || '').slice(0, 30).padEnd(30) +
-            cbtypeDesc.slice(0, 10).padEnd(10) +
-            '(RT)     ').slice(0, 50);
-        // Bank leg (GROSS — same regardless of VAT split). Legacy:3947-3968.
-        await trx.raw(`INSERT INTO ntran (
-        id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
-        nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
-        nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
-        nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
-        nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
-        nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
-        nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
-        nt_distrib, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, ?,
-        '', 'BANK_IMP', 'A', ?, ?,
-        ?, ?, ?, ?, 0,
-        0, 0, '   ', 0, 0,
-        0, 0, 'I', '', '        ',
-        '        ', 'S', 0, ?, 0,
-        0, 0, 0, 0, 0,
-        0, ?, ?, 1
-      )`, [
-            ntranIdStart,
-            bankCode,
-            bankType.na_type,
-            bankType.na_subt,
-            journal,
-            ntranComment,
-            ntranTrnref,
-            txn.date,
-            bankDeltaPounds,
-            year,
-            period,
-            ntranPstidBank,
-            now.iso,
-            now.iso,
-        ]);
-        await updateNacntBalance(trx, bankCode, bankDeltaPounds, { period, year });
-        // Nominal leg (NET when VAT, GROSS otherwise — value is the
-        // opposite sign of the bank leg). Legacy:3972-3993.
-        const nominalLegValue = hasVat ? nominalNtranValue : -bankDeltaPounds;
-        await trx.raw(`INSERT INTO ntran (
-        id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
-        nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
-        nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
-        nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
-        nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
-        nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
-        nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
-        nt_distrib, datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', ?, ?, ?,
-        '', 'BANK_IMP', 'A', ?, ?,
-        ?, ?, ?, ?, 0,
-        0, 0, '   ', 0, 0,
-        0, 0, 'I', '', '        ',
-        '        ', 'S', 0, ?, 0,
-        0, 0, 0, 0, 0,
-        0, ?, ?, 1
-      )`, [
-            ntranIdStart + 1,
-            txn.matchedAccount,
-            nominalType.na_type,
-            nominalType.na_subt,
-            journal,
-            ntranComment,
-            ntranTrnref,
-            txn.date,
-            nominalLegValue,
-            year,
-            period,
-            ntranPstidNominal,
-            now.iso,
-            now.iso,
-        ]);
-        await updateNacntBalance(trx, txn.matchedAccount, nominalLegValue, {
-            period,
-            year,
-        });
-        // VAT-nominal leg (only when VAT applies). Legacy:3999-4021.
-        if (hasVat) {
-            const vatAcctType = (await getNacntType(trx, vatNominalAccount)) ?? { na_type: 'B ', na_subt: 'BB' };
-            const ntranVatComment = `${ntranComment.trim()} VAT`.slice(0, 50).padEnd(50);
-            await trx.raw(`INSERT INTO ntran (
-          id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
-          nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
-          nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
-          nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
-          nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
-          nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
-          nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
-          nt_distrib, datecreated, datemodified, state
-        ) VALUES (
-          ?, ?, '    ', ?, ?, ?,
-          '', 'BANK_IMP', 'A', ?, ?,
-          ?, ?, ?, ?, 0,
-          0, 0, '   ', 0, 0,
-          0, 0, 'I', '', '        ',
-          '        ', 'S', 0, ?, 0,
-          0, 0, 0, 0, 0,
-          0, ?, ?, 1
-        )`, [
-                ntranIdStart + 2,
-                vatNominalAccount,
-                vatAcctType.na_type,
-                vatAcctType.na_subt,
-                journal,
-                ntranVatComment,
-                ntranTrnref,
-                txn.date,
-                vatNtranValue,
-                year,
-                period,
-                ntranPstidVat,
-                now.iso,
-                now.iso,
-            ]);
-            await updateNacntBalance(trx, vatNominalAccount, vatNtranValue, {
-                period,
-                year,
-            });
-        }
-        await insertNjmemo(trx, journal, isReceipt ? 'Nominal Receipt' : 'Nominal Payment');
-    }
-    // 5. anoml debit/credit pair (or triplet with VAT). Legacy
-    // opera_sql_import.py:4030-4089. ax_fcrate=1.0 and ax_fcdec=2.0 per
-    // import_nominal_entry anoml; audit 2026-05-14 found TS was writing
-    // 0,0. With VAT, 3 rows: bank (GROSS), nominal (NET), vat (VAT).
-    const anomlCount = hasVat ? 3 : 2;
-    const anomlIdStart = await getNextId(trx, 'anoml', anomlCount);
-    // ax_comment: party-name + payment-method (no 'BankImport' suffix).
-    const anomlComment = ((txn.name || '').slice(0, 30).padEnd(30) + paymentMethod).slice(0, 40);
-    const doneFlag = decision.transferFileDoneFlag;
-    await trx.raw(`INSERT INTO anoml (
-      id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
-      ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
-      ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
-      datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', 'A', ?, ?, ?,
-      ?, ?, '   ', 0, 1.0, 0, 2.0,
-      'I', ?, '        ', '        ', ?, ?,
-      ?, ?, 1
-    )`, [
-        anomlIdStart,
-        bankCode,
-        txn.date,
-        bankDeltaPounds,
-        reference,
-        anomlComment,
-        doneFlag,
-        sharedUnique,
-        journal,
-        txn.date,
-        now.iso,
-        now.iso,
-    ]);
-    // Nominal-leg anoml: NET when VAT, GROSS-opposite otherwise.
-    const anomlNominalValue = hasVat ? nominalNtranValue : -bankDeltaPounds;
-    await trx.raw(`INSERT INTO anoml (
-      id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
-      ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
-      ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
-      datecreated, datemodified, state
-    ) VALUES (
-      ?, ?, '    ', 'A', ?, ?, ?,
-      ?, ?, '   ', 0, 1.0, 0, 2.0,
-      'I', ?, '        ', '        ', ?, ?,
-      ?, ?, 1
-    )`, [
-        anomlIdStart + 1,
-        txn.matchedAccount,
-        txn.date,
-        anomlNominalValue,
-        reference,
-        anomlComment,
-        doneFlag,
-        sharedUnique,
-        journal,
-        txn.date,
-        now.iso,
-        now.iso,
-    ]);
-    // VAT-leg anoml — only when VAT applies. Faithful port of legacy
-    // opera_sql_import.py:4073-4089. Column order + literal defaults
-    // copied from Opera snapshot
-    // cashbook_nominal_payment_20260401_135214.json (anoml row id=26119,
-    // the VAT-nominal row): ax_ncntr='    ', ax_source='A', ax_fcurr='   ',
-    // ax_fvalue=pence, ax_fcrate=1.0, ax_fcmult=0, ax_fcdec=2.0,
-    // ax_srcco='I', ax_project='        ', ax_job='        '. ax_unique
-    // matches the corresponding VAT atran row.
-    if (hasVat) {
-        const anomlVatFvalue = Math.round(vatNtranValue * 100);
-        await trx.raw(`INSERT INTO anoml (
-        id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
-        ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
-        ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
-        datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '    ', 'A', ?, ?, ?,
-        ?, ?, '   ', ?, 1.0, 0, 2.0,
-        'I', ?, '        ', '        ', ?, ?,
-        ?, ?, 1
-      )`, [
-            anomlIdStart + 2,
-            vatNominalAccount,
-            txn.date,
-            vatNtranValue,
-            reference,
-            `${anomlComment.trim().slice(0, 36)} VAT`.slice(0, 40),
-            doneFlag,
-            anomlVatFvalue,
-            sharedUniqueVat,
-            journal,
-            txn.date,
-            now.iso,
-            now.iso,
-        ]);
-    }
-    // 6. nvat — VAT-return tracking record. Faithful port of legacy
-    // opera_sql_import.py:4129-4144. Always written when VAT applies,
-    // independent of decision.postToNominal (legacy doesn't gate it).
-    if (hasVat) {
-        const nvVattype = isReceipt ? 'S' : 'P';
-        const nvatRowId = await getNextId(trx, 'nvat');
-        const nvatComment = `${txn.memo.slice(0, 36)} VAT`.slice(0, 40);
-        await trx.raw(`INSERT INTO nvat (
-        id, nv_acnt, nv_cntr, nv_date, nv_crdate, nv_taxdate,
-        nv_ref, nv_type, nv_advance, nv_value, nv_vatval,
-        nv_vatctry, nv_vattype, nv_vatcode, nv_vatrate, nv_comment,
-        datecreated, datemodified, state
-      ) VALUES (
-        ?, ?, '', ?, ?, ?,
-        ?, ?, 0, ?, ?,
-        ' ', ?, ?, ?, ?,
-        ?, ?, 1
-      )`, [
-            nvatRowId,
-            vatNominalAccount,
-            txn.date,
-            txn.date,
-            txn.date,
-            reference,
-            nvVattype,
-            netPounds,
-            vatPounds,
-            nvVattype,
-            (txn.vatCode ?? '').trim(),
-            vatLookup.rate,
-            nvatComment,
-            now.iso,
-            now.iso,
-        ]);
-    }
-    // --- Phase A verification (in-trx) ---
-    // assertAentryAtran joins aentry+atran on (ae_entry, ae_acnt) and
-    // expects exactly one row. With VAT we have 2 atran rows both keyed
-    // to the same bank account, so the JOIN returns 2 — that's not a
-    // duplicate, it's the split. Skip the helper for has_vat and rely
-    // on the balanced-pair counts below to catch any miswrites.
-    // (Verifier signature constraint forbids extending it.)
-    if (!hasVat) {
-        await assertAentryAtran(trx, {
-            entryNumber,
-            bankAccount: bankCode,
-            expectedSignedPence: signedPence,
-            expectedAtType: at_type,
-            expectedDate: txn.date,
-            expectedReferPrefix: reference.slice(0, 20),
-        });
-    }
-    if (decision.postToNominal) {
-        await assertBalancedPair(trx, {
-            table: 'ntran',
-            journal,
-            expectedCount: hasVat ? 3 : 2,
-            entryNumber,
-        });
-    }
-    await assertBalancedPair(trx, {
-        table: 'anoml',
-        journal,
-        expectedCount: hasVat ? 3 : 2,
-        entryNumber,
+    const header = {
+        date: txn.date,
+        action: txn.action,
+        cbtype: txn.cbtype,
+        reference: txn.reference,
+        comment: txn.memo || txn.name || '',
+        inputBy: 'BANK_IMP',
+        memo: txn.memo,
+        name: txn.name,
+    };
+    const line = {
+        atAccount: txn.matchedAccount,
+        absPence: Math.round(absAmount * 100),
+        vatCode: txn.vatCode,
+        vatPence: 0, // core helper computes from rate via getVatRateForCode
+        reference: txn.reference ?? '',
+        comment: txn.memo ?? '',
+        project: '',
+        department: '',
+        netOverride: txn.netAmount,
+    };
+    return postOperaCashbookEntry({
+        trx, bankCode, header, lines: [line], defaults, decision,
     });
-    return { entry_number: entryNumber, fingerprint };
 }
 // ---------------------------------------------------------------------
 // Bank transfer (at_type=8) — paired aentry/atran on source + dest
@@ -1608,6 +713,862 @@ async function postBankTransfer(args) {
         entryNumber: entryOut,
     });
     return { entry_number: entryOut, fingerprint };
+}
+// ---------------------------------------------------------------------
+// postOperaCashbookEntry — unified 1..N-lines core helper.
+//
+// The core posting primitive for all cashbook entries. Handles 1..N
+// lines under a single aentry header. Each line gets its own atran
+// row; sales/purchase lines get stran/ptran + sname/pname balance
+// updates; all lines get an anoml pair (bank + target); when
+// decision.postToNominal is true, all lines also get an ntran pair
+// (bank + target leg), plus an optional third VAT leg when a VAT
+// code with a positive rate applies.
+//
+// SQL column lists and VALUES placeholders are copied verbatim from
+// postOneTransaction (lines ~559-965) for sales/purchase entries
+// and from postNominalEntry (lines ~1199-1718) for nominal entries.
+// The only changes are: (a) per-line parameter values replace
+// per-transaction values in the bind list; (b) the aentry ae_value
+// carries the total across all lines; (c) sq_cruser is bound
+// dynamically from header.inputBy instead of hardcoded 'BANK_IMP'.
+// ---------------------------------------------------------------------
+export async function postOperaCashbookEntry(args) {
+    const { trx, bankCode, header, lines, defaults, decision } = args;
+    // Input validation
+    if (!Array.isArray(lines) || lines.length === 0) {
+        throw new Error(`postOperaCashbookEntry: lines array must have ≥1 entry (got ${lines?.length ?? 0})`);
+    }
+    for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i];
+        if (!ln.atAccount || !ln.atAccount.trim()) {
+            throw new Error(`postOperaCashbookEntry: every line needs atAccount (line ${i + 1} has '${ln.atAccount}')`);
+        }
+    }
+    // ---------------------------------------------------------------------------
+    // Entry-level setup (once per entry)
+    // ---------------------------------------------------------------------------
+    const isReceipt = header.action === 'sales_receipt' ||
+        header.action === 'purchase_refund' ||
+        header.action === 'nominal_receipt';
+    const isNominal = header.action === 'nominal_payment' || header.action === 'nominal_receipt';
+    const isSales = header.action === 'sales_receipt' || header.action === 'sales_refund';
+    const isPurchase = header.action === 'purchase_payment' || header.action === 'purchase_refund';
+    const at_type = AT_TYPE_FOR_ACTION[header.action];
+    if (!at_type) {
+        throw new Error(`postOperaCashbookEntry: unsupported action '${header.action}'`);
+    }
+    const receiptOrPayment = isReceipt ? 'R' : 'P';
+    const { code: cbtype, desc: cbtypeDesc } = await resolveCbtype(trx, header.cbtype, receiptOrPayment);
+    const paymentMethod = cbtypeDesc.slice(0, 20);
+    const now = nowParts();
+    const { period, year } = await getPeriodForDate(trx, header.date);
+    // VAT type direction: receipts use output/sales VAT ('S'); payments use input/purchase ('P').
+    const vatType = isReceipt ? 'S' : 'P';
+    const inputBy = header.inputBy.slice(0, 8);
+    // Sum of all line absPence (used for aentry total and nbank update).
+    const totalAbsPence = lines.reduce((acc, ln) => acc + ln.absPence, 0);
+    const totalSignedPence = isReceipt ? totalAbsPence : -totalAbsPence;
+    const totalAbsAmount = totalAbsPence / 100;
+    // Allocate entry-level IDs once.
+    const entryNumber = await incrementAtypeEntry(trx, cbtype);
+    const aentryId = await getNextId(trx, 'aentry');
+    const journal = await getNextJournal(trx, 1);
+    // Header reference: operator-supplied or derived from first line.
+    const headerReference = (header.reference ?? '').slice(0, 20) ||
+        (lines[0].reference ?? '').slice(0, 20) ||
+        header.name.slice(0, 20);
+    // Fingerprint (returned to caller; same shape as postOneTransaction /
+    // postNominalEntry for compatibility with bank-import audit trail).
+    const fingerprint = generateImportFingerprint(header.name || header.memo || lines[0].atAccount, isReceipt ? totalAbsAmount : -totalAbsAmount, header.date);
+    // ---------------------------------------------------------------------------
+    // 1. INSERT aentry — one header row for the whole entry.
+    // Column list + VALUES copied verbatim from postOneTransaction lines ~559-587.
+    // Differences: ae_value = totalSignedPence (not per-line); sq_cruser bound.
+    // ---------------------------------------------------------------------------
+    await trx.raw(`INSERT INTO aentry (
+      id, ae_acnt, ae_cntr, ae_cbtype, ae_entry, ae_reclnum,
+      ae_lstdate, ae_frstat, ae_tostat, ae_statln, ae_entref,
+      ae_value, ae_recbal, ae_remove, ae_tmpstat, ae_complet,
+      ae_postgrp, sq_crdate, sq_crtime, sq_cruser, ae_comment,
+      ae_payid, ae_batchid, ae_brwptr, datecreated, datemodified, state
+    ) VALUES (
+      ?, ?, '    ', ?, ?, 0,
+      ?, 0, 0, 0, ?,
+      ?, 0, 0, 0, 1,
+      0, ?, ?, ?, ?,
+      0, 0, '  ', ?, ?, 1
+    )`, [
+        aentryId,
+        bankCode,
+        cbtype,
+        entryNumber,
+        header.date,
+        headerReference,
+        totalSignedPence,
+        now.date,
+        now.time.slice(0, 8),
+        inputBy,
+        (header.comment || header.name).slice(0, 40),
+        now.iso,
+        now.iso,
+    ]);
+    // ---------------------------------------------------------------------------
+    // Track total bank movement for nbank update at end.
+    // ---------------------------------------------------------------------------
+    let totalBankPounds = 0;
+    // ---------------------------------------------------------------------------
+    // 2. Per-line work: atran, stran/ptran (sales/purchase only),
+    //    ntran×2-3 + nacnt (gated on postToNominal), anoml×2-3.
+    // ---------------------------------------------------------------------------
+    let vatLineCount = 0; // lines with actual VAT (for assertBalancedPair)
+    for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i];
+        const lineAbs = ln.absPence / 100;
+        const lineSignedPence = isReceipt ? ln.absPence : -ln.absPence;
+        const lineRef = (ln.reference || headerReference).slice(0, 20);
+        const lineComment = (ln.comment || header.comment).slice(0, 200);
+        const projectPad = (ln.project || '').padEnd(8).slice(0, 8);
+        const departmentPad = (ln.department || '').padEnd(8).slice(0, 8);
+        // -------------------------------------------------------------------------
+        // 2a. Resolve target account + party info (varies by action family).
+        // For nominal: target = line.atAccount directly; party.name from nacnt.
+        // For sales: party = customer; target = controlAccount.
+        // For purchase: party = supplier; target = controlAccount.
+        // -------------------------------------------------------------------------
+        let targetAccount;
+        let partyName;
+        let partyRegion = 'K  ';
+        let partyTerr = '001';
+        let partyType = '   ';
+        if (isNominal) {
+            targetAccount = ln.atAccount;
+            partyName = (await loadNominalName(trx, ln.atAccount)) || ln.atAccount;
+        }
+        else if (isSales) {
+            const party = await loadCustomerInfo(trx, ln.atAccount, defaults.sl_control);
+            targetAccount = party.controlAccount;
+            partyName = party.name;
+            partyRegion = party.region.slice(0, 3);
+            partyTerr = party.terr.slice(0, 3);
+            partyType = party.type.slice(0, 3);
+        }
+        else if (isPurchase) {
+            const party = await loadSupplierInfo(trx, ln.atAccount, defaults.pl_control);
+            targetAccount = party.controlAccount;
+            partyName = party.name;
+        }
+        else {
+            throw new Error(`postOperaCashbookEntry: unsupported action '${header.action}'`);
+        }
+        // -------------------------------------------------------------------------
+        // 2b. VAT lookup per line (nominal and sales/purchase can carry VAT).
+        // Formula mirrors postNominalEntry lines ~1164-1168:
+        //   vat = round(gross * rate / (100 + rate), 2)
+        //   net = gross - vat
+        // -------------------------------------------------------------------------
+        const vatLookup = ln.vatCode
+            ? await getVatRateForCode(trx, ln.vatCode, vatType, header.date)
+            : null;
+        const hasVat = !!(vatLookup && vatLookup.rate > 0 && vatLookup.nominal && ln.vatCode);
+        const vatPounds = hasVat
+            ? Math.round(((lineAbs * vatLookup.rate) / (100 + vatLookup.rate)) * 100) / 100
+            : 0;
+        const netPounds = hasVat
+            ? Math.round((lineAbs - vatPounds) * 100) / 100
+            : lineAbs;
+        const vatNominalAccount = hasVat ? vatLookup.nominal : '';
+        if (hasVat)
+            vatLineCount++;
+        // -------------------------------------------------------------------------
+        // 2c. INSERT atran (one per line).
+        // Column list + VALUES copied verbatim from postOneTransaction lines ~591-636.
+        // Differences: at_value = lineSignedPence (not totalSignedPence);
+        // at_account = targetAccount; at_name = partyName; at_refer = lineRef;
+        // at_project/at_job = projectPad/departmentPad; at_memo = lineComment;
+        // sq_cruser bound from inputBy.
+        // For nominal entries with VAT, the VAT split creates 2 atran rows per
+        // line (net + VAT legs), following postNominalEntry lines ~1283-1372.
+        // The non-VAT path inserts one row (this block). VAT path follows below.
+        // -------------------------------------------------------------------------
+        const lineUnique = generateOperaUniqueId();
+        // For VAT split on nominal: a second unique for the VAT atran row
+        // (mirrors postNominalEntry lines ~1179-1182).
+        const lineUniqueVat = hasVat && isNominal ? generateOperaUniqueId() : null;
+        const atranId = await getNextId(trx, 'atran');
+        if (!hasVat || !isNominal) {
+            // Single atran row (sales, purchase, or nominal-no-vat).
+            // Exact copy of postOneTransaction atran INSERT (lines ~591-636).
+            await trx.raw(`INSERT INTO atran (
+          id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
+          at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
+          at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
+          at_account, at_name, at_comment, at_payee, at_payname,
+          at_sort, at_number, at_remove, at_chqprn, at_chqlst,
+          at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
+          at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
+          at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
+          at_bsref, at_bsname, at_vattycd, at_project, at_job,
+          at_bic, at_iban, at_memo, datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', ?, ?, ?,
+          ?, ?, ?, 1, ?,
+          0, '   ', 1.0, 0, 2,
+          ?, ?, ?, '        ', '',
+          '        ', '         ', 0, 0, 0,
+          0, 0, '', 0, 0,
+          0, 0, ?, 0, '0       ',
+          ?, 'I', 0, ' ', '      ',
+          '', '', '  ', ?, ?,
+          '', '', ?, ?, ?, 1
+        )`, [
+                atranId,
+                bankCode,
+                cbtype,
+                entryNumber,
+                inputBy,
+                at_type,
+                header.date,
+                header.date,
+                lineSignedPence,
+                ln.atAccount,
+                partyName.slice(0, 35),
+                lineComment.slice(0, 35),
+                lineUnique,
+                lineRef,
+                projectPad,
+                departmentPad,
+                lineComment,
+                now.iso,
+                now.iso,
+            ]);
+        }
+        else {
+            // Nominal VAT-split: two atran rows per line (NET + VAT).
+            // Column list + VALUES copied verbatim from postNominalEntry
+            // lines ~1285-1372.
+            const netSignedPence = isReceipt ? pence(netPounds) : -pence(netPounds);
+            const vatSignedPence = isReceipt ? pence(vatPounds) : -pence(vatPounds);
+            // loadNominalName for at_name on VAT rows (mirrors postNominalEntry ~1195).
+            const nominalName = await loadNominalName(trx, ln.atAccount);
+            const atranIdVat = await getNextId(trx, 'atran');
+            // atran row 1 — NET amount to nominal account (at_cntr='    ').
+            // Verbatim from postNominalEntry lines ~1285-1325.
+            await trx.raw(`INSERT INTO atran (
+          id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
+          at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
+          at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
+          at_account, at_name, at_comment, at_payee, at_payname,
+          at_sort, at_number, at_remove, at_chqprn, at_chqlst,
+          at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
+          at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
+          at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
+          at_bsref, at_bsname, at_vattycd, at_project, at_job,
+          at_bic, at_iban, at_memo, datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', ?, ?, ?,
+          ?, ?, ?, 1, ?,
+          0, '   ', 1.0, 0, 2,
+          ?, ?, ?, '        ', '',
+          '        ', '         ', 0, 0, 0,
+          0, 0, '', 0, 0,
+          0, 0, ?, 0, '0       ',
+          ?, 'I', 0, ' ', '      ',
+          '', '', '  ', '        ', '        ',
+          '', '', ?, ?, ?, 1
+        )`, [
+                atranId,
+                bankCode,
+                cbtype,
+                entryNumber,
+                inputBy,
+                at_type,
+                header.date,
+                header.date,
+                netSignedPence,
+                ln.atAccount,
+                nominalName.slice(0, 35),
+                lineComment.slice(0, 35),
+                lineUnique,
+                lineRef,
+                lineComment,
+                now.iso,
+                now.iso,
+            ]);
+            // atran row 2 — VAT amount to vatNominalAccount (at_cntr='   1').
+            // Verbatim from postNominalEntry lines ~1330-1372.
+            await trx.raw(`INSERT INTO atran (
+          id, at_acnt, at_cntr, at_cbtype, at_entry, at_inputby,
+          at_type, at_pstdate, at_sysdate, at_tperiod, at_value,
+          at_disc, at_fcurr, at_fcexch, at_fcmult, at_fcdec,
+          at_account, at_name, at_comment, at_payee, at_payname,
+          at_sort, at_number, at_remove, at_chqprn, at_chqlst,
+          at_bacprn, at_ccdprn, at_ccdno, at_payslp, at_pysprn,
+          at_cash, at_remit, at_unique, at_postgrp, at_ccauth,
+          at_refer, at_srcco, at_ecb, at_ecbtype, at_atpycd,
+          at_bsref, at_bsname, at_vattycd, at_project, at_job,
+          at_bic, at_iban, at_memo, datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '   1', ?, ?, ?,
+          ?, ?, ?, 1, ?,
+          0, '   ', 1.0, 0, 2,
+          ?, ?, ?, '        ', '',
+          '        ', '         ', 0, 0, 0,
+          0, 0, '', 0, 0,
+          0, 0, ?, 0, '0       ',
+          ?, 'I', 0, ' ', '      ',
+          '', '', '  ', '        ', '        ',
+          '', '', ?, ?, ?, 1
+        )`, [
+                atranIdVat,
+                bankCode,
+                cbtype,
+                entryNumber,
+                inputBy,
+                at_type,
+                header.date,
+                header.date,
+                vatSignedPence,
+                vatNominalAccount,
+                `${nominalName.slice(0, 31)} VAT`.slice(0, 35),
+                lineComment.slice(0, 35),
+                lineUniqueVat,
+                lineRef,
+                lineComment,
+                now.iso,
+                now.iso,
+            ]);
+        }
+        // -------------------------------------------------------------------------
+        // 2d. Ledger row (stran for sales, ptran for purchases).
+        // Column lists + VALUES copied verbatim from postOneTransaction
+        // lines ~645-778.  Per-line differences: ledgerId, party.account, dates,
+        // memo, cbtype, entryNumber, sharedUnique are now per-line values.
+        // -------------------------------------------------------------------------
+        if (isSales) {
+            // stran: receipts stored negative, refunds positive.
+            // Mirrors postOneTransaction lines ~641-708.
+            const stValue = isReceipt ? -lineAbs : lineAbs;
+            const stType = isReceipt ? 'R' : 'F';
+            const ledgerId = await getNextId(trx, 'stran');
+            await trx.raw(`INSERT INTO stran (
+          id, st_account, st_trdate, st_trref, st_custref, st_trtype,
+          st_trvalue, st_vatval, st_trbal, st_paid, st_crdate,
+          st_advance, st_memo, st_payflag, st_set1day, st_set1,
+          st_set2day, st_set2, st_dueday, st_fcurr, st_fcrate,
+          st_fcdec, st_fcval, st_fcbal, st_fcmult, st_dispute,
+          st_edi, st_editx, st_edivn, st_txtrep, st_binrep,
+          st_advallc, st_cbtype, st_entry, st_unique, st_region,
+          st_terr, st_type, st_fadval, st_delacc, st_euro,
+          st_payadvl, st_eurind, st_origcur, st_fullamt, st_fullcb,
+          st_fullnar, st_cash, st_rcode, st_ruser, st_revchrg,
+          st_nlpdate, st_adjsv, st_fcvat, st_taxpoin,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?,
+          ?, 0, ?, ' ', ?,
+          'N', ?, 0, 0, 0,
+          0, 0, ?, '   ', 0,
+          0, 0, 0, 0, 0,
+          0, 0, 0, '', 0,
+          0, ?, ?, ?, ?,
+          ?, ?, 0, ?, 0,
+          0, ' ', '   ', 0, '  ',
+          '          ', 0, '    ', '        ', 0,
+          ?, 0, 0, ?,
+          ?, ?, 1
+        )`, [
+                ledgerId,
+                ln.atAccount,
+                header.date,
+                lineRef,
+                paymentMethod,
+                stType,
+                stValue,
+                stValue,
+                header.date,
+                lineComment,
+                header.date,
+                cbtype,
+                entryNumber,
+                lineUnique,
+                partyRegion,
+                partyTerr,
+                partyType, // st_type: customer type from sname.sn_custype
+                ln.atAccount,
+                header.date,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+            await trx.raw(`UPDATE sname WITH (ROWLOCK)
+         SET sn_currbal = ISNULL(sn_currbal, 0) + ?,
+             sn_nextpay = ISNULL(sn_nextpay, 0) + 1,
+             datemodified = GETDATE()
+         WHERE RTRIM(sn_account) = ?`, [stValue, ln.atAccount]);
+        }
+        else if (isPurchase) {
+            // ptran: payments negative, refunds positive.
+            // Column list + VALUES copied verbatim from postOneTransaction
+            // lines ~731-778.
+            const ptValue = isReceipt ? lineAbs : -lineAbs;
+            const ptType = isReceipt ? 'F' : 'P';
+            const ledgerId = await getNextId(trx, 'ptran');
+            await trx.raw(`INSERT INTO ptran (
+          id, pt_account, pt_trdate, pt_trref, pt_supref, pt_trtype,
+          pt_trvalue, pt_vatval, pt_trbal, pt_paid, pt_crdate,
+          pt_advance, pt_payflag, pt_set1day, pt_set1, pt_set2day,
+          pt_set2, pt_held, pt_fcurr, pt_fcrate, pt_fcdec,
+          pt_fcval, pt_fcbal, pt_adval, pt_fadval, pt_fcmult,
+          pt_cbtype, pt_entry, pt_unique, pt_suptype, pt_euro,
+          pt_payadvl, pt_origcur, pt_eurind, pt_revchrg, pt_nlpdate,
+          pt_adjsv, pt_vatset1, pt_vatset2, pt_pyroute, pt_fcvat,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?,
+          ?, 0, ?, ' ', ?,
+          'N', 0, 0, 0, 0,
+          0, ' ', '   ', 0, 0,
+          0, 0, 0, 0, 0,
+          ?, ?, ?, '   ', 0,
+          0, '   ', ' ', 0, ?,
+          0, 0, 0, 0, 0,
+          ?, ?, 1
+        )`, [
+                ledgerId,
+                ln.atAccount,
+                header.date,
+                lineRef,
+                paymentMethod,
+                ptType,
+                ptValue,
+                ptValue,
+                header.date,
+                cbtype,
+                entryNumber,
+                lineUnique,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+            await trx.raw(`UPDATE pname WITH (ROWLOCK)
+         SET pn_currbal = ISNULL(pn_currbal, 0) + ?,
+             pn_nextpay = ISNULL(pn_nextpay, 0) + 1,
+             datemodified = GETDATE()
+         WHERE RTRIM(pn_account) = ?`, [ptValue, ln.atAccount]);
+        }
+        // -------------------------------------------------------------------------
+        // 2e. nbank movement tracking (summed; updateNbankBalance called once
+        // at the end to avoid multiple partial updates within a loop).
+        // -------------------------------------------------------------------------
+        const bankDeltaPounds = isReceipt ? lineAbs : -lineAbs;
+        totalBankPounds += bankDeltaPounds;
+        // -------------------------------------------------------------------------
+        // 2f. ntran pair (bank leg + target leg) — GATED on postToNominal.
+        // Column lists + VALUES copied verbatim from:
+        //   - sales/purchase: postOneTransaction lines ~817-897.
+        //   - nominal: postNominalEntry lines ~1408-1536 (bank leg + nominal leg
+        //     + optional VAT leg).
+        // For multi-line the ntran nt_posttyp distinguishes action family.
+        // -------------------------------------------------------------------------
+        if (decision.postToNominal) {
+            const bankType = (await getNacntType(trx, bankCode)) ??
+                { na_type: 'B ', na_subt: 'BC' };
+            const targetType = (await getNacntType(trx, targetAccount)) ??
+                { na_type: isNominal ? 'P ' : 'B ', na_subt: isNominal ? 'PA' : 'BB' };
+            // nt_posttyp: 'S' for sales+nominal, 'P' for purchase.
+            // Mirrors postOneTransaction axSource logic + postNominalEntry hardcoded 'S'.
+            const ntPosttyp = isPurchase ? 'P' : 'S';
+            const ntranComment = (lineComment || lineRef || '').padEnd(50).slice(0, 50);
+            const ntranTrnref = (partyName.slice(0, 30).padEnd(30) +
+                cbtypeDesc.slice(0, 10).padEnd(10) +
+                '(RT)     ').slice(0, 50);
+            // Bank leg ntran.
+            // Verbatim from postOneTransaction lines ~816-852 / postNominalEntry ~1407-1443.
+            const ntranBankId = await getNextId(trx, 'ntran');
+            const ntranPstidBank = generateOperaUniqueId();
+            await trx.raw(`INSERT INTO ntran (
+          id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
+          nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
+          nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
+          nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
+          nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
+          nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
+          nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
+          nt_distrib, datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', ?, ?, ?,
+          '', ?, 'A', ?, ?,
+          ?, ?, ?, ?, 0,
+          0, 0, '   ', 0, 0,
+          0, 0, 'I', '', '        ',
+          '        ', ?, 0, ?, 0,
+          0, 0, 0, 0, 0,
+          0, ?, ?, 1
+        )`, [
+                ntranBankId,
+                bankCode,
+                bankType.na_type,
+                bankType.na_subt,
+                journal,
+                inputBy.slice(0, 10),
+                ntranComment,
+                ntranTrnref,
+                header.date,
+                bankDeltaPounds,
+                year,
+                period,
+                ntPosttyp,
+                ntranPstidBank,
+                now.iso,
+                now.iso,
+            ]);
+            await updateNacntBalance(trx, bankCode, bankDeltaPounds, { period, year });
+            // Target leg ntran (opposite sign).
+            // For non-VAT: controlValue = -bankDeltaPounds.
+            // For VAT nominal: nominalLegValue = nominalNtranValue (net, opposite sign of bank).
+            const nominalNtranValue = isReceipt ? -netPounds : netPounds;
+            const targetLegValue = hasVat
+                ? nominalNtranValue
+                : -bankDeltaPounds;
+            // Verbatim from postOneTransaction lines ~856-897 / postNominalEntry ~1449-1489.
+            const ntranTargetId = await getNextId(trx, 'ntran');
+            const ntranPstidTarget = generateOperaUniqueId();
+            await trx.raw(`INSERT INTO ntran (
+          id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
+          nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
+          nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
+          nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
+          nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
+          nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
+          nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
+          nt_distrib, datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', ?, ?, ?,
+          '', ?, 'A', ?, ?,
+          ?, ?, ?, ?, 0,
+          0, 0, '   ', 0, 0,
+          0, 0, 'I', '', ?,
+          ?, ?, 0, ?, 0,
+          0, 0, 0, 0, 0,
+          0, ?, ?, 1
+        )`, [
+                ntranTargetId,
+                targetAccount,
+                targetType.na_type,
+                targetType.na_subt,
+                journal,
+                inputBy.slice(0, 10),
+                ntranComment,
+                ntranTrnref,
+                header.date,
+                targetLegValue,
+                year,
+                period,
+                projectPad,
+                departmentPad,
+                ntPosttyp,
+                ntranPstidTarget,
+                now.iso,
+                now.iso,
+            ]);
+            await updateNacntBalance(trx, targetAccount, targetLegValue, { period, year });
+            // VAT ntran leg + zvtran + nvat — only when VAT applies (nominal path).
+            // Column list + VALUES copied verbatim from postNominalEntry lines ~1497-1536 (ntran)
+            // and lines ~1656-1684 (nvat). There is no zvtran table in TS — the
+            // legacy Python reference to 'zvtran' maps to 'nvat' in Opera SE.
+            if (hasVat) {
+                const vatNtranValue = isReceipt ? -vatPounds : vatPounds;
+                const vatAcctType = (await getNacntType(trx, vatNominalAccount)) ??
+                    { na_type: 'B ', na_subt: 'BB' };
+                const ntranVatComment = `${ntranComment.trim()} VAT`.slice(0, 50).padEnd(50);
+                // VAT ntran leg. Verbatim from postNominalEntry lines ~1497-1532.
+                const ntranVatId = await getNextId(trx, 'ntran');
+                const ntranPstidVat = generateOperaUniqueId();
+                await trx.raw(`INSERT INTO ntran (
+            id, nt_acnt, nt_cntr, nt_type, nt_subt, nt_jrnl,
+            nt_ref, nt_inp, nt_trtype, nt_cmnt, nt_trnref,
+            nt_entr, nt_value, nt_year, nt_period, nt_rvrse,
+            nt_prevyr, nt_consol, nt_fcurr, nt_fvalue, nt_fcrate,
+            nt_fcmult, nt_fcdec, nt_srcco, nt_cdesc, nt_project,
+            nt_job, nt_posttyp, nt_pstgrp, nt_pstid, nt_srcnlid,
+            nt_recurr, nt_perpost, nt_rectify, nt_recjrnl, nt_vatanal,
+            nt_distrib, datecreated, datemodified, state
+          ) VALUES (
+            ?, ?, '    ', ?, ?, ?,
+            '', ?, 'A', ?, ?,
+            ?, ?, ?, ?, 0,
+            0, 0, '   ', 0, 0,
+            0, 0, 'I', '', '        ',
+            '        ', 'S', 0, ?, 0,
+            0, 0, 0, 0, 0,
+            0, ?, ?, 1
+          )`, [
+                    ntranVatId,
+                    vatNominalAccount,
+                    vatAcctType.na_type,
+                    vatAcctType.na_subt,
+                    journal,
+                    inputBy.slice(0, 10),
+                    ntranVatComment,
+                    ntranTrnref,
+                    header.date,
+                    vatNtranValue,
+                    year,
+                    period,
+                    ntranPstidVat,
+                    now.iso,
+                    now.iso,
+                ]);
+                await updateNacntBalance(trx, vatNominalAccount, vatNtranValue, { period, year });
+                // nvat — VAT-return tracking record.
+                // Column list + VALUES copied verbatim from postNominalEntry lines ~1656-1684.
+                const nvVattype = isReceipt ? 'S' : 'P';
+                const nvatRowId = await getNextId(trx, 'nvat');
+                const nvatComment = `${lineComment.slice(0, 36)} VAT`.slice(0, 40);
+                await trx.raw(`INSERT INTO nvat (
+            id, nv_acnt, nv_cntr, nv_date, nv_crdate, nv_taxdate,
+            nv_ref, nv_type, nv_advance, nv_value, nv_vatval,
+            nv_vatctry, nv_vattype, nv_vatcode, nv_vatrate, nv_comment,
+            datecreated, datemodified, state
+          ) VALUES (
+            ?, ?, '', ?, ?, ?,
+            ?, ?, 0, ?, ?,
+            ' ', ?, ?, ?, ?,
+            ?, ?, 1
+          )`, [
+                    nvatRowId,
+                    vatNominalAccount,
+                    header.date,
+                    header.date,
+                    header.date,
+                    lineRef,
+                    nvVattype,
+                    netPounds,
+                    vatPounds,
+                    nvVattype,
+                    (ln.vatCode ?? '').trim(),
+                    vatLookup.rate,
+                    nvatComment,
+                    now.iso,
+                    now.iso,
+                ]);
+            }
+            // Journal memo — once per line (same shape as postNominalEntry ~1538).
+            await insertNjmemo(trx, journal, 'Cashbook Ledger Transfer (RT)');
+        }
+        // -------------------------------------------------------------------------
+        // 2g. anoml pair (bank leg + target leg) + optional VAT third leg.
+        //
+        // For nominal (isNominal=true): mirror postNominalEntry lines ~1553-1645.
+        //   ax_source='A', ax_fcrate=1.0, ax_fcdec=2.0.
+        // For sales/purchase: mirror postOneTransaction lines ~913-965.
+        //   ax_source='S' or 'P', ax_fcrate=0, ax_fcdec=0.
+        //
+        // Column list + VALUES are copied verbatim; only the fcrate/fcdec literal
+        // values change between the two families.
+        //
+        // anoml.ax_jrnl is always the journal number (not conditional on
+        // postToNominal — both postOneTransaction and postNominalEntry always
+        // write journal, regardless of postToNominal flag).
+        // -------------------------------------------------------------------------
+        const axSource = isNominal ? 'A' : isSales ? 'S' : 'P';
+        const anomlComment = (partyName.slice(0, 30).padEnd(30) + paymentMethod).slice(0, 40);
+        const doneFlag = decision.transferFileDoneFlag;
+        if (isNominal) {
+            // Nominal anoml — verbatim from postNominalEntry lines ~1553-1606.
+            // ax_fcrate=1.0, ax_fcdec=2.0 (audit-confirmed from Opera snapshot).
+            const anomlBankValue = bankDeltaPounds;
+            const anomlNominalValue = hasVat ? (isReceipt ? -netPounds : netPounds) : -bankDeltaPounds;
+            const anomlBankId = await getNextId(trx, 'anoml');
+            await trx.raw(`INSERT INTO anoml (
+          id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
+          ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
+          ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', 'A', ?, ?, ?,
+          ?, ?, '   ', 0, 1.0, 0, 2.0,
+          'I', ?, '        ', '        ', ?, ?,
+          ?, ?, 1
+        )`, [
+                anomlBankId,
+                bankCode,
+                header.date,
+                anomlBankValue,
+                lineRef,
+                anomlComment,
+                doneFlag,
+                lineUnique,
+                journal,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+            const anomlNominalId = await getNextId(trx, 'anoml');
+            await trx.raw(`INSERT INTO anoml (
+          id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
+          ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
+          ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', 'A', ?, ?, ?,
+          ?, ?, '   ', 0, 1.0, 0, 2.0,
+          'I', ?, '        ', '        ', ?, ?,
+          ?, ?, 1
+        )`, [
+                anomlNominalId,
+                targetAccount,
+                header.date,
+                anomlNominalValue,
+                lineRef,
+                anomlComment,
+                doneFlag,
+                lineUnique,
+                journal,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+            // VAT leg anoml — verbatim from postNominalEntry lines ~1619-1645.
+            if (hasVat) {
+                const vatNtranValue = isReceipt ? -vatPounds : vatPounds;
+                const anomlVatFvalue = Math.round(vatNtranValue * 100);
+                const anomlVatId = await getNextId(trx, 'anoml');
+                await trx.raw(`INSERT INTO anoml (
+            id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
+            ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
+            ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
+            datecreated, datemodified, state
+          ) VALUES (
+            ?, ?, '    ', 'A', ?, ?, ?,
+            ?, ?, '   ', ?, 1.0, 0, 2.0,
+            'I', ?, '        ', '        ', ?, ?,
+            ?, ?, 1
+          )`, [
+                    anomlVatId,
+                    vatNominalAccount,
+                    header.date,
+                    vatNtranValue,
+                    lineRef,
+                    `${anomlComment.trim().slice(0, 36)} VAT`.slice(0, 40),
+                    doneFlag,
+                    anomlVatFvalue,
+                    lineUniqueVat,
+                    journal,
+                    header.date,
+                    now.iso,
+                    now.iso,
+                ]);
+            }
+        }
+        else {
+            // Sales / purchase anoml — verbatim from postOneTransaction lines ~913-965.
+            // ax_fcrate=0, ax_fcdec=0.
+            const anomlBankValue = bankDeltaPounds;
+            const controlValue = -bankDeltaPounds;
+            const anomlBankId = await getNextId(trx, 'anoml');
+            await trx.raw(`INSERT INTO anoml (
+          id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
+          ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
+          ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', '${axSource}', ?, ?, ?,
+          ?, ?, '   ', 0, 0, 0, 0,
+          'I', ?, '        ', '        ', ?, ?,
+          ?, ?, 1
+        )`, [
+                anomlBankId,
+                bankCode,
+                header.date,
+                anomlBankValue,
+                lineRef,
+                anomlComment,
+                doneFlag,
+                lineUnique,
+                journal,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+            const anomlTargetId = await getNextId(trx, 'anoml');
+            await trx.raw(`INSERT INTO anoml (
+          id, ax_nacnt, ax_ncntr, ax_source, ax_date, ax_value, ax_tref,
+          ax_comment, ax_done, ax_fcurr, ax_fvalue, ax_fcrate, ax_fcmult, ax_fcdec,
+          ax_srcco, ax_unique, ax_project, ax_job, ax_jrnl, ax_nlpdate,
+          datecreated, datemodified, state
+        ) VALUES (
+          ?, ?, '    ', '${axSource}', ?, ?, ?,
+          ?, ?, '   ', 0, 0, 0, 0,
+          'I', ?, '        ', '        ', ?, ?,
+          ?, ?, 1
+        )`, [
+                anomlTargetId,
+                targetAccount,
+                header.date,
+                controlValue,
+                lineRef,
+                anomlComment,
+                doneFlag,
+                lineUnique,
+                journal,
+                header.date,
+                now.iso,
+                now.iso,
+            ]);
+        }
+    } // end per-line loop
+    // ---------------------------------------------------------------------------
+    // 3. UPDATE nbank — once, with the total bank movement across all lines.
+    // ---------------------------------------------------------------------------
+    await updateNbankBalance(trx, bankCode, totalBankPounds);
+    // ---------------------------------------------------------------------------
+    // 4. Entry-level verification asserts (Phase A, in-trx).
+    // ---------------------------------------------------------------------------
+    // For nominal entries each VAT-bearing line produces 2 atran rows (net +
+    // VAT split). Sales/purchase entries have no atran VAT split (1 row each).
+    const totalAtranCount = lines.length + (isNominal ? vatLineCount : 0);
+    await assertAentryAtran(trx, {
+        entryNumber,
+        bankAccount: bankCode,
+        expectedSignedPence: totalSignedPence,
+        expectedAtType: at_type,
+        expectedDate: header.date,
+        expectedAtranCount: totalAtranCount,
+    });
+    if (isSales || isPurchase) {
+        for (const ln of lines) {
+            const lineAbs = ln.absPence / 100;
+            await assertLedgerRow(trx, {
+                ledger: isSales ? 'sales' : 'purchase',
+                entryNumber,
+                cbtype,
+                account: ln.atAccount,
+                expectedValuePounds: isSales
+                    ? (isReceipt ? -lineAbs : lineAbs) // stran: receipt=negative, refund=positive
+                    : (isReceipt ? lineAbs : -lineAbs), // ptran: payment=negative, refund=positive
+            });
+        }
+    }
+    if (decision.postToNominal) {
+        // ntran count: 2 per line (bank + target), +1 per VAT line.
+        await assertBalancedPair(trx, {
+            table: 'ntran',
+            journal,
+            expectedCount: lines.length * 2 + vatLineCount,
+            entryNumber,
+        });
+    }
+    // anoml count: 2 per line (bank + target), +1 per VAT line (nominal only).
+    const anomlVatCount = isNominal ? vatLineCount : 0;
+    await assertBalancedPair(trx, {
+        table: 'anoml',
+        journal,
+        expectedCount: lines.length * 2 + anomlVatCount,
+        entryNumber,
+    });
+    return { entry_number: entryNumber, fingerprint };
 }
 // ---------------------------------------------------------------------
 // Public executor
