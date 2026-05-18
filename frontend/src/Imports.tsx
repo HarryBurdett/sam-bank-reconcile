@@ -1457,7 +1457,19 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     // BE change doesn't silently empty the dropdown again.
     const banksFromResp =
       bankAccountsData?.banks ?? bankAccountsData?.bank_accounts ?? null;
-    if (bankAccountsData?.success && Array.isArray(banksFromResp) && currentCompanyId) {
+    // Populate bankAccounts whenever the BE returned data. The
+    // company-change branch below additionally needs currentCompanyId
+    // (to derive the localStorage key for the saved bank code), but
+    // populating the bank-accounts list itself must NOT depend on
+    // currentCompanyId — that field is sourced from
+    // apiClient.getCompanies() which returns just a string-array in
+    // the standalone host, so .current_company.id is undefined and
+    // the gated useEffect never fired. Result: the bank-transfer
+    // modal's dropdown was empty, and typing a code couldn't
+    // auto-resolve (nothing to match against). Faithfully populating
+    // bankAccounts from the BE response, independent of company-id
+    // resolution, fixes the dropdown and the auto-resolve.
+    if (bankAccountsData?.success && Array.isArray(banksFromResp)) {
       const accounts = banksFromResp.map((b: any) => ({
         code: b.code,
         description: b.description,
@@ -1465,6 +1477,14 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         account_number: b.account_number || ''
       }));
       setBankAccounts(accounts);
+    }
+    if (bankAccountsData?.success && Array.isArray(banksFromResp) && currentCompanyId) {
+      const accounts = banksFromResp.map((b: any) => ({
+        code: b.code,
+        description: b.description,
+        sort_code: b.sort_code || '',
+        account_number: b.account_number || ''
+      }));
 
       // Detect if company has ACTUALLY changed (not initial load)
       // previousCompanyRef.current === null means this is first load
