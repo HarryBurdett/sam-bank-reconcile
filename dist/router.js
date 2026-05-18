@@ -2785,6 +2785,22 @@ export function createRouter(ctx) {
         // Same logic as /api/bank-import/import-from-pdf — Python's
         // separate endpoint accepts the same body shape so we just
         // forward via Express's internal dispatch.
+        //
+        // CRITICAL: translate `filepath` → `file_path` before forwarding.
+        // The legacy CSV import FE (handleBankImport) sends `filepath`
+        // (no underscore); the modern PDF import endpoint reads
+        // `file_path` (with underscore). Without this translation,
+        // every CSV import via the alias would forward with an empty
+        // file_path and fail with "file_path or bytes is required"
+        // even though the FE passed a perfectly valid filepath.
+        const q = req.query;
+        if (q.filepath !== undefined && q.file_path === undefined) {
+            q.file_path = q.filepath;
+        }
+        const body = (req.body ?? {});
+        if (body.filepath !== undefined && body.file_path === undefined) {
+            body.file_path = body.filepath;
+        }
         req.url = '/api/bank-import/import-from-pdf';
         router.handle(req, res, () => undefined);
     });
