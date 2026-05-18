@@ -971,18 +971,59 @@ export async function scanAllBanksFaithful(
         stage2.push(stmt);
         continue;
       }
-      // Prefer the file without an `_N` counter suffix (the original).
-      // If both have suffixes (or neither), keep the first seen.
+      // Tiebreak between same-period-key PDFs.
+      // 1. Prefer the file without an `_N` counter suffix (the
+      //    original — when one is `attachment_1.pdf`, the other
+      //    `attachment.pdf`, the bare one wins).
+      // 2. When both have suffixes (typical for Monzo, which always
+      //    appends a generation id like `_8732`/`_8841`), prefer
+      //    the one with the LATER `received_at` — bank statements
+      //    issued later are restated/refreshed versions that
+      //    supersede earlier ones for the same period.
+      // 3. If received_at is missing/equal, prefer the LARGER
+      //    numeric suffix (Monzo's file IDs are monotonically
+      //    increasing per cycle).
+      // 4. Final tiebreaker: keep the first seen.
       const existingHasSuffix = /_\d+\.pdf$/i.test(existing.filename);
       const stmtHasSuffix = /_\d+\.pdf$/i.test(stmt.filename);
+      const extractSuffix = (fn: string): number => {
+        const m = fn.match(/_(\d+)\.pdf$/i);
+        return m ? Number(m[1]) : Number.NaN;
+      };
+      let stmtWins = false;
+      let replaceReason = '';
       if (existingHasSuffix && !stmtHasSuffix) {
-        // replace
+        // Rule 1 — bare name beats suffixed copy.
+        stmtWins = true;
+        replaceReason = 'bare-filename';
+      } else if (existingHasSuffix && stmtHasSuffix) {
+        // Rule 2 — later received_at wins for same-period restatements.
+        const existingRx = existing.received_at
+          ? Date.parse(String(existing.received_at))
+          : Number.NaN;
+        const stmtRx = stmt.received_at
+          ? Date.parse(String(stmt.received_at))
+          : Number.NaN;
+        if (Number.isFinite(stmtRx) && Number.isFinite(existingRx) && stmtRx !== existingRx) {
+          stmtWins = stmtRx > existingRx;
+          replaceReason = stmtWins ? 'later-received_at' : '';
+        } else {
+          // Rule 3 — larger numeric suffix wins (Monzo monotonic IDs).
+          const exN = extractSuffix(existing.filename);
+          const stN = extractSuffix(stmt.filename);
+          if (Number.isFinite(exN) && Number.isFinite(stN) && exN !== stN) {
+            stmtWins = stN > exN;
+            replaceReason = stmtWins ? 'higher-suffix' : '';
+          }
+        }
+      }
+      if (stmtWins) {
         const idx = stage2.indexOf(existing);
         if (idx >= 0) stage2.splice(idx, 1);
         byPeriod.set(periodKey, stmt);
         stage2.push(stmt);
         logger.info(
-          `period-dedup[${bank.bank_code}]: kept ${stmt.filename}, dropped ${existing.filename}`,
+          `period-dedup[${bank.bank_code}]: kept ${stmt.filename} (${replaceReason}), dropped ${existing.filename}`,
         );
       } else {
         logger.info(
