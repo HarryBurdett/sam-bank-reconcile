@@ -657,13 +657,38 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
     }
     timings.scan_folder = round1((Date.now() - t2) / 1000);
     // ---- Step 4a: Cross-source dedup ----
-    // Legacy avoids duplicates by saving email PDFs to the bank
-    // subfolder during step 3 then re-discovering them as source='pdf'
-    // in step 4. The save-to-folder bytes path requires IMAP download
-    // + write, which the SAM port can wire later. For now, post-scan
-    // dedupe by (bank_code, filename) preferring source='pdf' — same
-    // end result the operator sees in the Hub.
+    // Three-stage dedup faithful to legacy routes.py:7495-7550:
+    //   1. Exact filename (preferring source='pdf' over 'email').
+    //   2. Filename-period-key (Monzo / Barclays patterns) — collapses
+    //      the legacy "save-with-counter" rename artefacts where the
+    //      same statement gets written 30+ times as <name>_1.pdf,
+    //      <name>_2.pdf etc. when content differs by metadata only.
+    //   3. Start-date supersession — partial Feb (02-01 to 02-19)
+    //      superseded by full Feb (02-01 to 02-28). The longer
+    //      statement wins.
+    // Pre-port TS only had stage 1, leaving 34 near-duplicate PDFs in
+    // the Barclays scan for intsys. Audit 2026-05-15 out-of-sequence
+    // GAP-3.
+    const extractStatementPeriodKey = (fn) => {
+        const lower = fn.toLowerCase();
+        // Monzo: Monzo_bank_statement_2026-01-01-2026-01-31_4539.pdf
+        const monzo = lower.match(/(\d{4}-\d{2}-\d{2})[_-](\d{4}-\d{2}-\d{2})/);
+        if (monzo)
+            return `${monzo[1]}_${monzo[2]}`;
+        // Barclays: Statement DD-MMM-YY AC XXXXXXXX XXXXXXXX.pdf
+        const barclays = lower.match(/statement\s+(\d{1,2}-[a-z]{3}-\d{2})\s+ac\s+(\d{8})/);
+        if (barclays)
+            return `${barclays[1]}_${barclays[2]}`;
+        return null;
+    };
+    const extractPeriodDates = (fn) => {
+        const m = fn.match(/(\d{4}-\d{2}-\d{2})[_-](\d{4}-\d{2}-\d{2})/);
+        if (m)
+            return { start: m[1], end: m[2] };
+        return null;
+    };
     for (const bank of Object.values(allBanks)) {
+        // Stage 1: exact filename
         const byName = new Map();
         for (const stmt of bank.statements) {
             const key = stmt.filename.toLowerCase().trim();
@@ -672,13 +697,83 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
                 byName.set(key, stmt);
                 continue;
             }
-            // Prefer source='pdf' over source='email' (legacy end-state).
             if (existing.source === 'pdf')
                 continue;
             if (stmt.source === 'pdf')
                 byName.set(key, stmt);
         }
-        bank.statements = Array.from(byName.values());
+        const stage1 = Array.from(byName.values());
+        // Stage 2: filename-period-key (statement-number + date)
+        const byPeriod = new Map();
+        const stage2 = [];
+        for (const stmt of stage1) {
+            const periodKey = extractStatementPeriodKey(stmt.filename);
+            if (!periodKey) {
+                stage2.push(stmt);
+                continue;
+            }
+            const existing = byPeriod.get(periodKey);
+            if (!existing) {
+                byPeriod.set(periodKey, stmt);
+                stage2.push(stmt);
+                continue;
+            }
+            // Prefer the file without an `_N` counter suffix (the original).
+            // If both have suffixes (or neither), keep the first seen.
+            const existingHasSuffix = /_\d+\.pdf$/i.test(existing.filename);
+            const stmtHasSuffix = /_\d+\.pdf$/i.test(stmt.filename);
+            if (existingHasSuffix && !stmtHasSuffix) {
+                // replace
+                const idx = stage2.indexOf(existing);
+                if (idx >= 0)
+                    stage2.splice(idx, 1);
+                byPeriod.set(periodKey, stmt);
+                stage2.push(stmt);
+                logger.info(`period-dedup[${bank.bank_code}]: kept ${stmt.filename}, dropped ${existing.filename}`);
+            }
+            else {
+                logger.info(`period-dedup[${bank.bank_code}]: dropped duplicate ${stmt.filename} (period ${periodKey} already present as ${existing.filename})`);
+            }
+        }
+        // Stage 3: start-date supersession (e.g. partial Feb superseded
+        // by full Feb on same period_start).
+        const byStart = new Map();
+        const stage3 = [];
+        for (const stmt of stage2) {
+            const dates = extractPeriodDates(stmt.filename);
+            if (!dates) {
+                stage3.push(stmt);
+                continue;
+            }
+            const existing = byStart.get(dates.start);
+            if (!existing) {
+                byStart.set(dates.start, stmt);
+                stage3.push(stmt);
+                continue;
+            }
+            const existingDates = extractPeriodDates(existing.filename);
+            if (!existingDates) {
+                stage3.push(stmt);
+                continue;
+            }
+            // Whichever covers a LATER end date wins (full-period beats
+            // partial-period). Same end date → keep existing.
+            if (dates.end > existingDates.end) {
+                const idx = stage3.indexOf(existing);
+                if (idx >= 0)
+                    stage3.splice(idx, 1);
+                byStart.set(dates.start, stmt);
+                stage3.push(stmt);
+                logger.info(`start-date-dedup[${bank.bank_code}]: ${stmt.filename} (${dates.end}) supersedes ${existing.filename} (${existingDates.end})`);
+            }
+            else if (dates.end < existingDates.end) {
+                logger.info(`start-date-dedup[${bank.bank_code}]: ${stmt.filename} (${dates.end}) superseded by ${existing.filename} (${existingDates.end})`);
+            }
+            else {
+                stage3.push(stmt);
+            }
+        }
+        bank.statements = stage3;
     }
     // ---- Step 5: Sort + finalize each bank's statements ----
     // Legacy line 7615. fill_missing_balances_from_cache is a no-op
@@ -902,15 +997,23 @@ export async function scanAllBanksFaithful(operaDb, mailbox, appDb, logger, opts
     const MAX_EAGER_PER_BANK = 8;
     if (extractOnMiss && extractor && appDb) {
         for (const bank of Object.values(banksWithStatements)) {
-            if (bank.extraction_status !== 'incomplete')
-                continue;
+            // Eligible target = any statement missing balances with a
+            // source we can read (folder path or email attachment).
+            // Previously this loop short-circuited on
+            // `bank.extraction_status !== 'incomplete'`, which is true
+            // whenever the FIRST statement has cached balances — leaving
+            // all the other un-extracted statements forever blank in the
+            // FE preview.
             const targets = bank.statements
-                .filter((s) => s.status === 'pending_extraction' &&
+                .filter((s) => (s.opening_balance == null || s.closing_balance == null) &&
+                s.status !== 'imported' &&
+                s.status !== 'already_processed' &&
                 (!!(s.full_path || s.file_path) ||
                     (s.source === 'email' && s.email_id && s.attachment_id)))
                 .slice(0, MAX_EAGER_PER_BANK);
             if (targets.length === 0)
                 continue;
+            logger.info(`eager-extract[${bank.bank_code}]: extracting ${targets.length} target(s)`);
             for (const target of targets) {
                 const filePath = (target.full_path || target.file_path) ?? null;
                 const fromEmail = target.source === 'email' && !filePath;

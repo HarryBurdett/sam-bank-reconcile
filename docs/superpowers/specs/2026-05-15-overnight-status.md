@@ -94,7 +94,7 @@ cd /Users/maccb/sam-Bankrec/repo && LOGIN_PASSWORD=letmein PORT=3030 \
   OPERA_ADAPTER=mssql OPERA_SQL_HOST=172.17.172.99 OPERA_SQL_PORT=1433 \
   OPERA_SQL_USER=n8n OPERA_SQL_PASSWORD=possible \
   OPERA_SQL_TRUST_CERT=true OPERA_SQL_ENCRYPT=false \
-  GEMINI_API_KEY=AIzaSyCtSdca0-wZnhzYSqYgvU76CoQ9d8k9wqg \
+  GEMINI_API_KEY=<set-from-your-secret-store> \
   npx tsx standalone/server.ts
 ```
 
