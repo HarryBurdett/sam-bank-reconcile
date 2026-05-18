@@ -781,11 +781,26 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
     authFetch('/api/cashbook/bank-accounts')
       .then(res => res.json())
       .then(data => {
-        if (data.success && data.accounts) {
-          setBankAccounts(data.accounts);
+        // The cashbook endpoint returns the array under `banks`; older
+        // code expected `accounts` (or `bank_accounts`). Accept any of
+        // the three so a future BE change doesn't silently empty the
+        // dropdown — the bank-transfer modal on this page relies on
+        // bankAccounts being populated. Without this, the "Source Bank"
+        // dropdown on a Transfer In (and "Destination Bank" on a
+        // Transfer Out) shows no options because `accounts` is
+        // undefined in the response.
+        const list = Array.isArray(data?.banks)
+          ? data.banks
+          : Array.isArray(data?.accounts)
+            ? data.accounts
+            : Array.isArray(data?.bank_accounts)
+              ? data.bank_accounts
+              : null;
+        if (data.success && list) {
+          setBankAccounts(list);
           // Auto-select first bank if none selected AND no initial data pending
-          if (data.accounts.length > 0 && !selectedBank && !initialReconcileData && !resumeStatement) {
-            setSelectedBank(data.accounts[0].code);
+          if (list.length > 0 && !selectedBank && !initialReconcileData && !resumeStatement) {
+            setSelectedBank(list[0].code);
           }
         }
       })
