@@ -3,6 +3,8 @@ import { validatePostingPeriod, getLedgerTypeForTransaction, } from '../_shared/
 import { markEntriesReconciled } from './mark-reconciled.js';
 import { learnPattern } from './bank-pattern-learner.js';
 import { recordDeferredTransaction } from './deferred-items.js';
+import { findExistingCycleRow } from './cycle-row-lookup.js';
+import { fingerprintTransactionLine } from './transaction-fingerprint.js';
 async function bankExists(operaDb, bankCode) {
     try {
         const row = (await operaDb('nbank')
@@ -86,6 +88,48 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
     // bank_statement_imports + duplicate "Awaiting Reconcile" entry
     // in the FE. Audit 2026-05-15.
     const effectiveResumeImportId = input.resumeImportId ?? overlap.resumeImportId ?? null;
+    // Cycle-aware import for cumulative-statement banks (Monzo et al.):
+    // when a bank_statement_imports row already exists for this cycle
+    // (same bank_code + same period_start) and it's already been
+    // reconciled, refuse this import with a clear message. The
+    // operator must unreconcile the cycle in the Reconcile UI before
+    // re-importing. Without this guard, a subsequent pull from the
+    // same month would silently create a duplicate audit row, then
+    // confuse downstream sequencing.
+    //
+    // Resume-import path (effectiveResumeImportId set) bypasses this
+    // — the FE/overlap-checker has already identified the specific
+    // row to UPDATE, so cycle-merge is unnecessary.
+    if (!effectiveResumeImportId && extracted.period_start) {
+        const cycleRow = await findExistingCycleRow(appDb, bankCode, extracted.period_start);
+        if (cycleRow && cycleRow.is_reconciled === 1) {
+            return {
+                success: false,
+                error: `The ${bankCode} statement cycle starting ${extracted.period_start} ` +
+                    `— this cycle is already reconciled (closed at £${cycleRow.closing_balance?.toFixed(2) ?? '?'}). ` +
+                    `To import additional transactions from a later pull within the ` +
+                    `same cycle, unreconcile the cycle first via the Reconcile page.`,
+            };
+        }
+        // Shorter-pull guard: if the existing cycle row's period_end
+        // is LATER than the new pull's period_end, the operator is
+        // trying to import an older pull (out of order). Refuse —
+        // merging would either shrink period_end or skip new lines
+        // that aren't actually new.
+        if (cycleRow &&
+            cycleRow.period_end &&
+            extracted.period_end &&
+            cycleRow.period_end > extracted.period_end) {
+            return {
+                success: false,
+                error: `The ${bankCode} statement cycle starting ${extracted.period_start} ` +
+                    `has already imported a later pull (through ${cycleRow.period_end}). ` +
+                    `This pull only covers up to ${extracted.period_end}, so it has ` +
+                    `nothing new to add. Re-import the latest pull (period_end >= ` +
+                    `${cycleRow.period_end}) instead.`,
+            };
+        }
+    }
     const lockKey = `bank-import:${bankCode}`;
     const acquired = await importLock.acquire(lockKey, 'import-from-pdf');
     if (!acquired) {
@@ -388,11 +432,9 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
             (result.records_imported > 0 || deferredCount > 0);
         if (shouldPersistAudit) {
             try {
-                // Resume-import: UPDATE the existing bank_statement_imports row
-                // rather than INSERT a new one (legacy routes.py:4502-4526). The
-                // running totals accumulate so the audit reflects the full set
-                // of posted lines across all attempts.
                 let importId;
+                // Branch 1: resume-import path (FE / overlap-checker says
+                // "this is a re-upload of an existing row"). Unchanged.
                 if (effectiveResumeImportId) {
                     try {
                         const existing = (await appDb('bank_statement_imports')
@@ -416,19 +458,67 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
                         importId = effectiveResumeImportId;
                     }
                     catch (resumeErr) {
-                        // eslint-disable-next-line no-console
                         console.warn(`[bank-reconcile] resume UPDATE failed for import_id=${effectiveResumeImportId}: ${resumeErr instanceof Error ? resumeErr.message : String(resumeErr)} — falling back to fresh INSERT`);
                     }
                 }
+                // Branch 2: cycle-merge path (cumulative-statement banks).
+                // Reached only when not in resume-mode. Look up the existing
+                // cycle row (bank_code, period_start). If found unreconciled,
+                // UPDATE it instead of INSERTing a duplicate.
+                // (Reconciled-cycle case is refused earlier — see the
+                // findExistingCycleRow call at the top of this function.)
+                if (!importId && extracted.period_start) {
+                    const cycleRow = await findExistingCycleRow(appDb, bankCode, extracted.period_start);
+                    if (cycleRow && cycleRow.is_reconciled === 0) {
+                        // Extend the cycle row in place. period_end advances to
+                        // the new pull's period_end (never shrinks);
+                        // closing_balance reflects the latest pull;
+                        // running totals accumulate.
+                        try {
+                            const newPeriodEnd = (cycleRow.period_end ?? '') > (extracted.period_end ?? '')
+                                ? cycleRow.period_end
+                                : extracted.period_end;
+                            const existing = (await appDb('bank_statement_imports')
+                                .where({ id: cycleRow.id })
+                                .first());
+                            const prevImported = Number(existing?.records_imported ?? 0);
+                            const prevTxImported = Number(existing?.transactions_imported ?? 0);
+                            const prevReceipts = Number(existing?.total_receipts ?? 0);
+                            const prevPayments = Number(existing?.total_payments ?? 0);
+                            await appDb('bank_statement_imports')
+                                .where({ id: cycleRow.id })
+                                .update({
+                                period_end: newPeriodEnd,
+                                closing_balance: extracted.closing_balance,
+                                total_receipts: prevReceipts + totalReceipts,
+                                total_payments: prevPayments + totalPayments,
+                                transactions_imported: prevTxImported + result.records_imported,
+                                records_imported: prevImported + result.records_imported,
+                                imported_at: appDb.fn.now(),
+                                imported_by: input.importedBy ?? 'system',
+                            });
+                            importId = cycleRow.id;
+                        }
+                        catch (cycleErr) {
+                            console.warn(`[bank-reconcile] cycle-merge UPDATE failed for import_id=${cycleRow.id}: ${cycleErr instanceof Error ? cycleErr.message : String(cycleErr)} — falling back to fresh INSERT`);
+                        }
+                    }
+                }
+                // Branch 3: fresh INSERT (unchanged from before — traditional
+                // banks always land here; cumulative banks land here only on
+                // the FIRST pull of a cycle). Faithful port of legacy
+                // routes.py:4502-4526 — write the audit row so the
+                // scan-all-banks gating chain sees the import.
                 if (!importId) {
                     const [insertedId] = (await appDb('bank_statement_imports')
                         .insert({
                         bank_code: bankCode,
                         source: 'file',
                         source_ref: input.filename ?? input.filePath,
-                        // statement-info columns expected by statement-tracking.ts,
-                        // bank-reconciliation-status.ts and the scan-all-banks
-                        // gating chain. Faithful to legacy email/storage.py:1615.
+                        // Statement-info columns read downstream by
+                        // statement-tracking.ts, bank-reconciliation-status.ts,
+                        // and the scan-all-banks gating chain. Faithful to
+                        // legacy email/storage.py:1615.
                         statement_date: extracted.statement_date ?? null,
                         account_number: extracted.account_number ?? null,
                         sort_code: extracted.sort_code ?? null,
@@ -451,34 +541,59 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
                             ? insertedId
                             : insertedId?.id;
                 }
-                // Per-line tracking — faithful port of
-                // save_statement_transactions (storage.py:2241). Write a row
-                // for EVERY extracted statement line so the reconcile screen
-                // can display the original statement layout regardless of
-                // whether the line was posted, skipped, or deferred. The
-                // posted lines get their posted_entry_number stamped in a
-                // follow-up UPDATE pass (legacy uses mark_transaction_posted
-                // — we batch it here for efficiency).
+                // Per-line tracking. We rebuild the entire bank_statement_transactions
+                // set for this import_id on every call. This keeps stored line_number
+                // aligned with the position in extracted.transactions — which is
+                // critical because the executor reports posted_lines[].line_number as
+                // (position + 1), and the stamping step below matches by line_number.
+                //
+                // To preserve reconciled-row state across a cycle-merge re-import
+                // (Monzo etc.), we fingerprint each previously-stored row and carry
+                // over its posted_entry_number, posted_at, and is_reconciled fields
+                // when the same fingerprint appears in the new extraction.
+                //
+                // Faithful to legacy email/storage.py:1615 — these statement-info
+                // columns (post_date/description/amount/balance) are read downstream
+                // by statement-tracking.ts, bank-reconciliation-status.ts, and the
+                // scan-all-banks gating chain.
                 if (importId) {
-                    // Idempotent: clear any prior rows for this import_id.
-                    // Matches storage.py:2286.
+                    // 1. Snapshot existing rows for this import_id, indexed by fingerprint.
+                    const existingLines = (await appDb('bank_statement_transactions')
+                        .where({ import_id: importId })
+                        .select('post_date', 'amount', 'description', 'posted_entry_number', 'posted_at', 'is_reconciled'));
+                    const existingByFingerprint = new Map();
+                    for (const r of existingLines) {
+                        const fp = fingerprintTransactionLine((r.post_date ?? '').slice(0, 10), Number(r.amount ?? 0), r.description);
+                        existingByFingerprint.set(fp, {
+                            posted_entry_number: r.posted_entry_number,
+                            posted_at: r.posted_at,
+                            is_reconciled: r.is_reconciled,
+                        });
+                    }
+                    // 2. Wipe existing rows.
                     await appDb('bank_statement_transactions')
                         .where({ import_id: importId })
                         .delete();
-                    // Bulk insert the full extracted set.
-                    const allRows = extracted.transactions.map((t, idx) => ({
-                        import_id: importId,
-                        line_number: idx + 1,
-                        post_date: (t.date ?? '').slice(0, 10) || null,
-                        description: (t.memo ?? t.name ?? '').toString().slice(0, 500),
-                        amount: Number(t.amount ?? 0),
-                        balance: t.balance ?? null,
-                        transaction_type: String(t.type ?? ''),
-                        reference: t.reference ?? null,
-                        posted_entry_number: null,
-                        posted_at: null,
-                        is_reconciled: 0,
-                    }));
+                    // 3. Rebuild from extracted.transactions, preserving state when
+                    //    a fingerprint matches a prior row. line_number = i+1 so the
+                    //    executor's posted_lines[].line_number stamping works.
+                    const allRows = extracted.transactions.map((t, idx) => {
+                        const fp = fingerprintTransactionLine((t.date ?? '').slice(0, 10), Number(t.amount ?? 0), (t.memo ?? t.name ?? '').toString());
+                        const preserved = existingByFingerprint.get(fp);
+                        return {
+                            import_id: importId,
+                            line_number: idx + 1,
+                            post_date: (t.date ?? '').slice(0, 10) || null,
+                            description: (t.memo ?? t.name ?? '').toString().slice(0, 500),
+                            amount: Number(t.amount ?? 0),
+                            balance: t.balance ?? null,
+                            transaction_type: String(t.type ?? ''),
+                            reference: t.reference ?? null,
+                            posted_entry_number: preserved?.posted_entry_number ?? null,
+                            posted_at: preserved?.posted_at ?? null,
+                            is_reconciled: preserved?.is_reconciled ?? 0,
+                        };
+                    });
                     if (allRows.length > 0) {
                         await appDb('bank_statement_transactions').insert(allRows);
                     }
