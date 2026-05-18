@@ -311,6 +311,35 @@ export async function scanAllBanksFaithful(
       size_bytes?: number;
     }>;
   }> = [];
+  // Sync the mailbox first so the scan sees emails that have arrived
+  // since the last sync. scan-emails (per-bank) does this; we do it
+  // here too so the Hub's aggregated scan reflects fresh IMAP state.
+  // 30s timeout matches scan-emails — IMAP fetch on a slow server
+  // shouldn't block the whole Hub render forever.
+  let mailboxSynced = false;
+  let mailboxSyncSkipped = false;
+  if (mailbox && mailbox.sync) {
+    try {
+      await Promise.race([
+        mailbox.sync(),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('sync timeout')), 30_000),
+        ),
+      ]);
+      mailboxSynced = true;
+    } catch (err) {
+      mailboxSyncSkipped = true;
+      logger.warn(
+        `Scan-all-banks: mailbox.sync failed (proceeding with cached): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  } else if (mailbox) {
+    // Adapter has no sync() method — already-cached state only.
+    mailboxSyncSkipped = true;
+  }
+
   if (mailbox) {
     try {
       const result = await mailbox.list({ fromDate, pageSize });
@@ -1630,8 +1659,8 @@ export async function scanAllBanksFaithful(
     emails_saved_to_folders: emailsSavedToFolders,
     duplicates_archived: duplicatesArchived,
     days_searched: daysBack,
-    mailbox_synced: false,
-    mailbox_sync_skipped: false,
+    mailbox_synced: mailboxSynced,
+    mailbox_sync_skipped: mailboxSyncSkipped,
     timings,
     message,
   };
