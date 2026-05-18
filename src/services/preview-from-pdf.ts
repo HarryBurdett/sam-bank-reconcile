@@ -30,6 +30,10 @@ import {
   loadCustomerCandidates,
   loadSupplierCandidates,
 } from './bank-matcher.js';
+import {
+  buildBankLineTracking,
+  bankLineTrackingKey,
+} from './bank-line-tracking.js';
 import type {
   PdfExtractionResult,
   PdfExtractor,
@@ -567,6 +571,18 @@ export async function previewBankImportFromPdf(
     matchCtx = null;
   }
 
+  // Build per-line tracking so the matcher loop can honour the
+  // "anything reconciled is correct" rule below. Returns an empty map
+  // (no-op) when appDb is null, no anchor date is available, or the
+  // lookup errors — caller-visible behaviour is unchanged in those
+  // cases, just no extra gating.
+  const trackedByKey = await buildBankLineTracking({
+    appDb,
+    bankCode: bank.code,
+    scopeAnchor:
+      extracted.statement_date ?? extracted.period_end ?? extracted.period_start ?? null,
+  });
+
   if (matchCtx) {
     for (const txn of txnsForUi) {
       if (txn.is_duplicate) continue;
@@ -576,6 +592,22 @@ export async function previewBankImportFromPdf(
           dateAny != null && typeof dateAny === 'object' && 'toISOString' in (dateAny as object)
             ? (dateAny as Date).toISOString().slice(0, 10)
             : String(dateAny ?? '').slice(0, 10);
+
+        // Reconciled gate — "anything reconciled is correct, leave it
+        // alone". Skip the matcher entirely (no repeat-entry check, no
+        // customer/supplier match) so a reconciled line resurfaced by
+        // a cycle-merge re-extract can't be re-classified. The line
+        // stays in the preview but pre-flagged as skip/reconciled so
+        // the operator sees what happened.
+        const tracked = trackedByKey.get(
+          bankLineTrackingKey(dateYmd, Number(txn.amount ?? 0)),
+        );
+        if (tracked && tracked.count === 1 && tracked.is_reconciled) {
+          txn.action = 'skip';
+          txn.skip_reason = 'Already reconciled';
+          continue;
+        }
+
         const res = await matchTransaction(operaDb, appDb, matchCtx, {
           bankCode: bank.code,
           date: dateYmd,

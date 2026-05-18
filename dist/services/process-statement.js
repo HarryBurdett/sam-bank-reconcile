@@ -2,6 +2,7 @@ import { findDuplicates } from './duplicate-detection.js';
 import { previewBankImportFromPdf, } from './preview-from-pdf.js';
 import { buildMatchContext, matchTransaction, } from './match-transaction.js';
 import { loadCustomerCandidates, loadSupplierCandidates, } from './bank-matcher.js';
+import { buildBankLineTracking, bankLineTrackingKey, } from './bank-line-tracking.js';
 function matchTypeFromAction(action) {
     switch (action) {
         case 'sales_receipt':
@@ -41,85 +42,44 @@ export async function processStatement(operaDb, llm, input, appDb) {
         ctx = null;
     }
     // Load SAM's per-line tracking for this bank, scoped to imports
-    // whose statement_date overlaps the preview window. When a preview
-    // line matches a stored row, the stored `posted_entry_number` is
-    // the authoritative "is this posted to Opera" signal — Opera-side
-    // findDuplicates is a fallback only for lines SAM has never seen
-    // before. Critical for the post-restore recovery flow: after we
-    // clear orphan posted_entry_number values, re-analysis must respect
-    // that and not re-flag the lines as posted just because findDuplicates
-    // grabs an unrelated Opera entry within ±14 days.
+    // whose statement_date overlaps the preview window. Two facts come
+    // back per (date, amount) key:
     //
-    // Scope guard: we only look at imports whose statement_date falls
-    // within ±7 days of the preview's statement_date / period bounds.
-    // Without this scope, a brand-new statement could pick up unrelated
-    // tracking from a different statement that happened to have a line
-    // with the same (date, amount), producing wrong is_duplicate flags.
-    // With the scope, we only override findDuplicates for tracking that
-    // genuinely belongs to the statement being re-analysed.
-    const trackedByKey = new Map();
-    if (appDb) {
-        try {
-            const info = preview.statement_info ?? null;
-            const scopeAnchor = info?.statement_date ?? info?.period_end ?? info?.period_start ?? null;
-            // Only apply tracking override when we have an anchor date to
-            // scope it. Without an anchor we can't safely distinguish the
-            // current statement from historical ones, so fall back to the
-            // pre-existing Opera-only path for every line.
-            if (scopeAnchor) {
-                const anchorMs = Date.parse(scopeAnchor);
-                if (Number.isFinite(anchorMs)) {
-                    const lo = new Date(anchorMs - 7 * 86400000).toISOString().slice(0, 10);
-                    const hi = new Date(anchorMs + 7 * 86400000).toISOString().slice(0, 10);
-                    const stored = (await appDb('bank_statement_transactions')
-                        .join('bank_statement_imports', 'bank_statement_transactions.import_id', 'bank_statement_imports.id')
-                        .where('bank_statement_imports.bank_code', input.bankCode)
-                        .andWhere('bank_statement_imports.statement_date', '>=', lo)
-                        .andWhere('bank_statement_imports.statement_date', '<=', hi)
-                        .select('bank_statement_transactions.post_date as post_date', 'bank_statement_transactions.amount as amount', 'bank_statement_transactions.posted_entry_number as posted_entry_number'));
-                    for (const row of stored) {
-                        const ymd = row.post_date instanceof Date
-                            ? row.post_date.toISOString().slice(0, 10)
-                            : String(row.post_date ?? '').slice(0, 10);
-                        if (!ymd)
-                            continue;
-                        const amt = Number(row.amount ?? 0);
-                        const key = `${ymd}|${amt.toFixed(2)}`;
-                        const existing = trackedByKey.get(key);
-                        const pen = (row.posted_entry_number ?? '').trim() || null;
-                        if (!existing) {
-                            trackedByKey.set(key, {
-                                posted_entry_number: pen,
-                                count: 1,
-                            });
-                        }
-                        else {
-                            // Multiple stored rows share this (date, amount) — we
-                            // can't safely pick one to override findDuplicates, so
-                            // we increment the count and the per-line decision
-                            // logic will skip the override entirely. Old behaviour
-                            // preserved for ambiguous keys.
-                            existing.count += 1;
-                            if (pen && !existing.posted_entry_number) {
-                                existing.posted_entry_number = pen;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        catch {
-            // Tracking lookup is best-effort; fall through to Opera-only
-            // findDuplicates if anything goes wrong.
-        }
-    }
+    //   - posted_entry_number — authoritative "is this posted to Opera"
+    //     signal; overrides Opera-side findDuplicates so orphan-clear /
+    //     re-analysis flows don't re-flag lines as posted just because a
+    //     same-amount Opera entry exists within ±14 days.
+    //
+    //   - is_reconciled — when set, the line has been definitively
+    //     reconciled. We MUST NOT run the matcher (including the Stage-0
+    //     repeat-entry check) on it. As the operator put it: "anything
+    //     reconciled is correct". Reclassifying a reconciled line is a
+    //     regression risk with no upside.
+    //
+    // Both are best-effort: any error returns an empty map and the
+    // matcher falls back to the Opera-only path. See
+    // ./bank-line-tracking.ts for the scoping/ambiguity guards.
+    const info = preview.statement_info ?? null;
+    const trackedByKey = await buildBankLineTracking({
+        appDb: appDb ?? null,
+        bankCode: input.bankCode,
+        scopeAnchor: info?.statement_date ?? info?.period_end ?? info?.period_start ?? null,
+    });
     const matched = [];
     let duplicateCount = 0;
     let matchedCount = 0;
     for (const txn of preview.transactions) {
         const dateYmd = (txn.date ?? '').slice(0, 10);
-        const amtKey = Number(txn.amount ?? 0).toFixed(2);
-        const tracked = trackedByKey.get(`${dateYmd}|${amtKey}`);
+        const tracked = trackedByKey.get(bankLineTrackingKey(dateYmd, Number(txn.amount ?? 0)));
+        // Reconciled gate — "anything reconciled is correct, leave it
+        // alone". When the stored row carries is_reconciled=1 (and the
+        // (date, amount) key isn't ambiguous), we treat the line as
+        // skip/already-done and DO NOT run the matcher. This prevents the
+        // Stage-0 repeat-entry check (and the customer/supplier matcher)
+        // from re-classifying a line the operator already pinned. It also
+        // catches edge cases the Opera-side findDuplicates probe misses
+        // (entries archived to aentryh, cycle-merge preservation, etc.).
+        const isReconciled = !!(tracked && tracked.count === 1 && tracked.is_reconciled);
         // Duplicate detection (preserved from prior implementation)
         const candidates = await findDuplicates(operaDb, {
             name: txn.name ?? '',
@@ -136,9 +96,10 @@ export async function processStatement(operaDb, llm, input, appDb) {
         // findDuplicates result. Multiple stored rows for the same
         // date+amount fall back to findDuplicates so we don't make a wrong
         // override.
-        const isDup = tracked && tracked.count === 1
-            ? !!(tracked.posted_entry_number && tracked.posted_entry_number.trim())
-            : !!top;
+        const isDup = isReconciled ||
+            (tracked && tracked.count === 1
+                ? !!(tracked.posted_entry_number && tracked.posted_entry_number.trim())
+                : !!top);
         if (isDup)
             duplicateCount += 1;
         let suggestedAccount = null;
@@ -150,7 +111,9 @@ export async function processStatement(operaDb, llm, input, appDb) {
                 : 'purchase_payment';
         let matchSource = '';
         let matchScore = 0;
-        let skipReason = null;
+        let skipReason = isReconciled
+            ? 'Already reconciled'
+            : null;
         let bankTransferDetails = null;
         let repeatEntry = null;
         let refundCreditNote = null;
