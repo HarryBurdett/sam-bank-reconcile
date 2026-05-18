@@ -4,7 +4,7 @@
  * Two-phase verification of a multi-table Opera posting:
  *
  *   (A) `assert*` helpers run INSIDE the trx that just did the
- *       INSERTs. They use `WITH (NOLOCK)` so they take no shared
+ *       INSERTs. Most use `WITH (NOLOCK)` so they take no shared
  *       locks (within our own session, NOLOCK still reads our own
  *       uncommitted inserts — see SQL Server isolation semantics).
  *       A mismatch throws `PostingVerificationError`, which the
@@ -20,11 +20,16 @@
  *       Opera manually before re-running").
  *
  * Lock surface: zero new locks. NOLOCK is used throughout
- * specifically so concurrent Opera UI activity is never blocked
- * by our verification step. Concurrency safety for the actual
- * writes is handled elsewhere — `incrementAtypeEntry` serialises
- * the entry-number allocator with UPDLOCK+ROWLOCK on atype, and
- * balance updates use UPDLOCK+ROWLOCK with additive UPDATE.
+ * EXCEPT in `assertAentryAtran`, which had its NOLOCK hints
+ * dropped for sqlite-test compatibility (perf-only — the function
+ * reads only our own session's inserts within the same trx, which
+ * default isolation handles fine). The other helpers still use
+ * NOLOCK specifically so concurrent Opera UI activity is never
+ * blocked by our verification step. Concurrency safety for the
+ * actual writes is handled elsewhere — `incrementAtypeEntry`
+ * serialises the entry-number allocator with UPDLOCK+ROWLOCK on
+ * atype, and balance updates use UPDLOCK+ROWLOCK with additive
+ * UPDATE.
  */
 import type { Knex } from 'knex';
 
