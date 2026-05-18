@@ -185,7 +185,27 @@ export async function loadCompany(
       client: 'sqlite3',
       connection: { filename: dbPath },
       useNullAsDefault: true,
-      pool: { min: 1, max: 1 },
+      pool: {
+        min: 1,
+        max: 1,
+        // SQLite has foreign_keys OFF by default — must be enabled
+        // per-connection. Without this, a DELETE on
+        // bank_statement_imports leaves child rows in
+        // bank_statement_transactions stranded as orphans (the
+        // root cause of the 77-orphan-row bug we shipped a repair
+        // tool for). Future migrations that add FK constraints
+        // will then actually enforce them.
+        afterCreate: (
+          conn: { run?: (sql: string, cb: (err: Error | null) => void) => void },
+          done: (err: Error | null) => void,
+        ): void => {
+          if (typeof conn.run === 'function') {
+            conn.run('PRAGMA foreign_keys=ON', (err) => done(err));
+          } else {
+            done(null);
+          }
+        },
+      },
     });
     await runMigrations(appDb);
     await seedSettingsFromLegacy(appDb, opts.legacyDataRoot, code, opts.logger);
@@ -379,6 +399,20 @@ type RowTransform = (row: Record<string, unknown>) => Record<string, unknown>;
 interface LegacyTableSpec {
   name: string;
   transform?: RowTransform;
+  /**
+   * When set, the seeder preserves the legacy `id` column instead of
+   * stripping it for autoincrement. Required for parent tables whose
+   * children carry an FK by id (e.g. bank_statement_imports.id is
+   * referenced by bank_statement_transactions.import_id). Without
+   * this flag, SQLite assigns fresh parent ids on seed and every
+   * child row points at a parent id that no longer exists — the
+   * root cause of the 77-orphan-row bug in intsys/BC010.
+   *
+   * After a preserve-id seed, the seeder bumps sqlite_sequence past
+   * the largest seeded id so future autoincrement inserts don't
+   * collide.
+   */
+  preserveId?: boolean;
 }
 
 /**
@@ -508,8 +542,8 @@ const LEGACY_TABLE_PLAN: ReadonlyArray<{
     subdir: 'core',
     file: 'email_data.db',
     tables: [
-      { name: 'bank_statement_imports', transform: transformBankStatementImport },
-      { name: 'bank_statement_transactions', transform: transformBankStatementTransaction },
+      { name: 'bank_statement_imports', transform: transformBankStatementImport, preserveId: true },
+      { name: 'bank_statement_transactions', transform: transformBankStatementTransaction, preserveId: true },
       { name: 'bank_import_drafts' },
       { name: 'ignored_bank_transactions', transform: transformIgnoredBankTransaction },
     ],
@@ -629,7 +663,18 @@ function transformBankStatementImport(
   } else if (typeof row.filename === 'string') {
     sourceRef = row.filename;
   }
+  // Preserve the legacy `id` so the parent-child linkage to
+  // bank_statement_transactions stays intact after the seed. Without
+  // this, SQLite autoincrement reassigns new ids on insert and every
+  // child row (which copies its legacy `import_id` verbatim) becomes
+  // an orphan pointing at the old parent id. Confirmed bug source
+  // for the intsys/BC010 case where 77 child rows pointed at parent
+  // ids 67/68/71 that no longer existed in bank_statement_imports.
+  // After seeding the table-wide AUTOINCREMENT max needs to be
+  // advanced past the largest legacy id (done in seedFromLegacyDb
+  // via a sqlite_sequence bump).
   return {
+    id: row.id,
     bank_code: row.bank_code,
     statement_date: row.statement_date ?? null,
     opening_balance: row.opening_balance ?? null,
@@ -661,7 +706,12 @@ function transformBankStatementImport(
 function transformBankStatementTransaction(
   row: Record<string, unknown>,
 ): Record<string, unknown> {
+  // Preserve `id` to keep child-row ordering stable across re-seeds.
+  // The critical FK field is `import_id` — paired with the
+  // `id` preservation in transformBankStatementImport, this keeps
+  // every child correctly attached to its parent.
   return {
+    id: row.id,
     import_id: row.import_id,
     line_number: row.line_number,
     post_date: row.date,
@@ -751,9 +801,10 @@ async function copyTable(
     ).map((c) => c.name),
   );
 
+  const preserveId = spec.preserveId === true;
   const mapped = rows.map((row) => {
     const transformed = spec.transform ? spec.transform(row) : row;
-    return projectRow(transformed, destColumns);
+    return projectRow(transformed, destColumns, preserveId);
   });
 
   // Fast path: bulk insert inside a transaction. Falls back to row-by-row
@@ -766,6 +817,7 @@ async function copyTable(
       }
     });
     logger.info(`[${code}] migrated ${rows.length} rows from ${table}`);
+    await bumpSqliteSequenceIfNeeded(app, table, preserveId, logger, code);
     return;
   } catch (err) {
     // Suppress the full SQL knex dumps; the row-by-row pass below will
@@ -790,15 +842,59 @@ async function copyTable(
     `[${code}] migrated ${inserted}/${rows.length} rows from ${table}` +
       (skipped > 0 ? ` (${skipped} skipped due to conflicts)` : ''),
   );
+  await bumpSqliteSequenceIfNeeded(app, table, preserveId, logger, code);
+}
+
+/**
+ * After a preserve-id seed, the next autoincrement insert must start
+ * past the largest seeded id, otherwise SQLite picks `max(id)+1` from
+ * the table — which works most of the time but breaks across deletes
+ * that re-insert at the gap. Bumping `sqlite_sequence` makes the
+ * starting point deterministic.
+ */
+async function bumpSqliteSequenceIfNeeded(
+  app: Knex,
+  table: string,
+  preserveId: boolean,
+  logger: AppLogger,
+  code: string,
+): Promise<void> {
+  if (!preserveId) return;
+  try {
+    const maxRow = (await app(table).max('id as m').first()) as
+      | { m: number | null }
+      | undefined;
+    const maxId = Number(maxRow?.m ?? 0);
+    if (!Number.isFinite(maxId) || maxId <= 0) return;
+    // UPSERT into sqlite_sequence — set seq to max(existing, maxId).
+    const existing = (await app('sqlite_sequence')
+      .where({ name: table })
+      .first()) as { seq: number } | undefined;
+    if (existing) {
+      if (Number(existing.seq) < maxId) {
+        await app('sqlite_sequence').where({ name: table }).update({ seq: maxId });
+      }
+    } else {
+      await app('sqlite_sequence').insert({ name: table, seq: maxId });
+    }
+    logger.debug(`[${code}] sqlite_sequence(${table}) bumped to ${maxId}`);
+  } catch (err) {
+    logger.warn(
+      `[${code}] could not bump sqlite_sequence for ${table}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 function projectRow(
   row: Record<string, unknown>,
   destColumns: Set<string>,
+  preserveId = false,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
-    if (k === 'id') continue; // autoincrement: regenerated
+    if (k === 'id' && !preserveId) continue; // autoincrement: regenerated
     if (!destColumns.has(k)) continue;
     out[k] = v;
   }
