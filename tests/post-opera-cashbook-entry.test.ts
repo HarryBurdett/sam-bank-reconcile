@@ -81,6 +81,50 @@ const SCHEMA = [
     tx_code TEXT, tx_trantyp TEXT, tx_ctrytyp TEXT,
     tx_rate1 REAL, tx_rate2 REAL, tx_rate2dy TEXT, tx_nominal TEXT
   )`,
+  // sname — read by loadCustomerInfo + updated by sales posting
+  `CREATE TABLE IF NOT EXISTS sname (
+    sn_account TEXT, sn_name TEXT, sn_region TEXT, sn_terrtry TEXT,
+    sn_custype TEXT, sn_cprfl TEXT, sn_currbal REAL, sn_nextpay REAL,
+    datemodified TEXT
+  )`,
+  // pname — read by loadSupplierInfo + updated by purchase posting
+  `CREATE TABLE IF NOT EXISTS pname (
+    pn_account TEXT, pn_name TEXT, pn_suptype TEXT, pn_cprfl TEXT,
+    pn_currbal REAL, pn_nextpay REAL, datemodified TEXT
+  )`,
+  // stran — written per sales line
+  `CREATE TABLE IF NOT EXISTS stran (
+    id INTEGER, st_account TEXT, st_trdate TEXT, st_trref TEXT,
+    st_custref TEXT, st_trtype TEXT, st_trvalue REAL, st_vatval REAL,
+    st_trbal REAL, st_paid TEXT, st_crdate TEXT, st_advance TEXT,
+    st_memo TEXT, st_payflag INTEGER, st_set1day INTEGER, st_set1 INTEGER,
+    st_set2day INTEGER, st_set2 INTEGER, st_dueday INTEGER, st_fcurr TEXT,
+    st_fcrate REAL, st_fcdec INTEGER, st_fcval REAL, st_fcbal REAL,
+    st_fcmult INTEGER, st_dispute INTEGER, st_edi INTEGER, st_editx INTEGER,
+    st_edivn INTEGER, st_txtrep TEXT, st_binrep INTEGER, st_advallc INTEGER,
+    st_cbtype TEXT, st_entry TEXT, st_unique TEXT, st_region TEXT,
+    st_terr TEXT, st_type TEXT, st_fadval INTEGER, st_delacc TEXT,
+    st_euro INTEGER, st_payadvl INTEGER, st_eurind TEXT, st_origcur TEXT,
+    st_fullamt INTEGER, st_fullcb TEXT, st_fullnar TEXT, st_cash INTEGER,
+    st_rcode TEXT, st_ruser TEXT, st_revchrg INTEGER, st_nlpdate TEXT,
+    st_adjsv INTEGER, st_fcvat INTEGER, st_taxpoin TEXT,
+    datecreated TEXT, datemodified TEXT, state INTEGER
+  )`,
+  // ptran — written per purchase line
+  `CREATE TABLE IF NOT EXISTS ptran (
+    id INTEGER, pt_account TEXT, pt_trdate TEXT, pt_trref TEXT,
+    pt_supref TEXT, pt_trtype TEXT, pt_trvalue REAL, pt_vatval REAL,
+    pt_trbal REAL, pt_paid TEXT, pt_crdate TEXT, pt_advance TEXT,
+    pt_payflag INTEGER, pt_set1day INTEGER, pt_set1 INTEGER,
+    pt_set2day INTEGER, pt_set2 INTEGER, pt_held TEXT, pt_fcurr TEXT,
+    pt_fcrate REAL, pt_fcdec INTEGER, pt_fcval REAL, pt_fcbal REAL,
+    pt_adval INTEGER, pt_fadval INTEGER, pt_fcmult INTEGER,
+    pt_cbtype TEXT, pt_entry TEXT, pt_unique TEXT, pt_suptype TEXT,
+    pt_euro INTEGER, pt_payadvl INTEGER, pt_origcur TEXT, pt_eurind TEXT,
+    pt_revchrg INTEGER, pt_nlpdate TEXT, pt_adjsv INTEGER,
+    pt_vatset1 INTEGER, pt_vatset2 INTEGER, pt_pyroute INTEGER,
+    pt_fcvat INTEGER, datecreated TEXT, datemodified TEXT, state INTEGER
+  )`,
 ];
 
 // ---------------------------------------------------------------------------
@@ -426,6 +470,48 @@ async function seedVatRate(
   });
 }
 
+/**
+ * Seed a customer row into sname so loadCustomerInfo can find it.
+ */
+async function seedSname(
+  db: Knex,
+  account: string,
+  name: string,
+  opts?: { custype?: string; region?: string; terrtry?: string; currbal?: number },
+): Promise<void> {
+  await db('sname').insert({
+    sn_account: account,
+    sn_name: name,
+    sn_region: opts?.region ?? 'K  ',
+    sn_terrtry: opts?.terrtry ?? '001',
+    sn_custype: opts?.custype ?? 'DD1',
+    sn_cprfl: null,
+    sn_currbal: opts?.currbal ?? 0,
+    sn_nextpay: 0,
+    datemodified: null,
+  });
+}
+
+/**
+ * Seed a supplier row into pname so loadSupplierInfo can find it.
+ */
+async function seedPname(
+  db: Knex,
+  account: string,
+  name: string,
+  opts?: { suptype?: string; currbal?: number },
+): Promise<void> {
+  await db('pname').insert({
+    pn_account: account,
+    pn_name: name,
+    pn_suptype: opts?.suptype ?? 'N  ',
+    pn_cprfl: null,
+    pn_currbal: opts?.currbal ?? 0,
+    pn_nextpay: 0,
+    datemodified: null,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -742,5 +828,386 @@ describe('postOperaCashbookEntry multi-line shape', () => {
     const atranRows = await db('atran').where({ at_acnt: 'BB005' });
     expect(atranRows).toHaveLength(1);
     expect(atranRows[0]!.at_value).toBe(-7500);
+  });
+
+  // ---------------------------------------------------------------------------
+  // NEW TESTS: branches not covered by live verification against z_demo
+  // ---------------------------------------------------------------------------
+
+  it('2-line purchase_payment: inserts 2 ptran rows and decrements pname.pn_currbal for each supplier', async () => {
+    // Seed two supplier accounts in pname.
+    // NOTE: pn_currbal is stored in POUNDS (Opera convention), not pence.
+    await seedPname(db, 'SUP001', 'Acme Supplies Ltd', { suptype: 'N  ', currbal: 500 }); // £500
+    await seedPname(db, 'SUP002', 'Beta Components Ltd', { suptype: 'N  ', currbal: 300 }); // £300
+
+    const header: PreparedEntryHeader = {
+      date: '2026-05-15',
+      action: 'purchase_payment',
+      cbtype: 'P1',
+      reference: 'REC0000030',
+      comment: 'Purchase payment 2 suppliers',
+      inputBy: 'RECUR',
+      memo: 'Purchase payment 2 suppliers',
+      name: 'Purchase payment',
+    };
+    const lines: PreparedEntryLine[] = [
+      {
+        atAccount: 'SUP001',
+        absPence: 12000, // £120 — ptValue = -12000 (payment)
+        vatCode: null,
+        vatPence: 0,
+        reference: 'INV-001',
+        comment: 'Payment to Acme',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'SUP002',
+        absPence: 8000, // £80 — ptValue = -8000
+        vatCode: null,
+        vatPence: 0,
+        reference: 'INV-002',
+        comment: 'Payment to Beta',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+    ];
+
+    const args: PostEntryArgs = {
+      trx,
+      bankCode: 'BB005',
+      header,
+      lines,
+      defaults: { sl_control: 'B0010', pl_control: 'B0020' },
+      decision: makeDecision(false),
+    };
+
+    const result = await postOperaCashbookEntry(args);
+    expect(result.entry_number).toBeTruthy();
+
+    // aentry: one row, ae_value = -(12000 + 8000) = -20000 (payment)
+    const aentry = await db('aentry').where({ ae_entry: result.entry_number }).first();
+    expect(aentry?.ae_value).toBe(-20000);
+
+    // atran: 2 rows (one per line), both negative for payment (stored in pence)
+    const atranRows = await db('atran')
+      .where({ at_acnt: 'BB005' })
+      .orderBy('id', 'asc')
+      .select('at_value', 'at_account', 'at_type');
+    expect(atranRows).toHaveLength(2);
+    expect(atranRows[0]!.at_value).toBe(-12000); // pence
+    // at_account = ln.atAccount (supplier account), not control account
+    expect(atranRows[0]!.at_account).toBe('SUP001');
+    expect(atranRows[0]!.at_type).toBe(5); // purchase_payment at_type=5
+    expect(atranRows[1]!.at_value).toBe(-8000); // pence
+    expect(atranRows[1]!.at_account).toBe('SUP002');
+
+    // ptran: 2 rows — one per supplier, pt_trtype='P', pt_trvalue in POUNDS (not pence)
+    // ptValue = -lineAbs = -(absPence/100)
+    const ptranRows = await db('ptran')
+      .orderBy('id', 'asc')
+      .select('pt_account', 'pt_trtype', 'pt_trvalue');
+    expect(ptranRows).toHaveLength(2);
+    expect(ptranRows[0]!.pt_account).toBe('SUP001');
+    expect(ptranRows[0]!.pt_trtype).toBe('P');
+    expect(ptranRows[0]!.pt_trvalue).toBeCloseTo(-120, 2); // £-120 (pounds)
+    expect(ptranRows[1]!.pt_account).toBe('SUP002');
+    expect(ptranRows[1]!.pt_trtype).toBe('P');
+    expect(ptranRows[1]!.pt_trvalue).toBeCloseTo(-80, 2); // £-80 (pounds)
+
+    // pname.pn_currbal: stored in POUNDS; decremented by ptValue (£-120 and £-80)
+    // COALESCE(pn_currbal, 0) + ptValue = 500 + (-120) = 380; 300 + (-80) = 220
+    const sup1 = await db('pname').where({ pn_account: 'SUP001' }).first();
+    expect(sup1?.pn_currbal).toBeCloseTo(500 - 120, 2); // £380
+    const sup2 = await db('pname').where({ pn_account: 'SUP002' }).first();
+    expect(sup2?.pn_currbal).toBeCloseTo(300 - 80, 2); // £220
+
+    // anoml: 2 legs per line × 2 lines = 4 rows
+    const anomlRows = await db('anoml').select('ax_nacnt', 'ax_value');
+    expect(anomlRows).toHaveLength(4);
+
+    // GL: sum of all anoml values must be 0 (balanced double-entry)
+    const anomlSum = anomlRows.reduce((acc: number, r: { ax_value: number }) => acc + Number(r.ax_value), 0);
+    expect(anomlSum).toBeCloseTo(0, 0);
+  });
+
+  it('2-line sales_refund: inserts stran with st_trtype=F, positive st_trvalue, sn_currbal increases', async () => {
+    // Seed two customer accounts in sname.
+    // NOTE: sn_currbal is stored in POUNDS, not pence. Negative = customer owes us.
+    await seedSname(db, 'CUST001', 'Widgets Ltd', { currbal: -100 }); // £-100
+    await seedSname(db, 'CUST002', 'Gadgets Ltd', { currbal: -50 }); // £-50
+
+    const header: PreparedEntryHeader = {
+      date: '2026-05-15',
+      action: 'sales_refund',
+      cbtype: 'R1',
+      reference: 'REC0000031',
+      comment: 'Sales refund 2 customers',
+      inputBy: 'RECUR',
+      memo: 'Sales refund 2 customers',
+      name: 'Sales refund',
+    };
+    const lines: PreparedEntryLine[] = [
+      {
+        atAccount: 'CUST001',
+        absPence: 4000, // £40 refund — stValue = +4000 (positive for refund)
+        vatCode: null,
+        vatPence: 0,
+        reference: 'REF-001',
+        comment: 'Refund to Widgets',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'CUST002',
+        absPence: 2500, // £25 refund
+        vatCode: null,
+        vatPence: 0,
+        reference: 'REF-002',
+        comment: 'Refund to Gadgets',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+    ];
+
+    const args: PostEntryArgs = {
+      trx,
+      bankCode: 'BB005',
+      header,
+      lines,
+      defaults: { sl_control: 'B0010', pl_control: 'B0020' },
+      decision: makeDecision(false),
+    };
+
+    const result = await postOperaCashbookEntry(args);
+    expect(result.entry_number).toBeTruthy();
+
+    // aentry: ae_value = -(4000 + 2500) = -6500 (refund = money out, payment direction)
+    const aentry = await db('aentry').where({ ae_entry: result.entry_number }).first();
+    expect(aentry?.ae_value).toBe(-6500);
+
+    // atran: 2 rows, at_type=3 (sales_refund)
+    const atranRows = await db('atran')
+      .where({ at_acnt: 'BB005' })
+      .orderBy('id', 'asc')
+      .select('at_value', 'at_type');
+    expect(atranRows).toHaveLength(2);
+    expect(atranRows[0]!.at_type).toBe(3); // sales_refund at_type=3
+    // isReceipt = false for sales_refund → lineSignedPence = -lineAbs = -4000
+    expect(atranRows[0]!.at_value).toBe(-4000);
+    expect(atranRows[1]!.at_value).toBe(-2500);
+
+    // stran: 2 rows — st_trtype='F', st_trvalue POSITIVE (refund), stored in POUNDS
+    // stValue = isReceipt ? -lineAbs : lineAbs
+    // For sales_refund: isReceipt=false → stValue = lineAbs = absPence/100 = positive pounds
+    const stranRows = await db('stran')
+      .orderBy('id', 'asc')
+      .select('st_account', 'st_trtype', 'st_trvalue');
+    expect(stranRows).toHaveLength(2);
+    expect(stranRows[0]!.st_account).toBe('CUST001');
+    expect(stranRows[0]!.st_trtype).toBe('F');
+    expect(stranRows[0]!.st_trvalue).toBeCloseTo(40, 2); // £40 (4000 pence / 100)
+    expect(stranRows[1]!.st_account).toBe('CUST002');
+    expect(stranRows[1]!.st_trtype).toBe('F');
+    expect(stranRows[1]!.st_trvalue).toBeCloseTo(25, 2); // £25 (2500 pence / 100)
+
+    // sname.sn_currbal stored in POUNDS; INCREASES (less negative) for each customer
+    // sn_currbal += stValue (positive) → -100 + 40 = -60; -50 + 25 = -25
+    const cust1 = await db('sname').where({ sn_account: 'CUST001' }).first();
+    expect(cust1?.sn_currbal).toBeCloseTo(-100 + 40, 2); // £-60
+    const cust2 = await db('sname').where({ sn_account: 'CUST002' }).first();
+    expect(cust2?.sn_currbal).toBeCloseTo(-50 + 25, 2); // £-25
+
+    // anoml: 2 legs per line × 2 lines = 4 rows
+    const anomlRows = await db('anoml').select('ax_value');
+    expect(anomlRows).toHaveLength(4);
+  });
+
+  it('3-line nominal payment with 2 of 3 lines carrying VAT: 5 atran rows, 7 anoml rows', async () => {
+    // Line 1: £100 gross with 20% VAT → 2 atran rows (net + VAT)
+    // Line 2: £200, no VAT → 1 atran row
+    // Line 3: £150 gross with 5% VAT → 2 atran rows (net + VAT)
+    // Total atran: 5 rows; ae_value = -45000 (£450 total)
+    // anoml: (3 lines × 2 legs) + 2 VAT legs = 6 + 2 = 8 rows
+    // (but postToNominal=false → no ntran; anoml count = 2 per line + 1 extra per vat line)
+    // Actually with postToNominal=false, anoml writes 2 rows per line (bank leg + target leg)
+    // plus 1 extra VAT anoml per VAT line = (3×2) + 2 = 8 rows total
+    await seedVatRate(db, '1', 'P', 20, 'V100');
+    await seedVatRate(db, '5', 'P', 5, 'V050');
+    await db('nacnt').insert([
+      { na_acnt: 'V100', na_type: 'P ', na_subt: 'PV', na_desc: 'VAT 20%' },
+      { na_acnt: 'V050', na_type: 'P ', na_subt: 'PV', na_desc: 'VAT 5%' },
+    ]);
+
+    const header: PreparedEntryHeader = {
+      date: '2026-05-15',
+      action: 'nominal_payment',
+      cbtype: 'NP',
+      reference: 'REC0000040',
+      comment: '3-line multi-VAT test',
+      inputBy: 'RECUR',
+      memo: '3-line multi-VAT test',
+      name: '3-line multi-VAT test',
+    };
+    const lines: PreparedEntryLine[] = [
+      {
+        atAccount: 'N100',
+        absPence: 10000, // £100 gross — VAT 20%: 1667p; net: 8333p
+        vatCode: '1',
+        vatPence: 1667,
+        reference: 'REF-A',
+        comment: 'Postage with VAT',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'N200',
+        absPence: 20000, // £200, no VAT
+        vatCode: null,
+        vatPence: 0,
+        reference: 'REF-B',
+        comment: 'Stationery no VAT',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'N100', // reuse for simplicity
+        absPence: 15000, // £150 gross — VAT 5%: 714p; net: 14286p
+        vatCode: '5',
+        vatPence: 714,
+        reference: 'REF-C',
+        comment: 'Equipment with VAT',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+    ];
+
+    const args: PostEntryArgs = {
+      trx,
+      bankCode: 'BB005',
+      header,
+      lines,
+      defaults: { sl_control: 'B0010', pl_control: 'B0020' },
+      decision: makeDecision(false),
+    };
+
+    const result = await postOperaCashbookEntry(args);
+    expect(result.entry_number).toBeTruthy();
+
+    // aentry: one row, ae_value = -(10000 + 20000 + 15000) = -45000
+    const aentry = await db('aentry').where({ ae_entry: result.entry_number }).first();
+    expect(aentry?.ae_value).toBe(-45000);
+
+    // atran: 5 rows (2 for line 1, 1 for line 2, 2 for line 3)
+    const atranRows = await db('atran')
+      .where({ at_acnt: 'BB005' })
+      .orderBy('id', 'asc')
+      .select('at_value');
+    expect(atranRows).toHaveLength(5);
+
+    // Sum of all at_value must equal ae_value
+    const atranSum = atranRows.reduce((acc: number, r: { at_value: number }) => acc + Number(r.at_value), 0);
+    expect(atranSum).toBe(-45000);
+
+    // anoml: 2 per non-VAT line + 3 per VAT line (bank + net + VAT) — but actual formula:
+    // The code writes 2 anoml per line (bank leg + target leg) for the net part,
+    // plus 1 additional anoml for the VAT leg per VAT line.
+    // 3 lines × 2 = 6, plus 2 VAT lines × 1 extra = 2 → total 8
+    const anomlRows = await db('anoml').select('ax_nacnt', 'ax_value');
+    expect(anomlRows).toHaveLength(8);
+
+    // Sum of all anoml values must be balanced (≈0 for nominal)
+    const anomlSum = anomlRows.reduce((acc: number, r: { ax_value: number }) => acc + Number(r.ax_value), 0);
+    expect(Math.abs(anomlSum)).toBeLessThanOrEqual(2); // allow 1p rounding across lines
+  });
+
+  it('2-line nominal payment where line 2 (not line 1) has VAT: 3 atran rows, sum balances', async () => {
+    // line 1: £120, no VAT → 1 atran row
+    // line 2: £240 gross, 20% VAT → 2 atran rows (net + VAT split)
+    // total atran: 3 rows; ae_value = -36000
+    await seedVatRate(db, '1', 'P', 20, 'V100');
+    await db('nacnt').insert({ na_acnt: 'V100', na_type: 'P ', na_subt: 'PV', na_desc: 'VAT 20%' });
+
+    const header: PreparedEntryHeader = {
+      date: '2026-05-15',
+      action: 'nominal_payment',
+      cbtype: 'NP',
+      reference: 'REC0000050',
+      comment: 'Line-2 VAT test',
+      inputBy: 'RECUR',
+      memo: 'Line-2 VAT test',
+      name: 'Line-2 VAT test',
+    };
+    const lines: PreparedEntryLine[] = [
+      {
+        atAccount: 'N100',
+        absPence: 12000, // £120, no VAT
+        vatCode: null,
+        vatPence: 0,
+        reference: 'L2VAT-1',
+        comment: 'No VAT first',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+      {
+        atAccount: 'N200',
+        absPence: 24000, // £240 gross, 20% VAT: 4000p VAT; 20000p net
+        vatCode: '1',
+        vatPence: 4000,
+        reference: 'L2VAT-2',
+        comment: 'VAT second line',
+        project: '',
+        department: '',
+        netOverride: null,
+      },
+    ];
+
+    const args: PostEntryArgs = {
+      trx,
+      bankCode: 'BB005',
+      header,
+      lines,
+      defaults: { sl_control: 'B0010', pl_control: 'B0020' },
+      decision: makeDecision(false),
+    };
+
+    const result = await postOperaCashbookEntry(args);
+    expect(result.entry_number).toBeTruthy();
+
+    // aentry: ae_value = -(12000 + 24000) = -36000
+    const aentry = await db('aentry').where({ ae_entry: result.entry_number }).first();
+    expect(aentry?.ae_value).toBe(-36000);
+
+    // atran: 3 rows (1 for no-VAT line 1, 2 for VAT line 2)
+    const atranRows = await db('atran')
+      .where({ at_acnt: 'BB005' })
+      .orderBy('id', 'asc')
+      .select('at_value', 'at_account');
+    expect(atranRows).toHaveLength(3);
+
+    // First atran row: line 1, no VAT → full absPence negative
+    expect(atranRows[0]!.at_value).toBe(-12000);
+    expect(atranRows[0]!.at_account).toBe('N100');
+
+    // Second + third rows: line 2 split into net + VAT
+    // net = -20000, VAT = -4000; sum = -24000
+    const line2Sum = Number(atranRows[1]!.at_value) + Number(atranRows[2]!.at_value);
+    expect(line2Sum).toBe(-24000);
+
+    // Total atran sum = ae_value
+    const atranSum = atranRows.reduce((acc: number, r: { at_value: number }) => acc + Number(r.at_value), 0);
+    expect(atranSum).toBe(-36000);
+
+    // anoml: 2 per line (bank + target) + 1 VAT extra for line 2 = 2 + 3 = 5
+    const anomlRows = await db('anoml').select('ax_nacnt', 'ax_value');
+    expect(anomlRows).toHaveLength(5);
   });
 });
