@@ -1,12 +1,23 @@
 /**
  * Throttled, retrying wrapper for Google Gemini calls.
  *
- * Faithful port of `sql_rag/gemini_throttle.py`. Used by the
- * standalone PDF extractor so behaviour matches legacy:
+ * Faithful port of `sql_rag/gemini_throttle.py`, extended in 2026
+ * to retry transient non-rate-limit errors (5xx, network) under
+ * the same backoff schedule. Legacy only retried rate-limits —
+ * everything else died on the first transient blip. The classifier
+ * (extraction-error.ts) now decides retry-or-throw per error.
+ *
+ * Behaviour:
  *   - Process-wide >=1s gap between consecutive Gemini calls
- *   - Retry 429 / RESOURCE_EXHAUSTED with backoff [5s, 15s, 45s]
- *   - Multi-key rotation (30-minute cooldown per exhausted key)
- *   - Typed errors for the two failure modes
+ *   - Retry rate-limit (429 / RESOURCE_EXHAUSTED) with backoff
+ *     [5s, 15s, 45s] — the legacy schedule, kept because Gemini
+ *     docs explicitly recommend long backoff for quota.
+ *   - Retry other transient (server_error, network, parse) with
+ *     a shorter exponential [2s, 6s, 18s] schedule. Transient ≠
+ *     rate-limit shouldn't need to wait minutes.
+ *   - Throw IMMEDIATELY (no retry) on permanent (auth, bad_request,
+ *     quota) — the operator must act, retrying just burns budget.
+ *   - Multi-key rotation: 30-minute cooldown per exhausted key.
  *
  * The throttle is serialised through a single in-process promise
  * chain rather than a Python threading.Lock; under Node's single
@@ -14,8 +25,11 @@
  * Python implementation under its GIL.
  */
 
+import { classifyExtractionError } from '../src/_shared/extraction-error.js';
+
 const MIN_INTERVAL_SECONDS = 1.0;
 const BACKOFF_SCHEDULE_SECONDS = [5, 15, 45];
+const TRANSIENT_BACKOFF_SECONDS = [2, 6, 18];
 const EXHAUSTION_DURATION_MS = 30 * 60 * 1000;
 
 const RATE_LIMIT_TOKENS = [
@@ -137,8 +151,11 @@ async function attemptWithBackoff<T>(
   logger?: ThrottleLogger,
 ): Promise<T> {
   let lastError: unknown = null;
+  // Both schedules have the same length (3 retries) so we can
+  // share a single attempt counter and pick the schedule per-error.
+  const MAX_ATTEMPTS = BACKOFF_SCHEDULE_SECONDS.length;
 
-  for (let attempt = 0; attempt <= BACKOFF_SCHEDULE_SECONDS.length; attempt++) {
+  for (let attempt = 0; attempt <= MAX_ATTEMPTS; attempt++) {
     // Serialise the gap-enforce + actual call so concurrent callers
     // cannot bypass the >=1s spacing.
     const result = await (throttleChain = throttleChain.then(async () => {
@@ -161,18 +178,29 @@ async function attemptWithBackoff<T>(
 
     const err = result.err;
     lastError = err;
+    const classified = classifyExtractionError(err);
+    const isRateLimit = isRateLimitError(err);
 
-    if (!isRateLimitError(err)) {
+    // Permanent — no retry, surface immediately. The classifier
+    // returns transient=false for auth/quota/bad_request. Quota is
+    // technically a rate-limit-shaped error but the classifier
+    // treats "RESOURCE_EXHAUSTED" / "exceeded your current quota"
+    // as permanent because retrying within the same billing
+    // window can't recover.
+    if (!classified.transient && !isRateLimit) {
       throw new ExtractionFailedError(
         filename,
         err instanceof Error ? err.message : String(err),
       );
     }
 
-    if (attempt < BACKOFF_SCHEDULE_SECONDS.length) {
-      const backoff = BACKOFF_SCHEDULE_SECONDS[attempt]!;
+    if (attempt < MAX_ATTEMPTS) {
+      const schedule = isRateLimit
+        ? BACKOFF_SCHEDULE_SECONDS
+        : TRANSIENT_BACKOFF_SECONDS;
+      const backoff = schedule[attempt]!;
       logger?.warn?.(
-        `[gemini] 429 retry ${attempt + 1}/${BACKOFF_SCHEDULE_SECONDS.length} after ${backoff}s${
+        `[gemini] ${classified.kind} retry ${attempt + 1}/${MAX_ATTEMPTS} after ${backoff}s${
           filename ? ` for ${filename}` : ''
         }`,
       );
@@ -180,12 +208,26 @@ async function attemptWithBackoff<T>(
       continue;
     }
 
+    // Exhausted retries. Surface the appropriate typed error so
+    // callers can branch on rate-limit vs generic transient
+    // (key rotation only kicks in for rate-limit).
+    if (isRateLimit) {
+      logger?.warn?.(
+        `[gemini] rate limit exhausted after ${MAX_ATTEMPTS} retries${
+          filename ? ` for ${filename}` : ''
+        }`,
+      );
+      throw new RateLimitExhaustedError(
+        filename,
+        lastError instanceof Error ? lastError.message : String(lastError),
+      );
+    }
     logger?.warn?.(
-      `[gemini] rate limit exhausted after ${BACKOFF_SCHEDULE_SECONDS.length} retries${
+      `[gemini] ${classified.kind} exhausted after ${MAX_ATTEMPTS} retries${
         filename ? ` for ${filename}` : ''
       }`,
     );
-    throw new RateLimitExhaustedError(
+    throw new ExtractionFailedError(
       filename,
       lastError instanceof Error ? lastError.message : String(lastError),
     );

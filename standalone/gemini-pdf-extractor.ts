@@ -26,6 +26,7 @@ import {
   solveStatementBalance,
   type SolverTxn,
 } from '../src/services/statement-balance-solver.js';
+import { getGeminiBreaker } from '../src/_shared/extraction-error.js';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash';
 
@@ -703,6 +704,9 @@ export function buildGeminiPdfExtractor(
 
       // Cache lookup. Legacy invalidates entries with <5 transactions
       // for PDFs > 50KB (suspected truncation). Mirror that here.
+      // Cache hits bypass the breaker — they don't call Gemini, so a
+      // tripped breaker shouldn't lock the operator out of statements
+      // that were already extracted successfully.
       const cached = await cacheGet(appDb, hash, logger);
       if (cached) {
         const txCount = cached.transactions?.length ?? 0;
@@ -723,8 +727,24 @@ export function buildGeminiPdfExtractor(
         } catch { /* tolerated */ }
       }
 
+      // Shared breaker — if 3 consecutive AUTH/QUOTA failures have
+      // already been observed across the process, don't burn another
+      // Gemini call. The breaker resets on first success after a
+      // 60s half-open window.
+      const breaker = getGeminiBreaker();
+      if (breaker.isOpen()) {
+        const reason = breaker.openReason();
+        logger?.warn(`[gemini] breaker open — skipping fresh extraction: ${reason}`);
+        throw new Error(reason);
+      }
+
       logger?.info(`[gemini] extracting ${name} (${pdfBytes.byteLength} bytes)`);
       const base64 = Buffer.from(pdfBytes).toString('base64');
+
+      // Wrap the post-cache work in a try so the shared breaker
+      // sees every outcome. A clean return = recordSuccess, any
+      // throw = recordFailure (only AUTH/QUOTA actually open it).
+      try {
 
       // Retry-on-truncation. Faithful port of statement_reconcile.py:
       // 794-852. Two attempts max; retry when the response was
@@ -861,7 +881,12 @@ export function buildGeminiPdfExtractor(
         },
         logger,
       );
+      breaker.recordSuccess();
       return result;
+      } catch (err) {
+        breaker.recordFailure(err);
+        throw err;
+      }
     },
   };
 }

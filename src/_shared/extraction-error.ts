@@ -215,6 +215,28 @@ export async function withRetry<T>(
 }
 
 /**
+ * Process-wide shared breaker for the Gemini extractor. All call
+ * sites (scan loop, individual /extract endpoint, future bulk
+ * import) share the same trip state so a known-broken key isn't
+ * burned a second time the moment an unrelated endpoint hits.
+ *
+ * Module-scoped singleton — `getGeminiBreaker()` lazy-initialises
+ * on first use to avoid import-time side effects in tests.
+ */
+let _sharedGeminiBreaker: CircuitBreaker | null = null;
+export function getGeminiBreaker(): CircuitBreaker {
+  if (_sharedGeminiBreaker === null) {
+    _sharedGeminiBreaker = new CircuitBreaker('gemini', 3, 60_000);
+  }
+  return _sharedGeminiBreaker;
+}
+
+/** Test-only — reset the shared breaker between scenarios. */
+export function _resetGeminiBreakerForTesting(): void {
+  _sharedGeminiBreaker = null;
+}
+
+/**
  * Module-scoped circuit breaker. Tracks consecutive permanent
  * failures per key and short-circuits further attempts once a
  * threshold is hit. Reset by a successful call.

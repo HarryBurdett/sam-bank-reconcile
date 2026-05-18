@@ -76,15 +76,16 @@ import type { EmailAttachmentProvider } from './preview-from-email.js';
 import { checkChainComplete } from './scan-chain-check.js';
 import {
   classifyExtractionError,
-  CircuitBreaker,
+  getGeminiBreaker,
 } from '../_shared/extraction-error.js';
 
-// Module-scoped Gemini circuit breaker. Opens after 3 consecutive
-// auth/quota failures (i.e. errors that won't get better by retrying
-// soon). When open, subsequent scans skip Gemini calls entirely and
-// surface the underlying error to the operator. Half-open after
-// 60s — a single test call goes through to detect recovery.
-const geminiBreaker = new CircuitBreaker('gemini', 3, 60_000);
+// Shared Gemini circuit breaker — same instance used by every call
+// site (scan loop, /extract endpoint, future bulk import). Opens
+// after 3 consecutive auth/quota failures. When open, subsequent
+// scans skip Gemini calls entirely and surface the underlying
+// error to the operator. Half-open after 60s — a single test call
+// goes through to detect recovery.
+const geminiBreaker = getGeminiBreaker();
 
 interface BankRow {
   bank_code: string;
