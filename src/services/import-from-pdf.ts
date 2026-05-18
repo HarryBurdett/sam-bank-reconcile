@@ -299,6 +299,17 @@ export async function importBankStatementFromPdf(
     return overlap.overlapError;
   }
 
+  // Effective resume id: prefer the caller's explicit input, fall
+  // back to the overlap-check's same-filename match. Pre-port TS
+  // only read `input.resumeImportId` for the UPDATE-vs-INSERT
+  // decision below, which meant a re-upload of the same statement
+  // (with no explicit resumeImportId from the FE) silently
+  // INSERTED a second audit row — duplicate row in
+  // bank_statement_imports + duplicate "Awaiting Reconcile" entry
+  // in the FE. Audit 2026-05-15.
+  const effectiveResumeImportId =
+    input.resumeImportId ?? overlap.resumeImportId ?? null;
+
   const lockKey = `bank-import:${bankCode}`;
   const acquired = await importLock.acquire(lockKey, 'import-from-pdf');
   if (!acquired) {
@@ -434,10 +445,10 @@ export async function importBankStatementFromPdf(
     // skips any line whose posted_entry_number is already populated
     // (routes.py:4151-4159, storage.get_posted_lines).
     let alreadyPosted: Map<number, string> = new Map();
-    if (input.resumeImportId) {
+    if (effectiveResumeImportId) {
       try {
         const rows = (await appDb('bank_statement_transactions')
-          .where({ import_id: input.resumeImportId })
+          .where({ import_id: effectiveResumeImportId })
           .whereNotNull('posted_entry_number')
           .select('line_number', 'posted_entry_number')) as Array<{
           line_number: number;
@@ -449,7 +460,7 @@ export async function importBankStatementFromPdf(
         if (alreadyPosted.size > 0) {
           // eslint-disable-next-line no-console
           console.info(
-            `[bank-reconcile] resume import: ${alreadyPosted.size} line(s) already posted for import_id=${input.resumeImportId}`,
+            `[bank-reconcile] resume import: ${alreadyPosted.size} line(s) already posted for import_id=${effectiveResumeImportId}`,
           );
         }
       } catch (loadErr) {
@@ -674,10 +685,10 @@ export async function importBankStatementFromPdf(
         // running totals accumulate so the audit reflects the full set
         // of posted lines across all attempts.
         let importId: number | undefined;
-        if (input.resumeImportId) {
+        if (effectiveResumeImportId) {
           try {
             const existing = (await appDb('bank_statement_imports')
-              .where({ id: input.resumeImportId })
+              .where({ id: effectiveResumeImportId })
               .first()) as
               | {
                   records_imported?: number | null;
@@ -691,7 +702,7 @@ export async function importBankStatementFromPdf(
             const prevReceipts = Number(existing?.total_receipts ?? 0);
             const prevPayments = Number(existing?.total_payments ?? 0);
             await appDb('bank_statement_imports')
-              .where({ id: input.resumeImportId })
+              .where({ id: effectiveResumeImportId })
               .update({
                 closing_balance: extracted.closing_balance,
                 total_receipts: prevReceipts + totalReceipts,
@@ -701,11 +712,11 @@ export async function importBankStatementFromPdf(
                 imported_at: appDb.fn.now(),
                 imported_by: input.importedBy ?? 'system',
               });
-            importId = input.resumeImportId;
+            importId = effectiveResumeImportId;
           } catch (resumeErr) {
             // eslint-disable-next-line no-console
             console.warn(
-              `[bank-reconcile] resume UPDATE failed for import_id=${input.resumeImportId}: ${
+              `[bank-reconcile] resume UPDATE failed for import_id=${effectiveResumeImportId}: ${
                 resumeErr instanceof Error ? resumeErr.message : String(resumeErr)
               } — falling back to fresh INSERT`,
             );
