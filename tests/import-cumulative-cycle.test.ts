@@ -340,6 +340,69 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     expect(executor.postBankImport).not.toHaveBeenCalled();
   });
 
+  it('traditional bank: each statement creates a new row (no cycle merge)', async () => {
+    const appDb = await makeAppDb();
+    // Existing row for April 17 statement (reconciled).
+    await appDb('bank_statement_imports').insert({
+      bank_code: 'BC010',
+      period_start: '2026-04-13',
+      period_end: '2026-04-17',
+      closing_balance: 119822.40,
+      is_reconciled: 1,
+    });
+
+    // Operator now imports the May 24 statement — different
+    // period_start (2026-04-20) per Barclays' weekly cadence.
+    // This MUST create a fresh row, not trip the cycle-merge.
+    const extraction: PdfExtractionResult = {
+      bank_name: 'Barclays', account_number: '90764205',
+      sort_code: '20-00-00',
+      statement_date: '2026-04-24',
+      period_start: '2026-04-20',     // different cycle key
+      period_end: '2026-04-24',
+      opening_balance: 119822.40, closing_balance: 116726.07,
+      transactions: [
+        { date: '2026-04-21', name: 'X', memo: 'X', amount: -100,
+          type: 'debit', balance: 119722.40 },
+      ],
+    };
+    const extractor: PdfExtractor = {
+      extractFromPdf: vi.fn().mockResolvedValue(extraction),
+    };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true, records_imported: 1, records_failed: 0,
+        skipped_count: 0, errors: [], warnings: [],
+        posted_lines: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({
+        overlapError: null, resumeImportId: null,
+      }),
+    };
+    const result = await importBankStatementFromPdf(
+      makeOperaDb(), appDb,
+      { filePath: '/tmp/Statement 24-APR.pdf', bankCode: 'BC010',
+        filename: 'Statement 24-APR.pdf' },
+      extractor, executor, lock, overlap,
+    );
+
+    expect(result.success).toBe(true);
+    // Two rows: the original April 17, plus a NEW April 24.
+    const rows = await appDb('bank_statement_imports')
+      .where({ bank_code: 'BC010' })
+      .orderBy('id')
+      .select('period_start', 'period_end');
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.period_start).toBe('2026-04-13');  // April 17 stmt
+    expect(rows[1]?.period_start).toBe('2026-04-20');  // April 24 stmt
+  });
+
   it('UPDATEs the existing cycle row when an unreconciled cycle exists', async () => {
     const appDb = await makeAppDb();
     // Pre-existing UNreconciled cycle row from a prior pull (May 1-8).
