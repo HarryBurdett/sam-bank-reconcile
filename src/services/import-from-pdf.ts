@@ -35,6 +35,7 @@ import {
 import { markEntriesReconciled } from './mark-reconciled.js';
 import { learnPattern } from './bank-pattern-learner.js';
 import { recordDeferredTransaction } from './deferred-items.js';
+import { findExistingCycleRow } from './cycle-row-lookup.js';
 
 export interface PdfExtractionResult {
   bank_name: string | null;
@@ -324,6 +325,36 @@ export async function importBankStatementFromPdf(
   // in the FE. Audit 2026-05-15.
   const effectiveResumeImportId =
     input.resumeImportId ?? overlap.resumeImportId ?? null;
+
+  // Cycle-aware import for cumulative-statement banks (Monzo et al.):
+  // when a bank_statement_imports row already exists for this cycle
+  // (same bank_code + same period_start) and it's already been
+  // reconciled, refuse this import with a clear message. The
+  // operator must unreconcile the cycle in the Reconcile UI before
+  // re-importing. Without this guard, a subsequent pull from the
+  // same month would silently create a duplicate audit row, then
+  // confuse downstream sequencing.
+  //
+  // Resume-import path (effectiveResumeImportId set) bypasses this
+  // — the FE/overlap-checker has already identified the specific
+  // row to UPDATE, so cycle-merge is unnecessary.
+  if (!effectiveResumeImportId && extracted.period_start) {
+    const cycleRow = await findExistingCycleRow(
+      appDb,
+      bankCode,
+      extracted.period_start,
+    );
+    if (cycleRow && cycleRow.is_reconciled === 1) {
+      return {
+        success: false,
+        error:
+          `The ${bankCode} statement cycle starting ${extracted.period_start} ` +
+          `— this cycle is already reconciled (closed at £${cycleRow.closing_balance?.toFixed(2) ?? '?'}). ` +
+          `To import additional transactions from a later pull within the ` +
+          `same cycle, unreconcile the cycle first via the Reconcile page.`,
+      };
+    }
+  }
 
   const lockKey = `bank-import:${bankCode}`;
   const acquired = await importLock.acquire(lockKey, 'import-from-pdf');

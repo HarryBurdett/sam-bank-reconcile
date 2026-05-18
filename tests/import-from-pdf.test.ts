@@ -35,9 +35,20 @@ function makeOperaDb(state: OperaState): any {
 }
 
 function makeAppDb(): any {
-  const db: any = (_table: string) => ({
-    insert: async () => [1],
-  });
+  const db: any = (_table: string) => {
+    // Minimal query-chain: supports .insert() for audit-row writes and
+    // the full .select().where().orderBy().first() chain used by
+    // findExistingCycleRow (returns undefined → no cycle row, fall through).
+    const chain: any = {
+      insert: async () => [1],
+      select: () => chain,
+      where: () => chain,
+      whereRaw: () => chain,
+      orderBy: () => chain,
+      first: async () => undefined,
+    };
+    return chain;
+  };
   db.fn = { now: () => '__NOW__' };
   return db;
 }
