@@ -66,12 +66,15 @@ export async function importBankStatementFromEmail(
     return { success: false, error: 'Attachment not found' };
   }
 
-  // The import-from-pdf service expects a filePath. We persist the
-  // bytes on a temporary path the SAM team's storage can resolve.
-  // For replication purposes we surface the filename so the
-  // executor's downstream extractor can use it as a reference.
+  // Pass the downloaded bytes through directly so the extractor
+  // doesn't try to readFileSync the synthetic `email://N/X`
+  // identifier (which fails with ENOENT). filePath is still set —
+  // import-from-pdf threads it into the audit row and the
+  // synthetic identifier is fine for that purpose (it's never
+  // opened when bytes is present).
   const pdfInput: ImportFromPdfInput = {
     filePath: `email://${input.emailId}/${input.attachmentId}`,
+    bytes: downloaded.bytes,
     filename: downloaded.filename,
     bankCode: input.bankCode,
     autoAllocate: input.autoAllocate,

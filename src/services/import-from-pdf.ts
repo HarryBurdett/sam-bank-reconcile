@@ -148,9 +148,18 @@ export interface PeriodOverlapChecker {
 }
 
 export interface ImportFromPdfInput {
+  /** Filesystem path to the PDF. Required when `bytes` isn't supplied;
+   *  ignored otherwise (still threaded into audit rows / logs). For
+   *  email-sourced imports, pass a synthetic identifier like
+   *  `email://<emailId>/<attachmentId>` plus the real `bytes`. */
   filePath: string;
   bankCode: string;
   filename?: string;
+  /** Pre-fetched PDF bytes. When supplied, the extractor reads these
+   *  directly and `filePath` is never opened via readFileSync. Used by
+   *  bank-import-from-email so the attachment doesn't need to land on
+   *  disk before extraction. */
+  bytes?: Uint8Array;
   autoAllocate?: boolean;
   autoReconcile?: boolean;
   resumeImportId?: number | null;
@@ -248,8 +257,11 @@ export async function importBankStatementFromPdf(
     return { success: false, error: (e as Error)?.message ?? String(e) };
   }
 
-  if (!input.filePath || !input.filePath.trim()) {
-    return { success: false, error: 'file_path is required' };
+  // Either filePath or pre-fetched bytes is required. Email-sourced
+  // imports supply bytes (the attachment was already downloaded by
+  // bank-import-from-email) plus a synthetic identifier in filePath.
+  if (!input.bytes && (!input.filePath || !input.filePath.trim())) {
+    return { success: false, error: 'file_path or bytes is required' };
   }
 
   if (!(await bankExists(operaDb, bankCode))) {
@@ -262,7 +274,10 @@ export async function importBankStatementFromPdf(
   let extracted: PdfExtractionResult;
   try {
     extracted = await extractor.extractFromPdf({
-      filePath: input.filePath,
+      // Prefer bytes when caller supplied them — readFileSync on the
+      // synthetic `email://N/X` filePath would fail.
+      bytes: input.bytes,
+      filePath: input.bytes ? undefined : input.filePath,
       filename: input.filename,
     });
   } catch (e) {

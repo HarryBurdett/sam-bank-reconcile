@@ -26,8 +26,11 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
         }
         return { success: false, error: e?.message ?? String(e) };
     }
-    if (!input.filePath || !input.filePath.trim()) {
-        return { success: false, error: 'file_path is required' };
+    // Either filePath or pre-fetched bytes is required. Email-sourced
+    // imports supply bytes (the attachment was already downloaded by
+    // bank-import-from-email) plus a synthetic identifier in filePath.
+    if (!input.bytes && (!input.filePath || !input.filePath.trim())) {
+        return { success: false, error: 'file_path or bytes is required' };
     }
     if (!(await bankExists(operaDb, bankCode))) {
         return {
@@ -38,7 +41,10 @@ export async function importBankStatementFromPdf(operaDb, appDb, input, extracto
     let extracted;
     try {
         extracted = await extractor.extractFromPdf({
-            filePath: input.filePath,
+            // Prefer bytes when caller supplied them — readFileSync on the
+            // synthetic `email://N/X` filePath would fail.
+            bytes: input.bytes,
+            filePath: input.bytes ? undefined : input.filePath,
             filename: input.filename,
         });
     }

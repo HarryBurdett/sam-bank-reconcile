@@ -96,7 +96,55 @@ describe('importBankStatementFromPdf', () => {
       overlap,
     );
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/file_path is required/);
+    expect(result.error).toMatch(/file_path or bytes is required/);
+  });
+
+  it('accepts bytes without a real filePath (email-source path)', async () => {
+    // Simulates bank-import-from-email passing a synthetic filePath
+    // plus the actual attachment bytes. The extractor should receive
+    // the bytes and not attempt to readFileSync the email:// URI.
+    const extractorMock = vi.fn().mockResolvedValue({
+      bank_name: 'X', account_number: '1', sort_code: '00-00-00',
+      statement_date: '2026-05-15', period_start: '2026-05-09',
+      period_end: '2026-05-15', opening_balance: 0, closing_balance: 0,
+      transactions: [],
+    });
+    const extractor: PdfExtractor = { extractFromPdf: extractorMock };
+    const executor: ImportPostingExecutor = {
+      postBankImport: vi.fn().mockResolvedValue({
+        success: true, records_imported: 0, records_failed: 0,
+        skipped_count: 0, errors: [], warnings: [],
+      }),
+    };
+    const lock: ImportLockAdapter = {
+      acquire: vi.fn().mockResolvedValue(true),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+    const overlap: PeriodOverlapChecker = {
+      checkOverlap: vi.fn().mockResolvedValue({ overlapError: null, resumeImportId: null }),
+    };
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+    const result = await importBankStatementFromPdf(
+      makeOperaDb({ banks: ['BC010'] }),
+      makeAppDb(),
+      {
+        filePath: 'email://812/2',
+        bytes,
+        bankCode: 'BC010',
+        filename: 'Statement 15-MAY-26.pdf',
+      },
+      extractor,
+      executor,
+      lock,
+      overlap,
+    );
+    expect(result.success).toBe(true);
+    // Critical: extractor must see bytes (not filePath) so it skips
+    // the readFileSync that would fail on 'email://812/2'.
+    expect(extractorMock).toHaveBeenCalledTimes(1);
+    const passed = extractorMock.mock.calls[0]![0] as { bytes?: Uint8Array; filePath?: string };
+    expect(passed.bytes).toBe(bytes);
+    expect(passed.filePath).toBeUndefined();
   });
 
   it('rejects when bank not in Opera', async () => {

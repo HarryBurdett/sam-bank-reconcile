@@ -130,9 +130,18 @@ export interface PeriodOverlapChecker {
     }>;
 }
 export interface ImportFromPdfInput {
+    /** Filesystem path to the PDF. Required when `bytes` isn't supplied;
+     *  ignored otherwise (still threaded into audit rows / logs). For
+     *  email-sourced imports, pass a synthetic identifier like
+     *  `email://<emailId>/<attachmentId>` plus the real `bytes`. */
     filePath: string;
     bankCode: string;
     filename?: string;
+    /** Pre-fetched PDF bytes. When supplied, the extractor reads these
+     *  directly and `filePath` is never opened via readFileSync. Used by
+     *  bank-import-from-email so the attachment doesn't need to land on
+     *  disk before extraction. */
+    bytes?: Uint8Array;
     autoAllocate?: boolean;
     autoReconcile?: boolean;
     resumeImportId?: number | null;
