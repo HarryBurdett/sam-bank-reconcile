@@ -29,6 +29,18 @@ export interface BankRestoreSummary {
   reconciled_balance: number;
   divergence_detected: boolean;
   divergence_message: string | null;
+  /** Direction of statement-level divergence:
+   *    'restore' — Opera's nk_recbal is LOWER than SAM's most-recent
+   *                reconciled closing. Likely an Opera DB restore
+   *                from backup. recover-from-restore can usually
+   *                auto-resolve by clearing stale reconciled flags.
+   *    'extra'   — Opera's nk_recbal is HIGHER than SAM's most-recent
+   *                reconciled closing. Someone reconciled entries
+   *                in Opera outside SAM, OR a SAM-imported statement
+   *                got posted to Opera but its is_reconciled flag
+   *                never set. No safe auto-recovery; needs review.
+   *    null      — no statement-level divergence detected. */
+  divergence_direction?: 'restore' | 'extra' | null;
   orphan_line_count: number;
   orphan_statement_count: number;
   needs_recovery: boolean;
@@ -79,6 +91,7 @@ export async function checkRestoreAcrossAllBanks(
         reconciled_balance: Number(status.reconciled_balance ?? 0),
         divergence_detected: divDetected,
         divergence_message: status.opera_divergence_message ?? null,
+        divergence_direction: status.opera_divergence_direction ?? null,
         orphan_line_count: orphanLines,
         orphan_statement_count: orphanStmts,
         needs_recovery: needs,
@@ -88,20 +101,44 @@ export async function checkRestoreAcrossAllBanks(
     const detected = affected > 0;
     let summary: string | null = null;
     if (detected) {
-      const affectedBanks = results
-        .filter((r) => r.needs_recovery)
+      const affectedRows = results.filter((r) => r.needs_recovery);
+      const affectedBanks = affectedRows
         .map((r) => `${r.bank_code} (${r.description})`)
         .slice(0, 3)
         .join(', ');
       const more =
-        results.filter((r) => r.needs_recovery).length > 3
-          ? ` (+${results.filter((r) => r.needs_recovery).length - 3} more)`
-          : '';
+        affectedRows.length > 3 ? ` (+${affectedRows.length - 3} more)` : '';
+      // Headline reflects what we actually saw. The previous wording
+      // hardcoded "Opera restore" even when the real divergence was
+      // "Opera ahead of SAM" — confusing for the operator and led
+      // them to click Recover expecting a restore-clear, then get
+      // "Cleared 0 line(s)" because the recovery path didn't match
+      // the divergence direction.
+      const onlyOrphans = affectedRows.every((r) => !r.divergence_detected);
+      const onlyRestore = affectedRows.every(
+        (r) => r.divergence_direction === 'restore',
+      );
+      const onlyExtra = affectedRows.every(
+        (r) => r.divergence_direction === 'extra',
+      );
+      let headline: string;
+      if (onlyOrphans) {
+        headline =
+          `Opera-side orphan transactions detected on ${affected} bank account(s)`;
+      } else if (onlyRestore) {
+        headline =
+          `Opera restore likely detected on ${affected} bank account(s)`;
+      } else if (onlyExtra) {
+        headline =
+          `Opera-side reconciliation outside SAM on ${affected} bank account(s)`;
+      } else {
+        headline =
+          `Opera reconciliation divergence on ${affected} bank account(s)`;
+      }
       summary =
-        `Opera restore likely detected on ${affected} bank account(s): ` +
-        `${affectedBanks}${more}. SAM has tracking for statements/lines ` +
-        `that no longer exist in Opera. Open each affected bank's ` +
-        `reconcile page to review and recover.`;
+        `${headline}: ${affectedBanks}${more}. SAM's tracking is out of ` +
+        `sync with Opera. Open each affected bank's reconcile page to ` +
+        `review the detail and recover.`;
     }
 
     return {

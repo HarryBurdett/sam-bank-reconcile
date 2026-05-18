@@ -129,12 +129,18 @@ interface ReconcileHandoff {
 
 // ---- Component ----
 
+// Per-bank summary returned by /api/bank-import/restore-check.
+// `divergence_direction` distinguishes "Opera restored from backup"
+// (restore) from "Opera reconciled outside SAM" (extra) so the
+// banner can describe what's actually wrong rather than always
+// saying "Opera restore likely".
 interface RestoreCheckBank {
   bank_code: string;
   description: string;
   reconciled_balance: number;
   divergence_detected: boolean;
   divergence_message: string | null;
+  divergence_direction?: 'restore' | 'extra' | null;
   orphan_line_count: number;
   orphan_statement_count: number;
   needs_recovery: boolean;
@@ -288,10 +294,41 @@ export function BankStatementHub() {
     if (!restoreCheck?.banks) return;
     const affected = restoreCheck.banks.filter((b) => b.needs_recovery);
     if (affected.length === 0) return;
+
+    // Two failure modes the recover button has to handle:
+    //   - orphan LINES — bank_statement_transactions rows whose
+    //     Opera aentry vanished (Opera restored to an older
+    //     backup with fewer entries). Cleared via
+    //     /recover-orphan-transactions.
+    //   - stale STATEMENT flags — bank_statement_imports rows
+    //     marked is_reconciled=1 whose closing balance no longer
+    //     matches Opera's nk_recbal. Cleared via
+    //     /recover-from-restore.
+    // A bank can have either or both. The recover button has to
+    // call the right endpoint for each, otherwise the banner
+    // never goes away (the previous version only called the
+    // orphan endpoint, so any bank with statement-level
+    // divergence and 0 orphan lines showed "Cleared 0 line(s)"
+    // and the banner persisted forever).
+    const totalOrphanLines = affected.reduce(
+      (s, b) => s + (b.orphan_line_count ?? 0),
+      0,
+    );
+    const divergenceBanks = affected.filter((b) => b.divergence_detected).length;
+    const summaryLine = [
+      totalOrphanLines > 0
+        ? `${totalOrphanLines} orphaned line(s)`
+        : null,
+      divergenceBanks > 0
+        ? `stale reconciled flags on ${divergenceBanks} bank(s)`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' and ');
     const confirmed = window.confirm(
-      `This will clear the 'already posted' tracking on ${affected
-        .reduce((s, b) => s + b.orphan_line_count, 0)
-        .toString()} statement line(s) across ${affected.length} bank account(s) ` +
+      `This will clear ${summaryLine || 'stale tracking'} across ${
+        affected.length
+      } bank account(s) ` +
         `so the underlying statements can be re-imported and re-posted to Opera.\n\n` +
         `Only confirm if Opera was actually restored from a backup ` +
         `(NOT if entries were deleted on purpose). Continue?`,
@@ -301,27 +338,68 @@ export function BankStatementHub() {
     setRestoreRecoveryResult(null);
     try {
       let totalLines = 0;
+      let totalStatements = 0;
       const errors: string[] = [];
       for (const b of affected) {
-        try {
-          const resp = await authFetch(
-            `/api/reconcile/bank/${encodeURIComponent(b.bank_code)}/recover-orphan-transactions`,
-            { method: 'POST' },
-          );
-          const data = await resp.json();
-          if (data.success) {
-            totalLines += Number(data.cleared_lines ?? 0);
-          } else {
-            errors.push(`${b.bank_code}: ${data.error ?? 'unknown error'}`);
+        // Clear orphan lines first (if any) — the recover-from-restore
+        // expects the line-level state to be consistent before it
+        // resets reconciled flags. Either endpoint is a no-op when
+        // its target state is already clean.
+        if ((b.orphan_line_count ?? 0) > 0) {
+          try {
+            const resp = await authFetch(
+              `/api/reconcile/bank/${encodeURIComponent(b.bank_code)}/recover-orphan-transactions`,
+              { method: 'POST' },
+            );
+            const data = await resp.json();
+            if (data.success) {
+              totalLines += Number(data.cleared_lines ?? 0);
+            } else {
+              errors.push(
+                `${b.bank_code} (orphan-lines): ${data.error ?? 'unknown error'}`,
+              );
+            }
+          } catch (err: any) {
+            errors.push(
+              `${b.bank_code} (orphan-lines): ${err?.message ?? String(err)}`,
+            );
           }
-        } catch (err: any) {
-          errors.push(`${b.bank_code}: ${err?.message ?? String(err)}`);
+        }
+        if (b.divergence_detected) {
+          try {
+            const resp = await authFetch(
+              `/api/reconcile/bank/${encodeURIComponent(b.bank_code)}/recover-from-restore`,
+              { method: 'POST' },
+            );
+            const data = await resp.json();
+            if (data.success) {
+              totalStatements += Number(data.cleared ?? 0);
+            } else {
+              errors.push(
+                `${b.bank_code} (divergence): ${data.error ?? 'unknown error'}`,
+              );
+            }
+          } catch (err: any) {
+            errors.push(
+              `${b.bank_code} (divergence): ${err?.message ?? String(err)}`,
+            );
+          }
         }
       }
+      const partsCleared = [
+        totalLines > 0 ? `${totalLines} orphaned line(s)` : null,
+        totalStatements > 0
+          ? `${totalStatements} stale reconciled statement(s)`
+          : null,
+      ].filter(Boolean);
+      const headline =
+        partsCleared.length > 0
+          ? `Cleared ${partsCleared.join(' and ')} across ${affected.length} bank(s). Re-import the affected statements to re-post them to Opera.`
+          : `No stale tracking found to clear (Opera and SAM are already in sync). The divergence banner should clear on the next scan.`;
       setRestoreRecoveryResult(
         errors.length === 0
-          ? `Cleared ${totalLines} line(s) across ${affected.length} bank(s). Re-import the affected statements to re-post them to Opera.`
-          : `Recovery completed with errors: ${errors.join('; ')}`,
+          ? headline
+          : `${headline} Errors: ${errors.join('; ')}`,
       );
       // Re-run the check so banner clears
       try {
@@ -734,29 +812,60 @@ export function BankStatementHub() {
         ))}
       </div>
 
-      {restoreCheck?.detected && !restoreBannerDismissed && (
+      {restoreCheck?.detected && !restoreBannerDismissed && (() => {
+        // Pick the right headline based on what's actually wrong.
+        // "Opera restore likely" is only correct when SAM is ahead of
+        // Opera (restore direction). For "extra" — Opera ahead of
+        // SAM, because someone reconciled outside SAM or imported
+        // a statement that posted to Opera without setting SAM's
+        // is_reconciled flag — say so plainly. Mixed = generic.
+        const affectedRows = restoreCheck.banks.filter((b) => b.needs_recovery);
+        const onlyOrphans = affectedRows.every((b) => !b.divergence_detected);
+        const onlyRestore = affectedRows.every(
+          (b) => b.divergence_direction === 'restore',
+        );
+        const onlyExtra = affectedRows.every(
+          (b) => b.divergence_direction === 'extra',
+        );
+        const headline = onlyOrphans
+          ? 'Opera-side orphan transactions detected'
+          : onlyRestore
+            ? 'Opera restore likely detected'
+            : onlyExtra
+              ? 'Opera reconciled outside SAM'
+              : 'Opera reconciliation divergence';
+        return (
         <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 shadow-sm">
           <div className="flex items-start gap-3">
             <span className="text-2xl text-amber-600">⚠</span>
             <div className="flex-1">
               <div className="text-sm font-semibold text-amber-900">
-                Opera restore likely detected — {restoreCheck.affected_banks} bank account(s) need review
+                {headline} — {restoreCheck.affected_banks} bank account(s) need review
               </div>
               <div className="mt-1 text-sm text-amber-800">
                 {restoreCheck.summary_message ??
-                  'SAM has tracking for statements or lines that no longer exist in Opera.'}
+                  'SAM\'s tracking is out of sync with Opera.'}
               </div>
               <ul className="mt-2 list-disc pl-5 text-sm text-amber-800">
-                {restoreCheck.banks
-                  .filter((b) => b.needs_recovery)
-                  .map((b) => (
-                    <li key={b.bank_code}>
+                {affectedRows.map((b) => (
+                    <li key={b.bank_code} className="mb-1">
                       <span className="font-medium">{b.bank_code}</span>{' '}
                       {b.description} — rec balance £{b.reconciled_balance.toFixed(2)}
                       {b.orphan_line_count > 0 && (
                         <> · {b.orphan_line_count} orphaned line(s) across {b.orphan_statement_count} statement(s)</>
                       )}
-                      {b.divergence_detected && <> · statement-level divergence</>}
+                      {b.divergence_detected && (
+                        <> · {b.divergence_direction === 'extra'
+                          ? 'Opera ahead of SAM'
+                          : b.divergence_direction === 'restore'
+                            ? 'SAM ahead of Opera'
+                            : 'statement-level divergence'}</>
+                      )}
+                      {b.divergence_message && (
+                        <div className="mt-1 text-xs text-amber-700 italic">
+                          {b.divergence_message}
+                        </div>
+                      )}
                     </li>
                   ))}
               </ul>
@@ -769,7 +878,11 @@ export function BankStatementHub() {
                   {restoreRecovering ? 'Recovering…' : 'Clear stale tracking and re-enable re-import'}
                 </button>
                 <span className="text-xs text-amber-700">
-                  Only click this if Opera was actually restored from a backup.
+                  {onlyRestore
+                    ? 'Only click this if Opera was actually restored from a backup.'
+                    : onlyOrphans
+                      ? 'Clears tracking for posted lines whose Opera entries are gone.'
+                      : 'Reviews each affected bank — may report "manual review needed" for cases SAM cannot safely auto-resolve (e.g. Opera ahead of SAM).'}
                 </span>
               </div>
               {restoreRecoveryResult && (
@@ -787,7 +900,8 @@ export function BankStatementHub() {
             </button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {activeTab === 'pending' && (
         <PendingStatementsTab

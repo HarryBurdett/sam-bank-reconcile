@@ -136,6 +136,13 @@ export interface ReconciliationStatus {
   // endpoint) can re-process the affected statements.
   opera_divergence_detected?: boolean;
   opera_divergence_message?: string | null;
+  /** 'restore' — Opera's reconciled balance is LOWER than SAM's
+   *  most-recent reconciled closing (Opera DB likely restored).
+   *  'extra'   — Opera's reconciled balance is HIGHER (someone
+   *  reconciled outside SAM, or a SAM-imported statement got
+   *  posted to Opera but its `is_reconciled` flag never set).
+   *  null      — no divergence detected. */
+  opera_divergence_direction?: 'restore' | 'extra' | null;
   stale_reconciled_statements?: StaleReconciledStatement[];
   error?: string;
 }
@@ -311,6 +318,7 @@ export async function getReconciliationStatus(
     // ended up on a value SAM never saw).
     let operaDivergenceDetected = false;
     let operaDivergenceMessage: string | null = null;
+    let operaDivergenceDirection: 'restore' | 'extra' | null = null;
     let staleStatements: StaleReconciledStatement[] = [];
     if (appDb) {
       try {
@@ -337,8 +345,9 @@ export async function getReconciliationStatus(
         ) {
           operaDivergenceDetected = true;
           const recentClosing = Number(mostRecent.closing_balance ?? 0);
-          const direction =
+          const direction: 'restore' | 'extra' =
             recentClosing > reconciledBalance ? 'restore' : 'extra';
+          operaDivergenceDirection = direction;
 
           // Find anchor statement that matches current nk_recbal —
           // everything reconciled after it is stale and can be safely
@@ -440,6 +449,7 @@ export async function getReconciliationStatus(
       sequential_gating_self: sequentialGatingSelf,
       opera_divergence_detected: operaDivergenceDetected,
       opera_divergence_message: operaDivergenceMessage,
+      opera_divergence_direction: operaDivergenceDirection,
       stale_reconciled_statements: staleStatements,
     };
   } catch (err: any) {
