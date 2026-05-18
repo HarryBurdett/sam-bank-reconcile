@@ -2846,6 +2846,24 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     return remainingUnimported === 0;
   })();
 
+  // A previously-unmatched row should count as "needs importing" when
+  // either (a) the backend matcher set an action on it, OR (b) the
+  // operator has assigned something via the UI — picked a manual
+  // account, picked a transaction type, or ticked the row for import.
+  // Without this, the `allAlreadyInOpera` / `allItemsHandled` checks
+  // below only see the stale BE-suggested `t.action` and miss any
+  // operator-driven assignment made after the preview lands, so the
+  // primary button locks at "Proceed to Reconcile" with no path to
+  // import the lines the operator just analysed.
+  const hasOperatorOrBackendAssignment = (t: BankImportTransaction): boolean => {
+    if (t.action) return true;
+    if (transactionTypeOverrides.has(t.row)) return true;
+    const edited = editedTransactions.get(t.row);
+    if (edited && (edited.manual_account ?? '').trim().length > 0) return true;
+    if (selectedForImport.has(t.row)) return true;
+    return false;
+  };
+
   // Check if all statement items are already in Opera (nothing to import, but can reconcile)
   const allAlreadyInOpera = (() => {
     if (!bankPreview || allTransactionsImported) return false;
@@ -2855,12 +2873,11 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const refunds = bankPreview.matched_refunds || [];
     const unmatched = bankPreview.unmatched || [];
     const allItems = [...receipts, ...payments, ...refunds, ...unmatched];
-    // Check if any unmatched items have an assigned action (bank transfer, nominal, etc.)
-    // These NEED importing even in bankRecOnly mode
+    // Unmatched lines that have EITHER a BE-suggested action OR a
+    // post-preview operator assignment still need importing.
     const unmatchedWithAction = unmatched.filter(t =>
-      !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate && t.action
+      !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate && hasOperatorOrBackendAssignment(t)
     );
-    // If there are assigned unmatched items, they need importing — not "all in Opera"
     if (unmatchedWithAction.length > 0) return false;
 
     const needsImport = allItems.filter(t => !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate);
@@ -2895,9 +2912,11 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const allItems = [...receipts, ...payments, ...refunds, ...unmatched];
     if (allItems.length === 0 && (bankPreview.already_posted?.length || 0) > 0) return true;
     if (allItems.length === 0) return false;
-    // Check if any unmatched items have an assigned action — they still need importing
+    // Same widened check as allAlreadyInOpera: an unmatched row counts
+    // as "still needs importing" if EITHER the BE matcher set an
+    // action OR the operator assigned anything via the UI.
     const unmatchedWithAction2 = unmatched.filter(t =>
-      !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate && t.action
+      !ignoredTransactions.has(t.row) && !deferredRows.has(t.row) && !t.is_duplicate && hasOperatorOrBackendAssignment(t)
     );
     if (unmatchedWithAction2.length > 0) return false;
 
