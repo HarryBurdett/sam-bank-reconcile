@@ -1121,6 +1121,52 @@ export async function scanAllBanksFaithful(
   // when FULLY_RECONCILED. UNKNOWN / PARTIALLY_RECONCILED keep the
   // row visible (legacy line 7757-7766 "show, don't auto-promote").
   const finalRecFilenames = new Set(tracking.reconciled_filenames);
+
+  // Self-heal pass — for each bank, run the balance-match auto-promote
+  // BEFORE checkPeriodReconciled. The balance-match check is stronger
+  // (uses Opera's authoritative nk_recbal directly, doesn't depend on
+  // line-level Opera atran/aentry data) and handles the
+  // "SAM-reconcile-completed-but-flag-never-flipped" case which is
+  // common in the wild. selfHealBalanceMatch enforces strict safety
+  // conditions internally (exactly one match, at-or-after the
+  // anchor's statement_date) so a false-positive promotion is
+  // impossible.
+  try {
+    const { selfHealBalanceMatch } = await import(
+      './self-heal-reconciled-flag.js'
+    );
+    for (const [code, bank] of Object.entries(banksWithStatements)) {
+      if (!appDb) continue;
+      const recBal = bank.reconciled_balance;
+      if (recBal === null || recBal === undefined) continue;
+      const healed = await selfHealBalanceMatch(operaDb, appDb, code);
+      if (healed.promoted) {
+        // Mark the promoted statement as reconciled in the in-memory
+        // scan result too, so the post-cleanup filter drops it from
+        // the bank's "needs action" list.
+        const promotedStmt = bank.statements.find(
+          (s) =>
+            s.closing_balance !== null &&
+            s.closing_balance !== undefined &&
+            Math.abs(Number(s.closing_balance) - (healed.closing_balance ?? 0)) <
+              0.005,
+        );
+        if (promotedStmt) finalRecFilenames.add(promotedStmt.filename);
+        logger.info(
+          `Scan self-heal: ${code} promoted import_id=${healed.import_id} ` +
+            `(closing=£${(healed.closing_balance ?? 0).toFixed(2)}) ` +
+            `— Opera's nk_recbal proves it was reconciled`,
+        );
+      }
+    }
+  } catch (healErr) {
+    logger.warn(
+      `Scan self-heal failed: ${
+        healErr instanceof Error ? healErr.message : String(healErr)
+      }`,
+    );
+  }
+
   try {
     const ds = buildOperaSePeriodReconciliationDs(operaDb);
     for (const [code, bank] of Object.entries(banksWithStatements)) {

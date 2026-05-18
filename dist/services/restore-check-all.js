@@ -1,6 +1,7 @@
 import { getReconciliationStatus } from './reconciliation-status.js';
 import { checkOrphanedTransactions } from './transaction-orphan-check.js';
 import { repairOrphanTransactionLinks } from './orphan-line-relink.js';
+import { selfHealBalanceMatch } from './self-heal-reconciled-flag.js';
 export async function checkRestoreAcrossAllBanks(operaDb, appDb) {
     try {
         const banks = (await operaDb('nbank')
@@ -12,6 +13,16 @@ export async function checkRestoreAcrossAllBanks(operaDb, appDb) {
             const code = (b.code ?? '').trim();
             if (!code)
                 continue;
+            // Self-heal pass FIRST — silently flip is_reconciled=1 on any
+            // unreconciled SAM statement whose closing exactly matches
+            // Opera's nk_recbal. This pre-empts the divergence detection
+            // below so the banner only shows for cases the operator
+            // genuinely needs to mediate (not the common
+            // "SAM-workflow-completed-but-bookkeeping-update-failed" case).
+            // selfHealBalanceMatch enforces strict safety (exactly one
+            // match + at-or-after the anchor's statement_date), so a
+            // false-positive promotion is impossible.
+            await selfHealBalanceMatch(operaDb, appDb, code);
             const [status, orphans, orphanLinks] = await Promise.all([
                 getReconciliationStatus(operaDb, code, appDb, null),
                 checkOrphanedTransactions(operaDb, appDb, code),

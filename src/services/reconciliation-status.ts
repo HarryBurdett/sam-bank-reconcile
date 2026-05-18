@@ -416,12 +416,73 @@ export async function getReconciliationStatus(
                   `please investigate manually (the chain may have been ` +
                   `interrupted by direct Opera changes).`);
           } else {
-            operaDivergenceMessage =
-              `Opera's reconciled balance (£${reconciledBalance.toFixed(2)}) ` +
-              `is HIGHER than the closing of SAM's most-recent reconciled ` +
-              `statement (£${recentClosing.toFixed(2)}). Someone reconciled ` +
-              `additional entries in Opera Cashbook outside SAM. Update ` +
-              `SAM's history manually to match Opera.`;
+            // direction === 'extra' (Opera ahead of SAM).
+            //
+            // If the self-heal pass that runs before this detection
+            // didn't promote anything, one of three things is true:
+            //   (a) Multiple unreconciled SAM statements share the
+            //       matching closing → ambiguous, operator must pick
+            //       one in Reconcile.
+            //   (b) No unreconciled SAM statement matches → genuinely
+            //       reconciled outside SAM (in Opera Cashbook), OR
+            //       SAM never imported the missing statement, OR a
+            //       SAM statement was deleted before being marked.
+            //   (c) A match exists but its statement_date is earlier
+            //       than SAM's anchor — refused to promote a stale
+            //       row.
+            //
+            // Look up unreconciled candidates so the message can
+            // describe the real situation.
+            const matchingCount = (await appDb('bank_statement_imports')
+              .where('bank_code', bankCode)
+              .andWhere('is_reconciled', 0)
+              .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
+                reconciledBalance,
+              ])
+              .count<{ c: number }[]>({ c: '*' })
+              .first()) as { c: number } | undefined;
+            const candidateRows = Number(matchingCount?.c ?? 0);
+            if (candidateRows >= 2) {
+              operaDivergenceMessage =
+                `Opera's reconciled balance (£${reconciledBalance.toFixed(2)}) ` +
+                `matches ${candidateRows} unreconciled SAM statements with ` +
+                `the same closing balance. SAM can't safely auto-pick which ` +
+                `one is the one Opera reconciled — open Reconcile and ` +
+                `complete the correct statement, then re-scan.`;
+            } else if (candidateRows === 0) {
+              operaDivergenceMessage =
+                `Opera's reconciled balance (£${reconciledBalance.toFixed(2)}) ` +
+                `doesn't correspond to any statement currently in SAM. ` +
+                `Either (a) the reconciled statement was deleted from SAM ` +
+                `before being marked reconciled, (b) someone reconciled ` +
+                `entries directly in Opera Cashbook without going through ` +
+                `SAM, or (c) SAM never imported the statement that matches ` +
+                `Opera's current balance. Review Opera Cashbook history ` +
+                `vs. SAM imports.`;
+            } else {
+              // candidateRows === 1 — self-heal must have refused on the
+              // statement_date-older guard. Tell the operator which row
+              // SAM thinks is the candidate so they can decide.
+              const refused = (await appDb('bank_statement_imports')
+                .select('id', 'filename', 'statement_date')
+                .where('bank_code', bankCode)
+                .andWhere('is_reconciled', 0)
+                .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
+                  reconciledBalance,
+                ])
+                .first()) as
+                | { id: number; filename: string | null; statement_date: Date | string | null }
+                | undefined;
+              const refusedFn = refused?.filename ?? `id=${refused?.id ?? '?'}`;
+              const refusedDate = dateToYmd(refused?.statement_date ?? null);
+              operaDivergenceMessage =
+                `Opera's reconciled balance (£${reconciledBalance.toFixed(2)}) ` +
+                `matches an OLDER SAM statement (${refusedFn}` +
+                (refusedDate ? `, dated ${refusedDate}` : '') +
+                `) than SAM's most-recently-reconciled row. Auto-promotion ` +
+                `refused because that would suggest a statement was ` +
+                `reconciled out of order. Review manually in Reconcile.`;
+            }
           }
         }
       } catch {
