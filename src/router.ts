@@ -3782,8 +3782,22 @@ export function createRouter(ctx: AppContext): Router {
     );
   });
 
+  /**
+   * GET /api/bank-import/raw-preview-email?email_id=N&attachment_id=…
+   *
+   * Returns the raw email attachment bytes as base64 so the frontend
+   * can render the PDF in a new tab (`openPdfInNewTab`). Mirrors the
+   * shape of `/bank-import/pdf-content` so the FE's
+   * `handleRawFilePreview` handler can consume both paths uniformly:
+   *
+   *   { success: true, is_pdf: true, pdf_data: <base64>, filename, size }
+   *
+   * The old implementation ran the bytes through `rawPreviewFromPdf`
+   * (an LLM text-extraction path), which returned `{ text: … }` — the
+   * FE expected `{ is_pdf, pdf_data }` and silently rendered an empty
+   * modal. Fixed by returning the raw PDF directly.
+   */
   router.get('/api/bank-import/raw-preview-email', async (req, res) => {
-    const llm = (ctx.llm as LlmService | undefined) ?? null;
     const attachments = getEmailAttachments();
     if (!attachments) {
       res.status(503).json({ success: false, error: 'attachments not configured' });
@@ -3792,9 +3806,11 @@ export function createRouter(ctx: AppContext): Router {
     const emailId = Number(req.query.email_id ?? 0);
     const attachmentId = String(req.query.attachment_id ?? '');
     let bytes: Uint8Array | null = null;
+    let filename = 'document.pdf';
     try {
       const att = await attachments.fetchAttachment({ emailId, attachmentId });
       bytes = att?.bytes ?? null;
+      if (att?.filename) filename = att.filename;
     } catch {
       // fall through
     }
@@ -3802,7 +3818,13 @@ export function createRouter(ctx: AppContext): Router {
       res.status(404).json({ success: false, error: 'attachment not found' });
       return;
     }
-    res.json(await rawPreviewFromPdf(llm, bytes, null));
+    res.json({
+      success: true,
+      is_pdf: true,
+      pdf_data: Buffer.from(bytes).toString('base64'),
+      filename,
+      size: bytes.byteLength,
+    });
   });
 
   router.post('/api/bank-import/preview-multiformat', async (req, res) => {

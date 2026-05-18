@@ -40,7 +40,13 @@ export async function getPdfContent(reader, filePath) {
         const bytes = await reader.readBytes({ path: filePath });
         if (!bytes)
             return { success: false, error: 'PDF not found' };
-        return { success: true, bytes, size: bytes.byteLength };
+        const filename = filePath.split(/[\\/]/).pop() || 'document.pdf';
+        return {
+            success: true,
+            pdf_data: Buffer.from(bytes).toString('base64'),
+            filename,
+            size: bytes.byteLength,
+        };
     }
     catch (err) {
         return { success: false, error: err?.message ?? String(err) };

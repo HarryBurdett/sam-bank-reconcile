@@ -95,7 +95,16 @@ export async function getPdfContent(
   filePath: string,
 ): Promise<{
   success: boolean;
-  bytes?: Uint8Array;
+  /**
+   * Base64-encoded PDF bytes. The frontend's `openPdfInNewTab` decodes
+   * via `atob`, builds a Blob, and opens via blob URL. We return base64
+   * (not raw Uint8Array) because Express's res.json serialises typed
+   * arrays as `{"0":N,"1":N,…}` — unusable on the FE.
+   */
+  pdf_data?: string;
+  /** Best-effort filename for the FE's tab title (basename of filePath). */
+  filename?: string;
+  /** Byte length of the underlying PDF. */
   size?: number;
   error?: string;
 }> {
@@ -109,7 +118,13 @@ export async function getPdfContent(
   try {
     const bytes = await reader.readBytes({ path: filePath });
     if (!bytes) return { success: false, error: 'PDF not found' };
-    return { success: true, bytes, size: bytes.byteLength };
+    const filename = filePath.split(/[\\/]/).pop() || 'document.pdf';
+    return {
+      success: true,
+      pdf_data: Buffer.from(bytes).toString('base64'),
+      filename,
+      size: bytes.byteLength,
+    };
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) };
   }

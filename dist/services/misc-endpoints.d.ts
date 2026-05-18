@@ -51,7 +51,16 @@ export interface PdfContentReader {
 }
 export declare function getPdfContent(reader: PdfContentReader | null, filePath: string): Promise<{
     success: boolean;
-    bytes?: Uint8Array;
+    /**
+     * Base64-encoded PDF bytes. The frontend's `openPdfInNewTab` decodes
+     * via `atob`, builds a Blob, and opens via blob URL. We return base64
+     * (not raw Uint8Array) because Express's res.json serialises typed
+     * arrays as `{"0":N,"1":N,…}` — unusable on the FE.
+     */
+    pdf_data?: string;
+    /** Best-effort filename for the FE's tab title (basename of filePath). */
+    filename?: string;
+    /** Byte length of the underlying PDF. */
     size?: number;
     error?: string;
 }>;

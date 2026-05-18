@@ -70,13 +70,32 @@ describe('getPdfContent', () => {
     expect(r.success).toBe(false);
   });
 
-  it('returns bytes when reader supplies them', async () => {
+  it('returns base64 pdf_data + filename when reader supplies bytes', async () => {
     const reader: PdfContentReader = {
       readBytes: async () => new Uint8Array([1, 2, 3]),
     };
     const r = await getPdfContent(reader, '/x/a.pdf');
     expect(r.success).toBe(true);
     expect(r.size).toBe(3);
+    expect(r.filename).toBe('a.pdf');
+    // Base64 of [1,2,3] is 'AQID'
+    expect(r.pdf_data).toBe('AQID');
+  });
+
+  it('strips directory prefix from filename', async () => {
+    const reader: PdfContentReader = {
+      readBytes: async () => new Uint8Array([0]),
+    };
+    const r = await getPdfContent(reader, '/var/data/cloudsis/Monzo_Statement.pdf');
+    expect(r.filename).toBe('Monzo_Statement.pdf');
+  });
+
+  it('falls back to document.pdf when path is empty', async () => {
+    const reader: PdfContentReader = {
+      readBytes: async () => new Uint8Array([0]),
+    };
+    const r = await getPdfContent(reader, '');
+    expect(r.filename).toBe('document.pdf');
   });
 
   it('404-equivalent when reader returns null', async () => {
