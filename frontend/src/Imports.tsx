@@ -765,23 +765,40 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     setSelectedBankCode(initialStatement.bankCode);
     // Set source type
     setStatementSource(initialStatement.source);
-    // Set the selected statement
+    // Set the selected statement, and — critically — clear the OTHER
+    // source's selection. Without this, if sessionStorage restored a
+    // stale `selectedPdfFile` from a previous statement, it would
+    // linger alongside the freshly-set `selectedEmailStatement` and
+    // confuse downstream dispatches (e.g. the retry-after-overlap
+    // button checks `selectedPdfFile` first and would route the
+    // import via the PDF endpoint with an empty file_path — that's
+    // the source of the "file_path or bytes is required" error
+    // operators were hitting on email-sourced statements like the
+    // 15-MAY-26 BC010 case).
     if (initialStatement.source === 'email' && initialStatement.emailId && initialStatement.attachmentId) {
       setSelectedEmailStatement({
         emailId: initialStatement.emailId,
         attachmentId: initialStatement.attachmentId,
         filename: initialStatement.filename,
       });
+      setSelectedPdfFile(null);
+      setPdfDirectory('');
     } else if (initialStatement.source === 'pdf' && initialStatement.fullPath) {
       setSelectedPdfFile({
         filename: initialStatement.filename,
         fullPath: initialStatement.fullPath,
       });
+      setSelectedEmailStatement(null);
       // Set pdfDirectory from the full path so handlePdfPreview can find the file
       const lastSlash = Math.max(initialStatement.fullPath.lastIndexOf('/'), initialStatement.fullPath.lastIndexOf('\\'));
       if (lastSlash > 0) {
         setPdfDirectory(initialStatement.fullPath.substring(0, lastSlash));
       }
+    } else {
+      // Unknown / incomplete initialStatement — clear both so we
+      // don't carry stale state across the navigation.
+      setSelectedEmailStatement(null);
+      setSelectedPdfFile(null);
     }
     setAutoPreviewTriggered(false);
   }, [initialStatement]);
@@ -3880,6 +3897,27 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
       setBankImportResult({
         success: false,
         error: 'No PDF file selected. Please select a PDF file and run preview first.'
+      });
+      return;
+    }
+    if (!selectedPdfFile.fullPath || !selectedPdfFile.fullPath.trim()) {
+      // Stale selectedPdfFile with empty fullPath. Used to surface as
+      // "file_path or bytes is required" from the BE — replace with a
+      // clearer FE-side message + dispatch hint. If the user came from
+      // the Hub with an email-source statement, route them through
+      // the email path instead.
+      console.error('handlePdfImport called with empty fullPath; selectedPdfFile=', selectedPdfFile);
+      if (selectedEmailStatement) {
+        console.warn('Falling back to email-import path since selectedEmailStatement is set');
+        await handleEmailImport();
+        return;
+      }
+      setBankImportResult({
+        success: false,
+        error:
+          'Internal: the selected PDF has no file path. Go back to the ' +
+          'Bank Statement Hub and click Process again to re-select the ' +
+          'statement.',
       });
       return;
     }
@@ -10242,8 +10280,17 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                               setIsImporting(true);
                               // Delete the stale import record
                               await authFetch(`${API_BASE}/bank-import/import-history/${importId}`, { method: 'DELETE' });
-                              // Re-run the import - use handlePdfImport or handleEmailImport based on source
-                              if (selectedPdfFile) {
+                              // Re-run the import. Match the main button's
+                              // dispatch order: email source first (most
+                              // common when statementSource='email'), then
+                              // PDF, then CSV fallback. The previous order
+                              // preferred selectedPdfFile, which routed
+                              // email-source imports through /import-from-pdf
+                              // with an empty file_path when a stale
+                              // selectedPdfFile lingered from session restore.
+                              if (isEmailSource && selectedEmailStatement) {
+                                await handleEmailImport();
+                              } else if (selectedPdfFile?.fullPath) {
                                 await handlePdfImport();
                               } else if (selectedEmailStatement) {
                                 await handleEmailImport();
