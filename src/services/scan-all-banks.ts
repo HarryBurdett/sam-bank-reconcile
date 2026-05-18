@@ -1127,8 +1127,23 @@ export async function scanAllBanksFaithful(
       const recBal = bank.reconciled_balance;
       if (recBal === null || recBal === undefined) continue;
       for (const stmt of bank.statements) {
-        // is_imported in legacy maps to status === 'imported' here.
-        if (stmt.status !== 'imported') continue;
+        // Originally legacy only auto-promoted status='imported'
+        // statements. Widened to also include 'ready' and
+        // 'in_progress' state — those are statements SAM has tracked
+        // but hasn't marked reconciled, even though Opera may
+        // already have the entries (the common "Opera ahead of SAM"
+        // case: workflow completed but is_reconciled never flipped).
+        // checkPeriodReconciled still guards behind FULLY_RECONCILED,
+        // so we only promote when Opera genuinely has the period
+        // reconciled — false positives are impossible.
+        const eff = (stmt.state ?? stmt.status) as string | undefined;
+        if (
+          stmt.status !== 'imported' &&
+          eff !== 'ready' &&
+          eff !== 'in_progress'
+        ) {
+          continue;
+        }
         const periodStart = (stmt.period_start ?? null) as string | null;
         const periodEnd = (stmt.period_end ?? null) as string | null;
         const closing = (stmt.closing_balance ?? null) as number | null;

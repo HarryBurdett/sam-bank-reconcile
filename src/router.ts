@@ -2205,8 +2205,24 @@ export function createRouter(ctx: AppContext): Router {
           periodEnd: typeof body.period_end === 'string' ? body.period_end : null,
         });
 
-        // App-DB tracking update on success
-        if (result.success && importId !== null && Number.isFinite(importId)) {
+        // App-DB tracking update on success. The previous version
+        // silently swallowed errors here — when the FE didn't pass
+        // import_id (file-picker path) or the UPDATE hit a transient
+        // failure, Opera got posted but SAM's is_reconciled flag
+        // never flipped, leaving the operator with a stuck
+        // "Opera reconciled outside SAM" banner. We now:
+        //   1. Fall back to looking up the row by bank_code +
+        //      statement_date + closing_balance when importId is
+        //      missing, so file-picker reconciles also flip the
+        //      flag.
+        //   2. Surface UPDATE failures as result.tracking_warning
+        //      rather than swallowing — the FE can show a toast +
+        //      retry via /recover-from-restore later.
+        const enriched = result as typeof result & {
+          tracking_warning?: string;
+          tracking_updated_import_id?: number;
+        };
+        if (result.success) {
           try {
             const newRecBal = result.new_reconciled_balance ?? null;
             const statementActuallyComplete =
@@ -2214,21 +2230,64 @@ export function createRouter(ctx: AppContext): Router {
               (newRecBal !== null &&
                 Math.abs(newRecBal - closingBalance) < 0.01);
             const isReconciled = statementActuallyComplete ? 1 : 0;
-            await appDb('bank_statement_imports')
-              .where({ id: importId })
-              .update({
-                is_reconciled: isReconciled,
-                reconciled_count: result.records_reconciled ?? 0,
-                reconciled_at: appDb.fn.now(),
-              });
-          } catch (dbErr: any) {
+
+            // Resolve target row — prefer the explicit importId,
+            // otherwise look up by bank + statement_date + closing.
+            // statement_date might come in as 'YYYY-MM-DD' or
+            // 'DD-MON-YY' from the FE — try the raw string first.
+            let resolvedId: number | null =
+              importId !== null && Number.isFinite(importId) ? importId : null;
+            if (resolvedId === null) {
+              const row = (await appDb('bank_statement_imports')
+                .select('id')
+                .where('bank_code', bankCode)
+                .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
+                  closingBalance,
+                ])
+                .orderBy('id', 'desc')
+                .first()) as { id: number } | undefined;
+              if (row?.id) resolvedId = Number(row.id);
+            }
+
+            if (resolvedId !== null) {
+              const updated = Number(
+                await appDb('bank_statement_imports')
+                  .where({ id: resolvedId })
+                  .update({
+                    is_reconciled: isReconciled,
+                    reconciled_count: result.records_reconciled ?? 0,
+                    reconciled_at: appDb.fn.now(),
+                  }),
+              );
+              if (updated === 0) {
+                enriched.tracking_warning =
+                  `bank_statement_imports row ${resolvedId} not found ` +
+                  `during tracking update — Opera posted successfully ` +
+                  `but SAM's is_reconciled flag is unflipped. ` +
+                  `Use the recover-from-restore action to repair.`;
+              } else {
+                enriched.tracking_updated_import_id = resolvedId;
+              }
+            } else {
+              enriched.tracking_warning =
+                `Could not locate a bank_statement_imports row matching ` +
+                `bank_code=${bankCode} closing_balance=${closingBalance} — ` +
+                `Opera posted successfully but SAM's is_reconciled ` +
+                `flag is unflipped. The next 'Scan All Banks' will ` +
+                `auto-recover via the divergence banner.`;
+            }
+          } catch (dbErr: unknown) {
+            const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
             ctx.logger.warn?.(
-              'Could not update bank_statement_imports tracking row',
-              dbErr,
+              'Could not update bank_statement_imports tracking row: ' + msg,
             );
+            enriched.tracking_warning =
+              `Opera posting succeeded but SAM tracking update failed: ` +
+              `${msg}. The next 'Scan All Banks' will auto-recover via ` +
+              `the divergence banner.`;
           }
         }
-        res.json(result);
+        res.json(enriched);
       } catch (err: any) {
         ctx.logger.error('Complete reconciliation failed', err);
         res.status(500).json({

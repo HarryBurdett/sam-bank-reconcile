@@ -2169,6 +2169,26 @@ export function BankStatementReconcile({ initialReconcileData = null, resumeImpo
       }
 
       if (data.success) {
+        // Surface any tracking warning from the BE. This fires when
+        // Opera posted successfully but SAM's bank_statement_imports
+        // is_reconciled flag couldn't be flipped (silent DB error,
+        // or the row couldn't be located). The reconcile is still
+        // valid — Opera has the postings — but the operator should
+        // know SAM's local tracking is out of sync, and that the
+        // next Scan All Banks will surface a divergence banner that
+        // can auto-recover via the bidirectional recovery flow.
+        if (data.tracking_warning) {
+          showDialog({
+            title: 'Reconciliation Complete — Tracking Notice',
+            message:
+              `Opera received the postings, but SAM\'s local tracking ` +
+              `update reported: "${data.tracking_warning}" ` +
+              `\n\nNo data is lost — the next Scan All Banks will ` +
+              `detect this and offer a one-click recovery.`,
+            type: 'warning',
+          });
+        }
+
         // Mark the statement file as reconciled in the database
         const selectedFileInfo = statementFilesQuery.data?.files?.find(f => f.path === statementPath);
         if (selectedFileInfo?.filename) {
