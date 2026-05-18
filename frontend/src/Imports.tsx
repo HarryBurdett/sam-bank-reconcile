@@ -4959,8 +4959,21 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
     const row = bankTransferModal.transaction.row;
     const txn = bankTransferModal.transaction;
     const source = bankTransferModal.source;
-    const destBankCode = modalDestBank;
-    const destBankName = bankAccounts.find(b => b.code === modalDestBank)?.description || '';
+    // Defensive: if modalDestBank wasn't set via dropdown selection
+    // but modalDestBankSearch exact-matches a bank code (operator
+    // paste / autofill / browser autocomplete that bypassed
+    // onChange), resolve it here at save time. Same rule as the
+    // input's onChange handler.
+    let destBankCode = modalDestBank;
+    if (!destBankCode && modalDestBankSearch) {
+      const trimmed = modalDestBankSearch.trim().toUpperCase();
+      const exactMatch = bankAccounts.find(
+        (b) =>
+          b.code.toUpperCase() === trimmed && b.code !== selectedBankCode,
+      );
+      if (exactMatch) destBankCode = exactMatch.code;
+    }
+    const destBankName = bankAccounts.find(b => b.code === destBankCode)?.description || '';
 
     // Save the bank transfer detail with all fields
     setBankTransferDetails(prev => {
@@ -5164,11 +5177,26 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                 type="text"
                 value={modalDestBankSearch}
                 onChange={(e) => {
-                  setModalDestBankSearch(e.target.value);
+                  const v = e.target.value;
+                  setModalDestBankSearch(v);
                   setModalDestBankDropdownOpen(true);
                   setModalDestBankHighlightIndex(0);
-                  // Clear selection if user edits
-                  if (modalDestBank) {
+                  // Auto-resolve when the typed text exactly matches a
+                  // bank code (case-insensitive). Without this, the
+                  // operator typing "BB010" sees the summary stay at
+                  // "?" because `modalDestBank` only gets set when
+                  // they click/Enter/Tab on a dropdown option.
+                  const trimmed = v.trim().toUpperCase();
+                  const exactMatch = bankAccounts.find(
+                    (b) =>
+                      b.code.toUpperCase() === trimmed &&
+                      b.code !== selectedBankCode,
+                  );
+                  if (exactMatch) {
+                    setModalDestBank(exactMatch.code);
+                  } else if (modalDestBank) {
+                    // Edits that no longer exact-match clear the
+                    // selection (existing behaviour).
                     setModalDestBank('');
                   }
                 }}
