@@ -2601,6 +2601,7 @@ export function createRouter(ctx: AppContext): Router {
         bankImportExecutor?: ImportPostingExecutor;
         bankImportLock?: ImportLockAdapter;
         bankPeriodOverlapChecker?: PeriodOverlapChecker;
+        bankEmailAttachments?: EmailAttachmentProvider;
         bankPaymentRequestLookup?: (
           gcPaymentId: string,
         ) => Promise<string[] | null>;
@@ -2621,11 +2622,75 @@ export function createRouter(ctx: AppContext): Router {
         makeBankStatementOverlapChecker(appDb);
       try {
         const body = (req.body ?? {}) as Record<string, unknown>;
+        const filePath = String(req.query.file_path ?? body.file_path ?? '');
+        const emailIdRaw =
+          req.query.email_id ?? (body as Record<string, unknown>).email_id;
+        const attachmentIdRaw =
+          req.query.attachment_id ??
+          (body as Record<string, unknown>).attachment_id;
+
+        // Server-side rescue: if a stale FE bundle hits this endpoint
+        // with no file_path but supplied email_id + attachment_id,
+        // route through the email path instead. Without this guard
+        // the user gets a cryptic "file_path or bytes is required"
+        // even though the BE has everything it needs to do the
+        // import. The path-empty + email-coords case can happen
+        // when an old browser session held a stale selectedPdfFile
+        // and the new code in initialStatement-effect hadn't run yet.
+        if (
+          (!filePath || !filePath.trim()) &&
+          emailIdRaw !== undefined &&
+          attachmentIdRaw !== undefined &&
+          adapter.bankEmailAttachments
+        ) {
+          const { importBankStatementFromEmail } = await import(
+            './services/bank-import-from-email.js'
+          );
+          const rescued = await importBankStatementFromEmail(
+            operaDb,
+            appDb,
+            adapter.bankEmailAttachments,
+            extractor,
+            executor,
+            lock,
+            overlapChecker,
+            {
+              emailId: Number(emailIdRaw),
+              attachmentId: String(attachmentIdRaw),
+              bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
+              autoAllocate:
+                req.query.auto_allocate === '1' ||
+                req.query.auto_allocate === 'true',
+              autoReconcile:
+                req.query.auto_reconcile === '1' ||
+                req.query.auto_reconcile === 'true',
+              resumeImportId: req.query.resume_import_id
+                ? Number(req.query.resume_import_id)
+                : null,
+              overrides: Array.isArray(body.overrides) ? body.overrides : [],
+              selectedRows: Array.isArray(body.selected_rows)
+                ? (body.selected_rows as number[])
+                : null,
+              dateOverrides: Array.isArray(body.date_overrides)
+                ? body.date_overrides
+                : [],
+              rejectedRefundRows: Array.isArray(body.rejected_refund_rows)
+                ? (body.rejected_refund_rows as number[])
+                : [],
+              skipOverlapCheck: body.skip_overlap_check === true,
+            },
+          );
+          ctx.logger.info?.(
+            `import-from-pdf rescued to email path (email_id=${emailIdRaw}, attachment_id=${attachmentIdRaw})`,
+          );
+          res.json(rescued);
+          return;
+        }
         const result = await importBankStatementFromPdf(
           operaDb,
           appDb,
           {
-            filePath: String(req.query.file_path ?? body.file_path ?? ''),
+            filePath,
             bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
             filename: (body.filename as string) ?? undefined,
             autoAllocate:

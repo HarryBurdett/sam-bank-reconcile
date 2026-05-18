@@ -4128,10 +4128,19 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
 
       let url: string;
       const resumeParam = resumeImportId ? `&resume_import_id=${resumeImportId}` : '';
+      // Belt-and-braces: append email coords when present so the BE
+      // can fall back to the email path if file_path is unusable.
+      // The BE has a server-side rescue that converts /import-from-pdf
+      // calls with empty file_path + valid email_id+attachment_id
+      // into /import-from-email calls. This protects against stale
+      // FE bundles that haven't picked up the dispatch fixes yet.
+      const emailCoordsParam = selectedEmailStatement
+        ? `&email_id=${selectedEmailStatement.emailId}&attachment_id=${encodeURIComponent(selectedEmailStatement.attachmentId)}`
+        : '';
       if (dataSource === 'opera3') {
-        url = `${API_BASE}/opera3/bank-import/import-from-pdf?file_path=${encodeURIComponent(selectedPdfFile.fullPath)}&data_path=${encodeURIComponent(opera3DataPath)}&bank_code=${selectedBankCode}&auto_allocate=${autoAllocate}&auto_reconcile=false${resumeParam}`;
+        url = `${API_BASE}/opera3/bank-import/import-from-pdf?file_path=${encodeURIComponent(selectedPdfFile.fullPath)}&data_path=${encodeURIComponent(opera3DataPath)}&bank_code=${selectedBankCode}&auto_allocate=${autoAllocate}&auto_reconcile=false${resumeParam}${emailCoordsParam}`;
       } else {
-        url = `${API_BASE}/bank-import/import-from-pdf?file_path=${encodeURIComponent(selectedPdfFile.fullPath)}&bank_code=${selectedBankCode}&auto_allocate=${autoAllocate}&auto_reconcile=false${resumeParam}`;
+        url = `${API_BASE}/bank-import/import-from-pdf?file_path=${encodeURIComponent(selectedPdfFile.fullPath)}&bank_code=${selectedBankCode}&auto_allocate=${autoAllocate}&auto_reconcile=false${resumeParam}${emailCoordsParam}`;
       }
 
       const response = await authFetch(url, {
