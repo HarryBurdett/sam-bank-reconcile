@@ -161,6 +161,22 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
     res.sendFile(resolve(PUBLIC_DIR, 'login.html'));
   });
 
+  // SPA's hashed asset bundle (frontend/dist/assets/index-HASH.{js,css}).
+  // Mounted UNAUTHENTICATED because the browser fetches them while
+  // rendering the page; if requireAuth gated them they'd 401 before
+  // the SPA could even mount. The bundle is JS/CSS only — no tenant
+  // data — and tenant-touching API calls still go through the
+  // authenticated /api/apps/* dispatcher below.
+  app.use(
+    '/assets',
+    express.static(resolve(FRONTEND_DIST, 'assets'), {
+      etag: true,
+      lastModified: true,
+      maxAge: '1y',
+      immutable: true,
+    }),
+  );
+
   // /auth/* — login + logout + companies (no auth).
   app.use('/auth', loginRouter(config, () => Array.from(companies.keys())));
 
@@ -173,6 +189,51 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
       user: req.user,
       company: req.standaloneCompany ?? null,
     });
+  });
+
+  // SPA shell — serve frontend/dist/index.html with the SAM context
+  // injected before the SPA's module script runs. Replaces the
+  // standalone's old hand-rolled public/index.html, which was written
+  // for the UMD lib-mode bundle and broke after the May-19 SPA
+  // conversion (commit e538a9c5). The SPA reads window.__SAM_CONTEXT__
+  // at module-init time, so the injection must happen before
+  // assets/index-*.js loads — we inject inside <head> at the start.
+  app.get('/', (req: Request, res: Response) => {
+    let indexHtml: string;
+    try {
+      indexHtml = readFileSync(resolve(FRONTEND_DIST, 'index.html'), 'utf8');
+    } catch (err) {
+      res
+        .status(500)
+        .type('text/plain')
+        .send(
+          `Failed to read frontend/dist/index.html — run \`npm run build\` in the repo root. (${(err as Error).message})`,
+        );
+      return;
+    }
+    const company = req.standaloneCompany ?? null;
+    const user = req.user ?? null;
+    const samContext = {
+      appId: 'bank-reconcile',
+      user: user
+        ? {
+            userId: user.userId,
+            email: user.email,
+            role: user.role,
+            userType: user.userType,
+            tenantId: user.tenantId,
+            permissions: user.permissions,
+          }
+        : null,
+      token: null,
+      currentCompany: company ? { code: company, name: company } : null,
+    };
+    const inject = `<script>window.__SAM_CONTEXT__ = ${JSON.stringify(samContext).replace(/</g, '\\u003c')};</script>`;
+    const patched = indexHtml.replace(/<head>/i, `<head>${inject}`);
+    res.setHeader('Cache-Control', 'no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.type('html').send(patched);
   });
 
   // Read-only system info for the Settings page — surfaces the
