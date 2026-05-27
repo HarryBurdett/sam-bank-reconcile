@@ -21,9 +21,26 @@
 export function classifyExtractionError(err) {
     const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const lower = raw.toLowerCase();
-    // Auth — permanent until operator rotates the key
+    // Auth — permanent until operator rotates the key.
+    //
+    // Google returns this under several wordings depending on which API
+    // surface and which failure mode:
+    //   - "API key not valid"                — wrong/garbled key
+    //   - "API key was reported as leaked"   — key in a public repo etc.
+    //   - "API key expired. Please renew…"   — key past its TTL
+    //   - reason: "API_KEY_INVALID"          — structured error code
+    //   - "PERMISSION_DENIED"                — perms revoked
+    //   - 401 / 403                          — generic auth failures
+    // The "API key expired" variant is a 400 with status INVALID_ARGUMENT,
+    // so without this branch it would have fallen through to the generic
+    // "bad_request → malformed PDF…" message — misleading the operator
+    // into chasing the wrong cause.
     if (lower.includes('api key not valid') ||
         lower.includes('api key was reported as leaked') ||
+        lower.includes('api key expired') ||
+        lower.includes('api_key_invalid') ||
+        lower.includes('api_key_expired') ||
+        lower.includes('please renew the api key') ||
         lower.includes('permission_denied') ||
         lower.includes('401') ||
         lower.includes('403') ||
@@ -32,9 +49,9 @@ export function classifyExtractionError(err) {
         return {
             kind: 'auth',
             transient: false,
-            message: 'Gemini API key is invalid or has been revoked. ' +
-                'Generate a new key at https://aistudio.google.com/apikey ' +
-                'and restart the server with it.',
+            message: 'Gemini API key is invalid, expired, or revoked. ' +
+                'Generate a new key at https://aistudio.google.com/app/apikey ' +
+                'and restart the server with it (env GEMINI_API_KEY).',
             cause: raw,
         };
     }
