@@ -309,13 +309,20 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
   });
   const dataSource: DataSource = operaConfigData?.version === 'opera3' ? 'opera3' : 'opera-sql';
 
-  // Get current company for company-specific localStorage keys
+  // Get current company for company-specific localStorage keys.
+  // staleTime + gcTime = 0 so a company switch always re-fetches
+  // before any restore decision. Without these, React Query could
+  // replay a stale company id and the wizard would restore the
+  // wrong company's in-progress import state — which would lead
+  // to wrong-company Opera posts on the next reconciliation.
   const { data: companiesData } = useQuery({
     queryKey: ['companies'],
     queryFn: async () => {
       const response = await apiClient.getCompanies();
       return response.data;
     },
+    staleTime: 0,
+    gcTime: 0,
   });
   const currentCompanyId = companiesData?.current_company?.id || '';
 
@@ -707,14 +714,18 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
   // =====================
   // SESSION STORAGE PERSISTENCE - Keep data when switching tabs/pages
   // =====================
-  const STORAGE_KEY = currentCompanyId ? `bankImportState_${currentCompanyId}` : 'bankImportState';
+  // STORAGE_KEY is null when currentCompanyId hasn't loaded yet — every
+  // sessionStorage operation below MUST check before using it. The
+  // previous fallback to the literal 'bankImportState' silently shared
+  // one company's in-progress import state with every other company.
+  const STORAGE_KEY: string | null = currentCompanyId ? `bankImportState_${currentCompanyId}` : null;
   const hasRestoredFromSession = useRef(false);
   const sessionRestoreComplete = useRef(false);
 
   // Load persisted state on mount
   useEffect(() => {
     try {
-      const saved = sessionStorage.getItem(STORAGE_KEY);
+      const saved = STORAGE_KEY ? sessionStorage.getItem(STORAGE_KEY) : null;
       if (saved) {
         const parsed = JSON.parse(saved);
         // Restore only navigation context — preview data comes from backend drafts
@@ -869,7 +880,7 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
 
   // Clear persisted state after successful import
   const clearPersistedState = useCallback(() => {
-    sessionStorage.removeItem(STORAGE_KEY);
+    if (STORAGE_KEY) sessionStorage.removeItem(STORAGE_KEY);
   }, []);
 
   // Helper: build draft query params for the current statement
@@ -1097,7 +1108,7 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
         selectedEmailStatement,
         selectedPdfFile,
       };
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+      if (STORAGE_KEY) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
     } catch (e) {
       console.warn('Failed to save bank import state to session storage:', e);
     }
@@ -10058,7 +10069,7 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                         if (onImportComplete) {
                           onImportComplete(reconcileData);
                         } else {
-                          sessionStorage.setItem(currentCompanyId ? `reconcile_statement_data_${currentCompanyId}` : 'reconcile_statement_data', JSON.stringify(reconcileData));
+                          if (currentCompanyId) sessionStorage.setItem(`reconcile_statement_data_${currentCompanyId}`, JSON.stringify(reconcileData));
                           window.location.href = `/cashbook/statement-reconcile?bank=${encodeURIComponent(selectedBankCode)}`;
                         }
                       } : (isEmailSource ? handleEmailImport : selectedPdfFile ? handlePdfImport : handleBankImport)}
@@ -10470,7 +10481,7 @@ export function Imports({ bankRecOnly = false, initialStatement = null, resumeIm
                               if (onImportComplete) {
                                 onImportComplete(reconcileData);
                               } else {
-                                sessionStorage.setItem(currentCompanyId ? `reconcile_statement_data_${currentCompanyId}` : 'reconcile_statement_data', JSON.stringify(reconcileData));
+                                if (currentCompanyId) sessionStorage.setItem(`reconcile_statement_data_${currentCompanyId}`, JSON.stringify(reconcileData));
                                 window.location.href = `/cashbook/statement-reconcile?bank=${encodeURIComponent(selectedBankCode)}`;
                               }
                             }}

@@ -191,6 +191,26 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<BuiltApp> {
     });
   });
 
+  // SPA-fallback compatibility — the BankStatementReconcile and Imports
+  // pages derive their sessionStorage/localStorage cache keys from
+  // /api/companies's `current_company.id`. SAM provides this at the
+  // portal layer; in standalone, without this endpoint the wizard's
+  // `|| ''` fallback used a shared empty-suffix key across every
+  // company, silently leaking one company's in-progress import or
+  // matching state into another company's UI. Bank-reconcile state
+  // drives Opera writes, so this is a high-severity safety endpoint.
+  app.get('/api/companies', (req: Request, res: Response) => {
+    const code = req.standaloneCompany;
+    if (!code) {
+      res.status(400).json({ error: 'no company in session' });
+      return;
+    }
+    res.json({
+      companies: [{ id: code, name: code }],
+      current_company: { id: code, name: code },
+    });
+  });
+
   // SPA shell — serve frontend/dist/index.html with the SAM context
   // injected before the SPA's module script runs. Replaces the
   // standalone's old hand-rolled public/index.html, which was written
