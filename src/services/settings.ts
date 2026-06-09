@@ -3,14 +3,21 @@
  *
  * The Python implementation reads "recurring_entries_mode" and other
  * per-company settings from a JSON file. Under SAM, settings live in
- * the per-app `settings` table (key/value JSON, one row per setting
- * key) provisioned by migration 001.
+ * the per-app `settings` table (key/value JSON) provisioned by
+ * migration 001 and made multi-company by migration 018.
  *
  * Port of:
  *   GET  /api/recurring-entries/config   (api/main.py:10290)
  *   PUT  /api/recurring-entries/config   (api/main.py:10303)
+ *
+ * 2026-06-09: now REQUIRES a non-empty companyCode on every call.
+ * Migration 018 added a `company_code` column + composite UNIQUE on
+ * (key, company_code); callers must thread the active Opera company
+ * through every read and write or `companyScope()` throws. See
+ * src/_shared/get-company.ts for the rationale.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export type RecurringEntriesMode = 'process' | 'warn';
 
@@ -23,14 +30,21 @@ export interface RecurringConfigResponse {
 }
 
 /**
- * Read the recurring-entries processing mode. Defaults to 'process'
- * if no row exists or the stored value is invalid (matches Python).
+ * Read the recurring-entries processing mode for one Opera company.
+ * Defaults to 'process' if no row exists or the stored value is
+ * invalid (matches Python).
+ *
+ * @throws Error if companyCode is empty — see companyScope().
  */
 export async function getRecurringEntriesMode(
   appDb: Knex,
+  companyCode: string,
 ): Promise<RecurringConfigResponse> {
+  const scope = companyScope(companyCode);
   try {
-    const row = await appDb('settings').where({ key: RECURRING_KEY }).first();
+    const row = await appDb('settings')
+      .where({ ...scope, key: RECURRING_KEY })
+      .first();
     let mode: RecurringEntriesMode = 'process';
     if (row?.value) {
       try {
@@ -50,10 +64,14 @@ export async function getRecurringEntriesMode(
 }
 
 /**
- * Update the recurring-entries processing mode. Validates input.
+ * Update the recurring-entries processing mode for one Opera company.
+ * Validates input.
+ *
+ * @throws Error if companyCode is empty — see companyScope().
  */
 export async function setRecurringEntriesMode(
   appDb: Knex,
+  companyCode: string,
   mode: string,
 ): Promise<RecurringConfigResponse> {
   if (mode !== 'process' && mode !== 'warn') {
@@ -64,15 +82,22 @@ export async function setRecurringEntriesMode(
     };
   }
 
+  const scope = companyScope(companyCode);
   try {
     const value = JSON.stringify(mode);
-    const existing = await appDb('settings').where({ key: RECURRING_KEY }).first();
+    const existing = await appDb('settings')
+      .where({ ...scope, key: RECURRING_KEY })
+      .first();
     if (existing) {
       await appDb('settings')
-        .where({ key: RECURRING_KEY })
+        .where({ ...scope, key: RECURRING_KEY })
         .update({ value, updated_at: appDb.fn.now() });
     } else {
-      await appDb('settings').insert({ key: RECURRING_KEY, value });
+      await appDb('settings').insert({
+        ...scope,
+        key: RECURRING_KEY,
+        value,
+      });
     }
     return { success: true, mode };
   } catch (err: any) {

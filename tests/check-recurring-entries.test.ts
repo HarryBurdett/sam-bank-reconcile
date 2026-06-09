@@ -23,6 +23,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import knexLib, { type Knex } from 'knex';
 import { checkRecurringEntries } from '../src/services/check-recurring-entries.js';
 
+const TEST_COMPANY = 'C';
+
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE arhead (
     ae_entry TEXT, ae_acnt TEXT, ae_type INTEGER, ae_desc TEXT,
@@ -61,7 +63,9 @@ async function makeDb(): Promise<{ opera: Knex; app: Knex }> {
     connection: { filename: ':memory:' },
     useNullAsDefault: true,
   });
-  await app.raw('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)');
+  await app.raw(
+    'CREATE TABLE settings (key TEXT, company_code TEXT, value TEXT, PRIMARY KEY (key, company_code))',
+  );
   return { opera, app };
 }
 
@@ -140,7 +144,7 @@ describe('checkRecurringEntries', () => {
   });
 
   it('returns empty when no recurring entries exist', async () => {
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     if (!r.success) throw new Error(`unexpected failure: ${r.error}`);
     expect(r.total_due).toBe(0);
     expect(r.entries).toEqual([]);
@@ -168,7 +172,7 @@ describe('checkRecurringEntries', () => {
     });
     await opera('pname').insert({ pn_account: 'S100', pn_name: 'Suneria Ltd' });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect(r.success).toBe(true);
     // ae_nxtpost is 2026-04-15 and today is much later, so the
     // outstanding-date expansion produces multiple cycles.
@@ -196,7 +200,7 @@ describe('checkRecurringEntries', () => {
     });
     await seedLine(opera, { at_entry: 'REC0000001', at_acnt: 'BB005', at_value: -10000 });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect(r.total_due).toBe(0);
   });
 
@@ -212,7 +216,7 @@ describe('checkRecurringEntries', () => {
     });
     await seedLine(opera, { at_entry: 'REC0000003', at_acnt: 'BB005', at_value: -5000 });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect((r.total_due ?? 0)).toBeGreaterThanOrEqual(1);
   });
 
@@ -225,7 +229,7 @@ describe('checkRecurringEntries', () => {
     });
     await seedLine(opera, { at_entry: 'REC0000010', at_acnt: 'BC010', at_value: -10000 });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect(r.total_due).toBe(0);
   });
 
@@ -246,7 +250,7 @@ describe('checkRecurringEntries', () => {
       at_account: 'N200', at_value: -25000,
     });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect((r.total_due ?? 0)).toBeGreaterThanOrEqual(1);
     const e = r.entries![0]!;
     expect(e.line_count).toBe(2);
@@ -274,7 +278,7 @@ describe('checkRecurringEntries', () => {
     await seedLine(opera, { at_entry: 'REC0000030', at_acnt: 'BB005', at_value: -1000 });
     await opera('pname').insert({ pn_account: '', pn_name: '' });
 
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect((r.total_due ?? 0)).toBeGreaterThanOrEqual(2);
     // Composite refs include the post-date suffix.
     for (const e of r.entries!) {
@@ -291,16 +295,17 @@ describe('checkRecurringEntries', () => {
   it('reads mode from app DB settings (defaults to process when missing)', async () => {
     await app('settings').insert({
       key: 'recurring_entries_mode',
+      company_code: TEST_COMPANY,
       value: JSON.stringify('warn'),
     });
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect(r.success).toBe(true);
     expect(r.mode).toBe('warn');
   });
 
   it('returns success: false when the Opera SQL is broken (table missing)', async () => {
     await opera.schema.dropTable('arline');
-    const r = await checkRecurringEntries(opera, app, 'BB005');
+    const r = await checkRecurringEntries(opera, app, 'BB005', TEST_COMPANY);
     expect(r.success).toBe(false);
     expect(r.error).toBeDefined();
   });

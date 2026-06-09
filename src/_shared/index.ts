@@ -18,3 +18,10 @@ export {
   isDeadlockError,
 } from './deadlock-retry.js';
 export { isRecordLocked } from './record-lock-check.js';
+export {
+  companyScope,
+  companyScopeSoft,
+  unscopedDanger,
+  companyScopeForTesting,
+  COMPANY_SCOPE_SENTINEL,
+} from './get-company.js';

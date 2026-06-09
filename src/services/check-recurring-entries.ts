@@ -283,6 +283,7 @@ export async function checkRecurringEntries(
   operaDb: Knex,
   appDb: Knex | null,
   bankCode: string,
+  companyCode: string,
 ): Promise<CheckRecurringEntriesResponse> {
   let bc: string;
   try {
@@ -298,7 +299,7 @@ export async function checkRecurringEntries(
   let mode: RecurringEntriesMode = 'process';
   if (appDb) {
     try {
-      const m = await getRecurringEntriesMode(appDb);
+      const m = await getRecurringEntriesMode(appDb, companyCode);
       if (m.success) mode = m.mode;
     } catch {
       // ignore; mode stays 'process'

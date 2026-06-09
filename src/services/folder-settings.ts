@@ -14,6 +14,7 @@
  *     the matching subfolder under base_folder)
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 const FOLDER_SETTINGS_KEY = 'folder_settings';
 
@@ -33,10 +34,12 @@ export interface GetFolderSettingsResponse {
 
 export async function getFolderSettings(
   appDb: Knex,
+  companyCode: string,
 ): Promise<GetFolderSettingsResponse> {
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('settings')
-      .where({ key: FOLDER_SETTINGS_KEY })
+      .where({ ...scope, key: FOLDER_SETTINGS_KEY })
       .first()) as unknown as { value: string | null } | undefined;
     if (!row?.value) {
       return {
@@ -86,8 +89,10 @@ export interface SaveFolderSettingsResponse {
 
 export async function saveFolderSettings(
   appDb: Knex,
+  companyCode: string,
   input: SaveFolderSettingsInput,
 ): Promise<SaveFolderSettingsResponse> {
+  const scope = companyScope(companyCode);
   try {
     const payload: FolderSettings = {
       base_folder: typeof input.base_folder === 'string' ? input.base_folder : '',
@@ -96,14 +101,18 @@ export async function saveFolderSettings(
     };
     const value = JSON.stringify(payload);
     const existing = (await appDb('settings')
-      .where({ key: FOLDER_SETTINGS_KEY })
+      .where({ ...scope, key: FOLDER_SETTINGS_KEY })
       .first()) as unknown as { id: number | null } | undefined;
     if (existing) {
       await appDb('settings')
-        .where({ key: FOLDER_SETTINGS_KEY })
+        .where({ ...scope, key: FOLDER_SETTINGS_KEY })
         .update({ value, updated_at: appDb.fn.now() });
     } else {
-      await appDb('settings').insert({ key: FOLDER_SETTINGS_KEY, value });
+      await appDb('settings').insert({
+        ...scope,
+        key: FOLDER_SETTINGS_KEY,
+        value,
+      });
     }
     return { success: true, message: 'Folder settings saved' };
   } catch (err: any) {

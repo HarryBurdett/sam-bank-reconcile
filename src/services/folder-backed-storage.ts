@@ -28,13 +28,21 @@ import { createDefaultPdfContentReader } from './default-pdf-content-reader.js';
 import type { FileStorageAdapter, ImportType } from './archive.js';
 import type { PdfContentReader } from './misc-endpoints.js';
 
+import { companyScope } from '../_shared/get-company.js';
+
 const FOLDER_SETTINGS_KEY = 'folder_settings';
 
-async function readBaseFolder(appDb: Knex | null): Promise<string | null> {
+async function readBaseFolder(
+  appDb: Knex | null,
+  companyCode: string,
+): Promise<string | null> {
   if (!appDb) return null;
+  // companyScope throws if companyCode is empty — fail loud rather
+  // than silently reading another company's folder path.
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('settings')
-      .where({ key: FOLDER_SETTINGS_KEY })
+      .where({ ...scope, key: FOLDER_SETTINGS_KEY })
       .first()) as { value?: string | null } | undefined;
     if (!row?.value) return null;
     const parsed = JSON.parse(row.value) as { base_folder?: string };
@@ -47,13 +55,21 @@ async function readBaseFolder(appDb: Knex | null): Promise<string | null> {
 
 /**
  * FileStorageAdapter whose `rootDir` resolves on every method call
- * from the per-app `folder_settings.base_folder`.
+ * from the per-app `folder_settings.base_folder` scoped to one Opera
+ * company.
+ *
+ * Note: `companyCode` is passed at construction time, NOT per call.
+ * Callers must build a fresh adapter per request (a `getFileStorage`
+ * helper in router.ts does this) — sharing one adapter across
+ * concurrent requests of different companies would re-introduce the
+ * cross-company leak this is designed to prevent.
  */
 export function createFolderBackedFileStorage(
   getAppDb: () => Knex | null,
+  companyCode: string,
 ): FileStorageAdapter {
   const inner = async (): Promise<FileStorageAdapter | null> => {
-    const root = await readBaseFolder(getAppDb());
+    const root = await readBaseFolder(getAppDb(), companyCode);
     if (!root) return null;
     return createDefaultFileStorage({ rootDir: root, flatLayout: true });
   };
@@ -91,10 +107,11 @@ export function createFolderBackedFileStorage(
  */
 export function createFolderBackedPdfContentReader(
   getAppDb: () => Knex | null,
+  companyCode: string,
 ): PdfContentReader {
   return {
     async readBytes(opts: { path: string }) {
-      const root = await readBaseFolder(getAppDb());
+      const root = await readBaseFolder(getAppDb(), companyCode);
       const inner = root
         ? createDefaultPdfContentReader({ rootDir: root })
         : createDefaultPdfContentReader({});

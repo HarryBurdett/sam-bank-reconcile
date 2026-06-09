@@ -204,14 +204,26 @@ export function createRouter(ctx: AppContext): Router {
   //
   // The filesystem adapters resolve their rootDir lazily from the
   // per-app `folder_settings.base_folder` row (managed by the plugin's
-  // own Settings UI). The PDF extractor activates whenever `ctx.llm`
-  // is available — no per-tenant config needed.
-  const builtinFileStorage: FileStorageAdapter = createFolderBackedFileStorage(
-    () => ctx.db.app,
-  );
-  const builtinPdfReader: PdfContentReader = createFolderBackedPdfContentReader(
-    () => ctx.db.app,
-  );
+  // own Settings UI). Since `folder_settings` is now per-company
+  // (migration 018), every adapter is built FRESH per request via
+  // the helpers below — sharing one adapter across requests of
+  // different companies would re-introduce a cross-company leak.
+  //
+  // The PDF extractor activates whenever `ctx.llm` is available —
+  // no per-tenant config needed.
+  function getFileStorage(company: string): FileStorageAdapter {
+    return (
+      (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
+      createFolderBackedFileStorage(() => ctx.db.app, company)
+    );
+  }
+  function getPdfReader(company: string): PdfContentReader {
+    return (
+      (ctx as unknown as { pdfContentReader?: PdfContentReader })
+        .pdfContentReader ??
+      createFolderBackedPdfContentReader(() => ctx.db.app, company)
+    );
+  }
   const builtinPdfExtractor: PdfExtractor | null = ctx.llm
     ? createDefaultBankPdfExtractor({ llm: ctx.llm })
     : null;
@@ -252,6 +264,26 @@ export function createRouter(ctx: AppContext): Router {
       return null;
     }
     return ctx.db.app;
+  }
+
+  /**
+   * Return the trimmed Opera company code for this request, or null
+   * (and send 400) if SAM didn't set the X-Opera-Company header. Use
+   * BEFORE any read/write of a per-company table (settings, drafts,
+   * statement archive, etc.) — see src/_shared/get-company.ts for
+   * the rationale.
+   */
+  function requireCompany(req: Request, res: Response): string | null {
+    const company =
+      typeof req.operaCompany === 'string' ? req.operaCompany.trim() : '';
+    if (!company) {
+      res.status(400).json({
+        success: false,
+        error: 'No Opera company in context. SAM should set X-Opera-Company.',
+      });
+      return null;
+    }
+    return company;
   }
 
   function getOperaDb(req: Request, res: Response): import('knex').Knex | null {
@@ -826,8 +858,10 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/recurring-entries/config', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
-      const result = await getRecurringEntriesMode(appDb);
+      const result = await getRecurringEntriesMode(appDb, company);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Get recurring-entries mode failed', err);
@@ -844,9 +878,11 @@ export function createRouter(ctx: AppContext): Router {
   router.put('/api/recurring-entries/config', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const mode = String(req.query.mode ?? '').trim();
-      const result = await setRecurringEntriesMode(appDb, mode);
+      const result = await setRecurringEntriesMode(appDb, company, mode);
       if (!result.success) {
         res.status(400).json(result);
         return;
@@ -873,11 +909,14 @@ export function createRouter(ctx: AppContext): Router {
     if (!operaDb) return;
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const result = await checkRecurringEntries(
         operaDb,
         appDb,
         String(req.params.bank_code ?? ''),
+        company,
       );
       if (!result.success) {
         res.status(400).json(result);
@@ -2174,7 +2213,7 @@ export function createRouter(ctx: AppContext): Router {
    */
   router.get(
     '/api/bank-import/folder-settings',
-    async (_req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       const appDb = ctx.db.app;
       if (!appDb) {
         res.status(503).json({
@@ -2183,8 +2222,10 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await getFolderSettings(appDb);
+        const result = await getFolderSettings(appDb, company);
         res.json(result);
       } catch (err: any) {
         ctx.logger.error('Get folder settings failed', err);
@@ -2212,12 +2253,14 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const body = (req.body ?? {}) as {
           base_folder?: string | null;
           archive_folder?: string | null;
         };
-        const result = await saveFolderSettings(appDb, {
+        const result = await saveFolderSettings(appDb, company, {
           base_folder: body.base_folder ?? '',
           archive_folder: body.archive_folder ?? '',
         });
@@ -3190,9 +3233,9 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/archive/file', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
-    const storage =
-      (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
-      builtinFileStorage;
+    const company = requireCompany(req, res);
+    if (!company) return;
+    const storage = getFileStorage(company);
     if (!storage) {
       res.status(503).json({
         success: false,
@@ -3253,9 +3296,9 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/archive/restore', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
-    const storage =
-      (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
-      builtinFileStorage;
+    const company = requireCompany(req, res);
+    if (!company) return;
+    const storage = getFileStorage(company);
     if (!storage) {
       res.status(503).json({
         success: false,
@@ -3284,9 +3327,9 @@ export function createRouter(ctx: AppContext): Router {
   });
 
   router.get('/api/archive/pending', async (req: Request, res: Response) => {
-    const storage =
-      (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
-      builtinFileStorage;
+    const company = requireCompany(req, res);
+    if (!company) return;
+    const storage = getFileStorage(company);
     if (!storage) {
       res.status(503).json({
         success: false,
@@ -3596,9 +3639,9 @@ export function createRouter(ctx: AppContext): Router {
     async (req, res) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
-      const storage =
-        (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
-        builtinFileStorage;
+      const company = requireCompany(req, res);
+      if (!company) return;
+      const storage = getFileStorage(company);
       res.json(
         await getArchivedStatementPdf(
           appDb,
@@ -3641,12 +3684,6 @@ export function createRouter(ctx: AppContext): Router {
   // File-list / scan-folder / scan-all-banks / pdf-content
   // ---------------------------------------------------------------
 
-  const getFileStorage = () =>
-    (ctx as unknown as { fileStorage?: FileStorageAdapter }).fileStorage ??
-    builtinFileStorage;
-  const getPdfReader = () =>
-    (ctx as unknown as { pdfContentReader?: PdfContentReader }).pdfContentReader ??
-    builtinPdfReader;
   const getMultiformatParser = () =>
     (ctx as unknown as { multiformatParser?: MultiformatParser })
       .multiformatParser ?? defaultMultiformatParser;
@@ -3654,35 +3691,45 @@ export function createRouter(ctx: AppContext): Router {
     (ctx as unknown as { bankEmailAttachments?: EmailAttachmentProvider })
       .bankEmailAttachments ?? builtinEmailIngest?.attachments ?? null;
 
-  router.get('/api/bank-import/list-csv', async (_req, res) => {
-    res.json(await listCsvFiles(getFileStorage()));
+  router.get('/api/bank-import/list-csv', async (req, res) => {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    res.json(await listCsvFiles(getFileStorage(company)));
   });
 
-  router.get('/api/bank-import/list-pdf', async (_req, res) => {
-    res.json(await listPdfFiles(getFileStorage()));
+  router.get('/api/bank-import/list-pdf', async (req, res) => {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    res.json(await listPdfFiles(getFileStorage(company)));
   });
 
   router.get('/api/bank-import/pdf-content', async (req, res) => {
+    const company = requireCompany(req, res);
+    if (!company) return;
     res.json(
       await getPdfContent(
-        getPdfReader(),
+        getPdfReader(company),
         String(req.query.file_path ?? ''),
       ),
     );
   });
 
-  router.get('/api/bank-import/scan-folder', async (_req, res) => {
-    res.json(await scanFolder(getFileStorage()));
+  router.get('/api/bank-import/scan-folder', async (req, res) => {
+    const company = requireCompany(req, res);
+    if (!company) return;
+    res.json(await scanFolder(getFileStorage(company)));
   });
 
   router.post('/api/bank-import/fetch-emails-to-folder', async (req, res) => {
+    const company = requireCompany(req, res);
+    if (!company) return;
     const body = (req.body ?? {}) as {
       emails?: Array<{ emailId: number; attachmentId: string }>;
     };
     res.json(
       await fetchEmailsToFolder(
         getEmailAttachments(),
-        getFileStorage(),
+        getFileStorage(company),
         Array.isArray(body.emails) ? body.emails : [],
       ),
     );
@@ -3691,6 +3738,8 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/scan-all-banks', async (req, res) => {
     const operaDb = getOperaDb(req, res);
     if (!operaDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const appDb = ctx.db.app ?? null;
     const adapter = ctx as unknown as {
       bankMailboxAdapter?: BankMailboxAdapter;
@@ -3721,7 +3770,7 @@ export function createRouter(ctx: AppContext): Router {
     const lockKey = ctx.tenantId ?? 'unknown-tenant';
     try {
       const result = await withScanLock(lockKey, () =>
-        scanAllBanksFaithful(operaDb, mailbox, appDb, ctx.logger, {
+        scanAllBanksFaithful(operaDb, mailbox, appDb, company, ctx.logger, {
           daysBack,
           validateBalances,
           extractOnMiss,
@@ -3790,7 +3839,9 @@ export function createRouter(ctx: AppContext): Router {
    * always on the standalone host. Replaced with a direct read.
    */
   router.get('/api/bank-import/raw-preview', async (req, res) => {
-    const reader = getPdfReader();
+    const company = requireCompany(req, res);
+    if (!company) return;
+    const reader = getPdfReader(company);
     const filePath = String(req.query.file_path ?? req.query.filepath ?? '');
     const lines = Number(req.query.lines ?? 50);
     res.json(await rawFilePreview(reader, filePath, Number.isFinite(lines) ? lines : 50));

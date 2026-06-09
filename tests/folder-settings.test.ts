@@ -4,10 +4,13 @@ import {
   saveFolderSettings,
 } from '../src/services/folder-settings.js';
 
+const TEST_COMPANY = 'C';
+
 interface SettingsRow {
   id: number;
   key: string;
   value: string;
+  company_code: string;
 }
 
 interface MockState {
@@ -42,6 +45,7 @@ function makeAppDb(state: MockState): any {
           id,
           key: String(row.key ?? ''),
           value: String(row.value ?? ''),
+          company_code: String(row.company_code ?? ''),
         });
         return [id];
       },
@@ -55,7 +59,7 @@ function makeAppDb(state: MockState): any {
 describe('getFolderSettings', () => {
   it('returns disabled defaults when no row exists', async () => {
     const state: MockState = { rows: [] };
-    const result = await getFolderSettings(makeAppDb(state));
+    const result = await getFolderSettings(makeAppDb(state), TEST_COMPANY);
     expect(result.success).toBe(true);
     expect(result.base_folder).toBe('');
     expect(result.archive_folder).toBe('');
@@ -68,6 +72,7 @@ describe('getFolderSettings', () => {
         {
           id: 1,
           key: 'folder_settings',
+          company_code: TEST_COMPANY,
           value: JSON.stringify({
             base_folder: '/srv/bank',
             archive_folder: '/srv/bank/archive',
@@ -75,7 +80,7 @@ describe('getFolderSettings', () => {
         },
       ],
     };
-    const result = await getFolderSettings(makeAppDb(state));
+    const result = await getFolderSettings(makeAppDb(state), TEST_COMPANY);
     expect(result.success).toBe(true);
     expect(result.base_folder).toBe('/srv/bank');
     expect(result.archive_folder).toBe('/srv/bank/archive');
@@ -84,9 +89,9 @@ describe('getFolderSettings', () => {
 
   it('falls back to defaults on malformed JSON', async () => {
     const state: MockState = {
-      rows: [{ id: 1, key: 'folder_settings', value: 'not json' }],
+      rows: [{ id: 1, key: 'folder_settings', company_code: TEST_COMPANY, value: 'not json' }],
     };
-    const result = await getFolderSettings(makeAppDb(state));
+    const result = await getFolderSettings(makeAppDb(state), TEST_COMPANY);
     expect(result.success).toBe(true);
     expect(result.folder_enabled).toBe(false);
   });
@@ -97,11 +102,12 @@ describe('getFolderSettings', () => {
         {
           id: 1,
           key: 'folder_settings',
+          company_code: TEST_COMPANY,
           value: JSON.stringify({ base_folder: '', archive_folder: '/x' }),
         },
       ],
     };
-    const result = await getFolderSettings(makeAppDb(state));
+    const result = await getFolderSettings(makeAppDb(state), TEST_COMPANY);
     expect(result.folder_enabled).toBe(false);
   });
 });
@@ -109,7 +115,7 @@ describe('getFolderSettings', () => {
 describe('saveFolderSettings', () => {
   it('inserts a new row when none exists', async () => {
     const state: MockState = { rows: [] };
-    const result = await saveFolderSettings(makeAppDb(state), {
+    const result = await saveFolderSettings(makeAppDb(state), TEST_COMPANY, {
       base_folder: '/srv/bank',
       archive_folder: '/srv/archive',
     });
@@ -126,11 +132,12 @@ describe('saveFolderSettings', () => {
         {
           id: 1,
           key: 'folder_settings',
+          company_code: TEST_COMPANY,
           value: JSON.stringify({ base_folder: '/old', archive_folder: '' }),
         },
       ],
     };
-    const result = await saveFolderSettings(makeAppDb(state), {
+    const result = await saveFolderSettings(makeAppDb(state), TEST_COMPANY, {
       base_folder: '/new',
       archive_folder: '/new/arch',
     });
@@ -143,7 +150,7 @@ describe('saveFolderSettings', () => {
 
   it('coerces missing fields to empty strings', async () => {
     const state: MockState = { rows: [] };
-    const result = await saveFolderSettings(makeAppDb(state), {});
+    const result = await saveFolderSettings(makeAppDb(state), TEST_COMPANY, {});
     expect(result.success).toBe(true);
     const stored = JSON.parse(state.rows[0]?.value ?? '{}');
     expect(stored.base_folder).toBe('');

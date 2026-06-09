@@ -3,10 +3,18 @@ import { RefreshCw } from 'lucide-react';
 
 /**
  * Single source of truth for the version label rendered next to
- * every page header (e.g. "Bank Statements - Live Version 1.0").
+ * every page header (e.g. "Bank Statements - Live Version 1.2").
  * Bump on each release.
+ *
+ * 1.2 — cross-company settings isolation (migration 018 +
+ *       companyScope fail-loud helper + companyCode plumbed through
+ *       getRecurringEntriesMode / setRecurringEntriesMode /
+ *       getFolderSettings / saveFolderSettings /
+ *       createFolderBackedFileStorage / createFolderBackedPdfContentReader /
+ *       scanAllBanksFaithful / checkRecurringEntries).
+ *       Mirrors sam-gocardless 1.2.0.
  */
-export const LIVE_VERSION = '1.0';
+export const LIVE_VERSION = '1.2';
 
 interface PageHeaderProps {
   icon: React.ComponentType<{ className?: string }>;

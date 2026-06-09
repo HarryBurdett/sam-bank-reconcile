@@ -44,6 +44,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 import type { AppLogger as Logger } from '../app-context.js';
 import type { BankMailboxAdapter } from './scan-emails.js';
 import {
@@ -241,6 +242,7 @@ export async function scanAllBanksFaithful(
   operaDb: Knex,
   mailbox: BankMailboxAdapter | null,
   appDb: Knex | null,
+  companyCode: string,
   logger: Logger,
   opts: ScanAllBanksOptions = {},
 ): Promise<ScanAllBanksResponse> {
@@ -729,7 +731,7 @@ export async function scanAllBanksFaithful(
   if (appDb) {
     try {
       const row = (await appDb('settings')
-        .where({ key: 'folder_settings' })
+        .where({ ...companyScope(companyCode), key: 'folder_settings' })
         .first()) as { value?: string } | undefined;
       if (row?.value) {
         const parsed = JSON.parse(row.value) as { base_folder?: string };
