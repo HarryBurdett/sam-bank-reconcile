@@ -129,9 +129,17 @@ export async function processStatement(
     pdfBytes?: Uint8Array;
     bankCode: string;
   },
-  appDb?: Knex | null,
+  appDb: Knex | null,
+  companyCode: string,
 ): Promise<ProcessStatementResponse> {
-  const preview = await previewBankImportFromPdf(operaDb, llm, input);
+  const preview = await previewBankImportFromPdf(
+    operaDb,
+    llm,
+    input,
+    null,
+    appDb ?? null,
+    companyCode,
+  );
   if (!preview.success || !preview.transactions) {
     return preview;
   }
@@ -145,7 +153,7 @@ export async function processStatement(
       loadCustomerCandidates(operaDb),
       loadSupplierCandidates(operaDb),
     ]);
-    ctx = await buildMatchContext(operaDb, input.bankCode, {
+    ctx = await buildMatchContext(operaDb, input.bankCode, companyCode, {
       customers,
       suppliers,
     });

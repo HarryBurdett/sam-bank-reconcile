@@ -30,8 +30,19 @@ function makeCtx(): AppContext {
 let server: http.Server;
 let port: number;
 
+const TEST_COMPANY = 'C';
+
 beforeAll(async () => {
   const app = express();
+  // SAM's middleware (`packages/backend/src/middleware/company.ts`)
+  // reads the `X-Opera-Company` header and stamps `req.operaCompany`
+  // before plugin routes run. Stub the same field here so per-company
+  // routes don't 400 out on the way to the handler we're actually
+  // testing (the opera-3 mirror).
+  app.use((req, _res, next) => {
+    req.operaCompany = TEST_COMPANY;
+    next();
+  });
   app.use(createRouter(makeCtx()));
   await new Promise<void>((resolve) => {
     server = app.listen(0, () => {

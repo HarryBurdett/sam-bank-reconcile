@@ -16,6 +16,7 @@
  * which serialises them with json.dumps before writing to SQLite).
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface DraftKey {
   bankCode: string;
@@ -107,6 +108,7 @@ function safeParse<T = unknown>(value: unknown, fallback: T): T {
 
 export async function saveImportDraft(
   appDb: Knex,
+  companyCode: string,
   input: SaveDraftInput,
 ): Promise<SaveDraftResponse> {
   const key = normaliseKey(input);
@@ -116,6 +118,9 @@ export async function saveImportDraft(
       error: 'bank_code, source, and filename are required',
     };
   }
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY rather than being swallowed.
+  const scope = companyScope(companyCode);
   try {
     const previewJson = safeStringify(input.previewData);
     const editsJson = safeStringify(input.userEdits);
@@ -124,21 +129,24 @@ export async function saveImportDraft(
     // Upsert by composite key — MSSQL doesn't have ON CONFLICT, so do
     // an existence-check + UPDATE / INSERT pair.
     const existing = (await appDb('bank_import_drafts')
-      .where(key)
+      .where({ ...scope, ...key })
       .first()) as { id: number } | undefined;
 
     if (existing) {
-      await appDb('bank_import_drafts').where({ id: existing.id }).update({
-        preview_data: previewJson,
-        user_edits: editsJson,
-        target_system: targetSystem,
-        updated_at: appDb.fn.now(),
-      });
+      await appDb('bank_import_drafts')
+        .where({ ...scope, id: existing.id })
+        .update({
+          preview_data: previewJson,
+          user_edits: editsJson,
+          target_system: targetSystem,
+          updated_at: appDb.fn.now(),
+        });
       return { success: true, draft_id: existing.id };
     }
 
     const inserted = await appDb('bank_import_drafts')
       .insert({
+        ...scope,
         ...key,
         preview_data: previewJson,
         user_edits: editsJson,
@@ -171,6 +179,7 @@ interface DraftRow {
 
 export async function loadImportDraft(
   appDb: Knex,
+  companyCode: string,
   input: DraftKey,
 ): Promise<LoadDraftResponse> {
   const key = normaliseKey({ ...input, filename: input.filename ?? '' });
@@ -180,8 +189,12 @@ export async function loadImportDraft(
       error: 'bank_code and source are required',
     };
   }
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY rather than being swallowed.
+  const scope = companyScope(companyCode);
   try {
     let query = appDb('bank_import_drafts').where({
+      ...scope,
       bank_code: key.bank_code,
       source: key.source,
     });
@@ -235,6 +248,7 @@ export async function loadImportDraft(
 
 export async function deleteImportDraft(
   appDb: Knex,
+  companyCode: string,
   input: DraftKey,
 ): Promise<DeleteDraftResponse> {
   const key = normaliseKey({ ...input, filename: input.filename ?? '' });
@@ -244,8 +258,12 @@ export async function deleteImportDraft(
       error: 'bank_code and source are required',
     };
   }
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY rather than being swallowed.
+  const deleteScope = companyScope(companyCode);
   try {
     let query = appDb('bank_import_drafts').where({
+      ...deleteScope,
       bank_code: key.bank_code,
       source: key.source,
     });
@@ -283,12 +301,16 @@ export interface DraftStatementKey {
 
 export async function getDraftStatementKeys(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<DraftStatementKey[]> {
   if (!bankCode) return [];
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY rather than being swallowed.
+  const scope = companyScope(companyCode);
   try {
     const rows = (await appDb('bank_import_drafts')
-      .where({ bank_code: bankCode })
+      .where({ ...scope, bank_code: bankCode })
       .orderBy('updated_at', 'desc')
       .select(
         'source',

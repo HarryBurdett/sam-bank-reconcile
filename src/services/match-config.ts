@@ -11,6 +11,7 @@
  * Python.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface MatchConfig {
   min_match_score: number;
@@ -38,9 +39,15 @@ export interface GetMatchConfigResponse {
 
 export async function getMatchConfig(
   appDb: Knex,
+  companyCode: string,
 ): Promise<GetMatchConfigResponse> {
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY rather than being swallowed and silently
+  // returning defaults — defeating the fail-loud guarantee.
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('match_config')
+      .where(scope)
       .orderBy('id', 'desc')
       .first()) as
       | (Record<string, unknown> & {
@@ -108,22 +115,48 @@ function clamp01(n: number): number {
 
 export async function updateMatchConfig(
   appDb: Knex,
+  companyCode: string,
   input: UpdateMatchConfigInput,
 ): Promise<UpdateMatchConfigResponse> {
+  // companyScope() must run OUTSIDE the try/catch so an empty company
+  // code FAILS LOUDLY (see getMatchConfig above for the rationale).
+  const scope = companyScope(companyCode);
   try {
     const min = clamp01(input.min_match_score);
     const learn = clamp01(input.learn_threshold);
     const amb = clamp01(input.ambiguity_threshold);
 
-    await appDb('match_config').insert({
-      min_match_score: min,
-      learn_threshold: learn,
-      ambiguity_threshold: amb,
-      use_phonetic: !!input.use_phonetic,
-      use_levenshtein: !!input.use_levenshtein,
-      use_ngram: !!input.use_ngram,
-      updated_at: appDb.fn.now(),
-    });
+    // match_config has a UNIQUE(company_code) index — at most one row
+    // per company. Upsert by company_code: UPDATE if present, else
+    // INSERT. MSSQL has no ON CONFLICT, so existence-check first.
+    const existing = (await appDb('match_config')
+      .where(scope)
+      .first()) as { id: number } | undefined;
+
+    if (existing) {
+      await appDb('match_config')
+        .where({ ...scope, id: existing.id })
+        .update({
+          min_match_score: min,
+          learn_threshold: learn,
+          ambiguity_threshold: amb,
+          use_phonetic: !!input.use_phonetic,
+          use_levenshtein: !!input.use_levenshtein,
+          use_ngram: !!input.use_ngram,
+          updated_at: appDb.fn.now(),
+        });
+    } else {
+      await appDb('match_config').insert({
+        ...scope,
+        min_match_score: min,
+        learn_threshold: learn,
+        ambiguity_threshold: amb,
+        use_phonetic: !!input.use_phonetic,
+        use_levenshtein: !!input.use_levenshtein,
+        use_ngram: !!input.use_ngram,
+        updated_at: appDb.fn.now(),
+      });
+    }
 
     return { success: true, message: 'Configuration updated' };
   } catch (err: any) {

@@ -39,6 +39,7 @@ export async function previewBankImportFromEmail(
   input: PreviewFromEmailInput,
   extractor: PdfExtractor | null = null,
   appDb: Knex | null = null,
+  companyCode: string = '',
 ): Promise<PreviewResponse> {
   if (!Number.isFinite(input.emailId) || input.emailId <= 0) {
     return { success: false, error: 'email_id is required (positive number)' };
@@ -75,5 +76,6 @@ export async function previewBankImportFromEmail(
     },
     extractor,
     appDb,
+    companyCode,
   );
 }

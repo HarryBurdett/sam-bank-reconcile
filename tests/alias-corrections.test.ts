@@ -5,8 +5,11 @@ import {
   listCorrections,
 } from '../src/services/alias-corrections.js';
 
+const TEST_COMPANY = 'C';
+
 interface AliasRow {
   id: number;
+  company_code: string;
   bank_code: string;
   payee_pattern: string;
   match_type: string;
@@ -98,6 +101,7 @@ function makeAppDb(state: MockState): any {
           const id = state.nextAliasId++;
           state.aliases.push({
             id,
+            company_code: String(row.company_code ?? ''),
             bank_code: String(row.bank_code ?? ''),
             payee_pattern: String(row.payee_pattern ?? ''),
             match_type: String(row.match_type ?? ''),
@@ -175,7 +179,7 @@ function emptyState(): MockState {
 describe('recordCorrection', () => {
   it('writes audit row + alias upsert + negative example for customer correction', async () => {
     const state = emptyState();
-    const result = await recordCorrection(makeAppDb(state), {
+    const result = await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'Acme Direct Debit',
       wrong_account: 'WRONG_CUST',
       correct_account: 'CORRECT_CUST',
@@ -196,7 +200,7 @@ describe('recordCorrection', () => {
 
   it('uses payment direction for supplier correction', async () => {
     const state = emptyState();
-    await recordCorrection(makeAppDb(state), {
+    await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'WidgetCo Ltd',
       wrong_account: 'WRONG_SUPP',
       correct_account: 'CORRECT_SUPP',
@@ -210,6 +214,7 @@ describe('recordCorrection', () => {
     const state = emptyState();
     state.aliases.push({
       id: 99,
+      company_code: TEST_COMPANY,
       bank_code: '*',
       payee_pattern: 'Acme',
       match_type: 'customer',
@@ -220,7 +225,7 @@ describe('recordCorrection', () => {
       updated_at: '2026-04-10',
     });
     state.nextAliasId = 100;
-    await recordCorrection(makeAppDb(state), {
+    await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'Acme',
       wrong_account: 'OLD',
       correct_account: 'NEW',
@@ -233,7 +238,7 @@ describe('recordCorrection', () => {
 
   it('case-insensitive ledger_type', async () => {
     const state = emptyState();
-    const result = await recordCorrection(makeAppDb(state), {
+    const result = await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'X',
       wrong_account: 'W',
       correct_account: 'R',
@@ -244,7 +249,7 @@ describe('recordCorrection', () => {
   });
 
   it('rejects bad ledger_type', async () => {
-    const result = await recordCorrection(makeAppDb(emptyState()), {
+    const result = await recordCorrection(makeAppDb(emptyState()), TEST_COMPANY, {
       bank_name: 'X',
       wrong_account: 'W',
       correct_account: 'R',
@@ -255,7 +260,7 @@ describe('recordCorrection', () => {
   });
 
   it('rejects missing fields', async () => {
-    const result = await recordCorrection(makeAppDb(emptyState()), {
+    const result = await recordCorrection(makeAppDb(emptyState()), TEST_COMPANY, {
       bank_name: '',
       wrong_account: 'W',
       correct_account: 'R',
@@ -267,13 +272,13 @@ describe('recordCorrection', () => {
 
   it('does NOT duplicate negative_aliases on same (bank_name, wrong_account)', async () => {
     const state = emptyState();
-    await recordCorrection(makeAppDb(state), {
+    await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'Acme',
       wrong_account: 'WRONG',
       correct_account: 'A',
       ledger_type: 'C',
     });
-    await recordCorrection(makeAppDb(state), {
+    await recordCorrection(makeAppDb(state), TEST_COMPANY, {
       bank_name: 'Acme',
       wrong_account: 'WRONG',
       correct_account: 'B',

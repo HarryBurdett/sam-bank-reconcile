@@ -1124,6 +1124,7 @@ export async function scanAllBanksFaithful(
   if (appDb) {
     try {
       const drafts = (await appDb('bank_import_drafts')
+        .where(companyScope(companyCode))
         .select(
           'bank_code',
           'source',

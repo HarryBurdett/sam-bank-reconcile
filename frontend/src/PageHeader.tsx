@@ -3,18 +3,25 @@ import { RefreshCw } from 'lucide-react';
 
 /**
  * Single source of truth for the version label rendered next to
- * every page header (e.g. "Bank Statements - Live Version 1.2").
+ * every page header (e.g. "Bank Statements - Live Version 1.3").
  * Bump on each release.
  *
- * 1.2 — cross-company settings isolation (migration 018 +
+ * 1.3 — Phase B1 of per-company isolation: migration 019 +
+ *       companyCode plumbed through bank_import_drafts,
+ *       match_config, and bank_import_aliases queries. These three
+ *       tables sit in the hot path of every reconciliation and a
+ *       leak there could mark statement matches against the wrong
+ *       Opera company.
+ *
+ * 1.2 — Phase A of per-company isolation: migration 018 +
  *       companyScope fail-loud helper + companyCode plumbed through
  *       getRecurringEntriesMode / setRecurringEntriesMode /
  *       getFolderSettings / saveFolderSettings /
  *       createFolderBackedFileStorage / createFolderBackedPdfContentReader /
- *       scanAllBanksFaithful / checkRecurringEntries).
+ *       scanAllBanksFaithful / checkRecurringEntries.
  *       Mirrors sam-gocardless 1.2.0.
  */
-export const LIVE_VERSION = '1.2';
+export const LIVE_VERSION = '1.3';
 
 interface PageHeaderProps {
   icon: React.ComponentType<{ className?: string }>;

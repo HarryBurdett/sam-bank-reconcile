@@ -343,6 +343,7 @@ export async function previewBankImportFromPdf(
   input: PreviewFromPdfInput,
   extractor: PdfExtractor | null = null,
   appDb: Knex | null = null,
+  companyCode: string,
 ): Promise<PreviewResponse> {
   if (!input.bankCode) {
     return { success: false, error: 'bank_code is required' };
@@ -560,7 +561,7 @@ export async function previewBankImportFromPdf(
       loadCustomerCandidates(operaDb),
       loadSupplierCandidates(operaDb),
     ]);
-    matchCtx = await buildMatchContext(operaDb, bank.code, {
+    matchCtx = await buildMatchContext(operaDb, bank.code, companyCode, {
       customers,
       suppliers,
     });

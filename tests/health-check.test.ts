@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { runHealthCheck } from '../src/services/health-check.js';
 
+const TEST_COMPANY = 'C';
+
 function makeMockOpera(canned: {
   banks?: string[];
   customers?: string[];
@@ -31,7 +33,11 @@ function makeMockAppDb(canned: {
 }): any {
   const db: any = (table: string) => {
     if (table === 'bank_import_aliases') {
-      return {
+      // Service now does `.where(companyScope(companyCode)).select(...)`;
+      // the mock ignores the scope filter (canned data is pre-filtered
+      // to the test's company) but must honour the chain shape.
+      const aliasBuilder: any = {
+        where: () => aliasBuilder,
         select: () => {
           if (canned.errorOnAliases) {
             return Promise.reject(new Error('Invalid object name'));
@@ -39,6 +45,7 @@ function makeMockAppDb(canned: {
           return Promise.resolve(canned.aliases ?? []);
         },
       };
+      return aliasBuilder;
     }
     if (table === 'bank_import_patterns') {
       return {
@@ -79,7 +86,7 @@ describe('bank-reconcile runHealthCheck', () => {
       ],
     });
 
-    const result = await runHealthCheck({ operaDb: opera, appDb });
+    const result = await runHealthCheck({ operaDb: opera, appDb, companyCode: TEST_COMPANY });
 
     expect(result.app).toBe('bank_reconcile');
     expect(result.healthy).toBe(true);
@@ -102,7 +109,7 @@ describe('bank-reconcile runHealthCheck', () => {
       ],
     });
 
-    const result = await runHealthCheck({ operaDb: opera, appDb });
+    const result = await runHealthCheck({ operaDb: opera, appDb, companyCode: TEST_COMPANY });
     const custCheck = result.checks.find((c) => c.name === 'Alias customer codes');
     expect(custCheck?.passed).toBe(false);
     expect(custCheck?.severity).toBe('warning');
@@ -112,7 +119,7 @@ describe('bank-reconcile runHealthCheck', () => {
   it('reports error when Opera connection returns nothing', async () => {
     const opera = makeMockOpera({});
     const appDb = makeMockAppDb({});
-    const result = await runHealthCheck({ operaDb: opera, appDb });
+    const result = await runHealthCheck({ operaDb: opera, appDb, companyCode: TEST_COMPANY });
 
     const conn = result.checks.find((c) => c.name === 'Opera connection');
     expect(conn?.passed).toBe(false);
@@ -122,7 +129,7 @@ describe('bank-reconcile runHealthCheck', () => {
 
   it('skips alias checks when no app DB available', async () => {
     const opera = makeMockOpera({ banks: ['BC010'] });
-    const result = await runHealthCheck({ operaDb: opera, appDb: null });
+    const result = await runHealthCheck({ operaDb: opera, appDb: null, companyCode: TEST_COMPANY });
 
     const skipped = result.checks.find((c) => c.name === 'Bank aliases');
     expect(skipped?.severity).toBe('info');

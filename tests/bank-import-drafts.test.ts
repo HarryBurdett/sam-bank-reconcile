@@ -6,8 +6,11 @@ import {
   getDraftStatementKeys,
 } from '../src/services/bank-import-drafts.js';
 
+const TEST_COMPANY = 'C';
+
 interface Row {
   id: number;
+  company_code: string;
   bank_code: string;
   source: string;
   email_id: string;
@@ -76,6 +79,7 @@ function makeAppDb(state: MockState): any {
           const id = state.nextId++;
           state.rows.push({
             id,
+            company_code: data.company_code ?? '',
             bank_code: data.bank_code ?? '',
             source: data.source ?? '',
             email_id: data.email_id ?? '',
@@ -121,7 +125,7 @@ describe('saveImportDraft', () => {
   it('inserts a new draft when none exists', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await saveImportDraft(db, {
+    const result = await saveImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC010',
       source: 'email',
       filename: 'statement_april.pdf',
@@ -146,7 +150,7 @@ describe('saveImportDraft', () => {
   it('updates existing draft for same key (upsert)', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    await saveImportDraft(db, {
+    await saveImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC010',
       source: 'email',
       filename: 'a.pdf',
@@ -156,7 +160,7 @@ describe('saveImportDraft', () => {
       attachmentId: 'A1',
       pdfHash: 'h1',
     });
-    await saveImportDraft(db, {
+    await saveImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC010',
       source: 'email',
       filename: 'a.pdf',
@@ -173,7 +177,7 @@ describe('saveImportDraft', () => {
 
   it('rejects missing bank_code/source/filename', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const result = await saveImportDraft(db, {
+    const result = await saveImportDraft(db, TEST_COMPANY, {
       bankCode: '',
       source: 'email',
       filename: 'x',
@@ -187,7 +191,7 @@ describe('saveImportDraft', () => {
   it('handles already-stringified preview_data', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    await saveImportDraft(db, {
+    await saveImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC',
       source: 'file',
       filename: 'f.csv',
@@ -201,7 +205,7 @@ describe('saveImportDraft', () => {
 describe('loadImportDraft', () => {
   it('returns has_draft=false when no row matches', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const result = await loadImportDraft(db, {
+    const result = await loadImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC010',
       source: 'email',
     });
@@ -214,6 +218,7 @@ describe('loadImportDraft', () => {
       rows: [
         {
           id: 7,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           source: 'email',
           email_id: '99',
@@ -229,7 +234,7 @@ describe('loadImportDraft', () => {
       nextId: 8,
     };
     const db = makeAppDb(state);
-    const result = await loadImportDraft(db, {
+    const result = await loadImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC010',
       source: 'email',
       emailId: 99,
@@ -242,7 +247,7 @@ describe('loadImportDraft', () => {
 
   it('rejects missing bank_code/source', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const result = await loadImportDraft(db, {
+    const result = await loadImportDraft(db, TEST_COMPANY, {
       bankCode: '',
       source: 'email',
     });
@@ -254,6 +259,7 @@ describe('loadImportDraft', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC',
           source: 'file',
           email_id: '',
@@ -269,7 +275,7 @@ describe('loadImportDraft', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    const result = await loadImportDraft(db, {
+    const result = await loadImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC',
       source: 'file',
     });
@@ -283,6 +289,7 @@ describe('deleteImportDraft', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC',
           source: 'email',
           email_id: '5',
@@ -298,7 +305,7 @@ describe('deleteImportDraft', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    const result = await deleteImportDraft(db, {
+    const result = await deleteImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC',
       source: 'email',
       emailId: 5,
@@ -313,7 +320,7 @@ describe('deleteImportDraft', () => {
 
   it('returns deleted=false when no row matches', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const result = await deleteImportDraft(db, {
+    const result = await deleteImportDraft(db, TEST_COMPANY, {
       bankCode: 'BC',
       source: 'email',
     });
@@ -328,6 +335,7 @@ describe('getDraftStatementKeys', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC',
           source: 'email',
           email_id: '1',
@@ -341,6 +349,7 @@ describe('getDraftStatementKeys', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC',
           source: 'file',
           email_id: '',
@@ -354,6 +363,7 @@ describe('getDraftStatementKeys', () => {
         },
         {
           id: 3,
+          company_code: TEST_COMPANY,
           bank_code: 'OTHER',
           source: 'email',
           email_id: '5',
@@ -369,7 +379,7 @@ describe('getDraftStatementKeys', () => {
       nextId: 4,
     };
     const db = makeAppDb(state);
-    const keys = await getDraftStatementKeys(db, 'BC');
+    const keys = await getDraftStatementKeys(db, TEST_COMPANY, 'BC');
     expect(keys).toHaveLength(2);
     expect(keys[0]?.filename).toBe('new.csv');
     expect(keys[1]?.filename).toBe('old.pdf');
@@ -377,7 +387,7 @@ describe('getDraftStatementKeys', () => {
 
   it('returns empty array on empty bank code', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const keys = await getDraftStatementKeys(db, '');
+    const keys = await getDraftStatementKeys(db, TEST_COMPANY, '');
     expect(keys).toEqual([]);
   });
 });

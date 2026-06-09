@@ -26,6 +26,7 @@
  * SQL.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export type LedgerType = 'C' | 'S';
 
@@ -45,6 +46,7 @@ export interface AliasLookupResult {
  */
 export async function lookupAlias(
   appDb: Knex | null,
+  companyCode: string,
   payeeName: string,
   ledger: LedgerType,
   bankCode: string,
@@ -54,11 +56,13 @@ export async function lookupAlias(
   if (!name) return null;
   const matchType = ledgerToMatchType(ledger);
   const code = (bankCode ?? '').trim();
+  const scope = companyScope(companyCode);
   try {
     // Bank-scoped first.
     if (code) {
       const scoped = (await appDb('bank_import_aliases')
         .select('opera_account', 'confidence', 'match_type')
+        .where(scope)
         .whereRaw('UPPER(payee_pattern) = ?', [name.toUpperCase()])
         .andWhere('match_type', matchType)
         .andWhere('bank_code', code)
@@ -76,6 +80,7 @@ export async function lookupAlias(
     // Global (empty bank_code) fallback.
     const global = (await appDb('bank_import_aliases')
       .select('opera_account', 'confidence', 'match_type')
+      .where(scope)
       .whereRaw('UPPER(payee_pattern) = ?', [name.toUpperCase()])
       .andWhere('match_type', matchType)
       .andWhere(function emptyBankCode(this: Knex.QueryBuilder) {
@@ -103,6 +108,7 @@ export async function lookupAlias(
  */
 export async function saveAlias(
   appDb: Knex | null,
+  companyCode: string,
   opts: {
     payeeName: string;
     ledger: LedgerType;
@@ -121,13 +127,15 @@ export async function saveAlias(
   const bankCode = (opts.bankCode ?? '').trim();
   const confidence = Math.min(1, Math.max(0, Number(opts.matchScore || 0)));
   const direction = opts.direction ?? 'either';
+  const companyScopeWhere = companyScope(companyCode);
 
   try {
     const existing = (await appDb('bank_import_aliases')
       .select('id', 'match_count')
+      .where(companyScopeWhere)
       .whereRaw('UPPER(payee_pattern) = ?', [name.toUpperCase()])
       .andWhere('match_type', matchType)
-      .andWhere(function scope(this: Knex.QueryBuilder) {
+      .andWhere(function bankScope(this: Knex.QueryBuilder) {
         if (bankCode) {
           this.where('bank_code', bankCode);
         } else {
@@ -140,7 +148,7 @@ export async function saveAlias(
     if (existing?.id) {
       const updated = Number(
         await appDb('bank_import_aliases')
-          .where({ id: existing.id })
+          .where({ ...companyScopeWhere, id: existing.id })
           .update({
             opera_account: account,
             confidence,
@@ -152,6 +160,7 @@ export async function saveAlias(
       return updated > 0;
     }
     await appDb('bank_import_aliases').insert({
+      ...companyScopeWhere,
       bank_code: bankCode,
       payee_pattern: name,
       match_type: matchType,

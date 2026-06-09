@@ -20,6 +20,7 @@
  * doesn't leave a half-recorded correction.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export type LedgerType = 'S' | 'C';
 
@@ -50,6 +51,7 @@ const MATCH_TYPE_FOR_LEDGER: Record<LedgerType, string> = {
 
 export async function recordCorrection(
   appDb: Knex,
+  companyCode: string,
   input: RecordCorrectionInput,
 ): Promise<RecordCorrectionResponse> {
   const bankName = (input.bank_name ?? '').trim();
@@ -71,6 +73,7 @@ export async function recordCorrection(
     };
   }
   const ledger = ledgerRaw as LedgerType;
+  const scope = companyScope(companyCode);
 
   try {
     await appDb.transaction(async (trx) => {
@@ -90,6 +93,7 @@ export async function recordCorrection(
       //    the Python code) so use '*' as a wildcard bank_code.
       const existing = (await trx('bank_import_aliases')
         .where({
+          ...scope,
           bank_code: '*',
           payee_pattern: bankName,
           match_type: MATCH_TYPE_FOR_LEDGER[ledger],
@@ -98,7 +102,7 @@ export async function recordCorrection(
 
       if (existing) {
         await trx('bank_import_aliases')
-          .where({ id: existing.id })
+          .where({ ...scope, id: existing.id })
           .update({
             opera_account: correctAccount,
             confidence: 1.0,
@@ -107,6 +111,7 @@ export async function recordCorrection(
           });
       } else {
         await trx('bank_import_aliases').insert({
+          ...scope,
           bank_code: '*',
           payee_pattern: bankName,
           match_type: MATCH_TYPE_FOR_LEDGER[ledger],

@@ -89,6 +89,7 @@ export interface MatchTransactionResult {
  */
 export interface MatchContext {
   bankCode: string;
+  companyCode: string;
   matcher: BankMatcher;
   otherBanks: OtherBank[];
   /**
@@ -101,6 +102,7 @@ export interface MatchContext {
 export async function buildMatchContext(
   operaDb: Knex,
   bankCode: string,
+  companyCode: string,
   opts: {
     customers: MatchCandidate[];
     suppliers: MatchCandidate[];
@@ -114,6 +116,7 @@ export async function buildMatchContext(
   const otherBanks = await loadOtherBankAccounts(operaDb, bankCode);
   return {
     bankCode,
+    companyCode,
     matcher,
     otherBanks,
     learnThreshold: opts.learnThreshold ?? 0.85,
@@ -204,6 +207,7 @@ export async function matchTransaction(
     try {
       let alias = await lookupAlias(
         appDb,
+        ctx.companyCode,
         input.name,
         expectedLedger,
         ctx.bankCode,
@@ -211,6 +215,7 @@ export async function matchTransaction(
       if (!alias && cleanName && cleanName !== input.name) {
         alias = await lookupAlias(
           appDb,
+          ctx.companyCode,
           cleanName,
           expectedLedger,
           ctx.bankCode,
@@ -342,7 +347,7 @@ export async function matchTransaction(
 
       // Save alias if score is high enough — bank-scoped.
       if (appDb && custResult.score >= ctx.learnThreshold && custResult.account) {
-        await saveAlias(appDb, {
+        await saveAlias(appDb, ctx.companyCode, {
           payeeName: input.name,
           ledger: 'C',
           operaAccount: custResult.account,
@@ -388,7 +393,7 @@ export async function matchTransaction(
       result.match_source = 'fuzzy';
 
       if (appDb && suppResult.score >= ctx.learnThreshold && suppResult.account) {
-        await saveAlias(appDb, {
+        await saveAlias(appDb, ctx.companyCode, {
           payeeName: input.name,
           ledger: 'S',
           operaAccount: suppResult.account,

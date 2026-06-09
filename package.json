@@ -1,6 +1,6 @@
 {
   "name": "sam-bank-reconcile",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Bank Reconciliation \u2014 SAM plugin (foundation, endpoints in progress).",
   "type": "module",
   "main": "dist/index.js",

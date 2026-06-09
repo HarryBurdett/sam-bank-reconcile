@@ -4,6 +4,8 @@ import {
   updateMatchConfig,
 } from '../src/services/match-config.js';
 
+const TEST_COMPANY = 'C';
+
 interface MockState {
   rows: Array<Record<string, unknown> & { id: number }>;
   nextId: number;
@@ -19,13 +21,33 @@ function makeAppDb(state: MockState): any {
       // Force a thrown error in the first .first() call
       throw new Error('table missing');
     }
+    let conds: Record<string, unknown> = {};
     const builder: any = {
+      where: (cond: Record<string, unknown>) => {
+        Object.assign(conds, cond);
+        return builder;
+      },
       orderBy: () => builder,
-      first: () => Promise.resolve(state.rows.slice(-1)[0]),
+      first: () => {
+        const matches = state.rows.filter((r) =>
+          Object.entries(conds).every(([k, v]) => (r as any)[k] === v),
+        );
+        return Promise.resolve(matches.slice(-1)[0]);
+      },
       insert: (row: Record<string, unknown>) => {
         const id = state.nextId++;
         state.rows.push({ id, ...row });
         return Promise.resolve([id]);
+      },
+      update: (data: Record<string, unknown>) => {
+        let count = 0;
+        for (const r of state.rows) {
+          if (Object.entries(conds).every(([k, v]) => (r as any)[k] === v)) {
+            Object.assign(r, data);
+            count++;
+          }
+        }
+        return Promise.resolve(count);
       },
     };
     return builder;
@@ -37,7 +59,7 @@ function makeAppDb(state: MockState): any {
 describe('getMatchConfig', () => {
   it('returns built-in defaults when no row exists', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const result = await getMatchConfig(db);
+    const result = await getMatchConfig(db, TEST_COMPANY);
 
     expect(result.success).toBe(true);
     expect(result.config.min_match_score).toBe(0.6);
@@ -53,6 +75,7 @@ describe('getMatchConfig', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           min_match_score: 0.5,
           learn_threshold: 0.7,
           ambiguity_threshold: 0.1,
@@ -62,6 +85,7 @@ describe('getMatchConfig', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           min_match_score: 0.75,
           learn_threshold: 0.85,
           ambiguity_threshold: 0.2,
@@ -73,7 +97,7 @@ describe('getMatchConfig', () => {
       nextId: 3,
     };
     const db = makeAppDb(state);
-    const result = await getMatchConfig(db);
+    const result = await getMatchConfig(db, TEST_COMPANY);
 
     expect(result.success).toBe(true);
     expect(result.config.min_match_score).toBe(0.75);
@@ -86,7 +110,7 @@ describe('getMatchConfig', () => {
 
   it('falls back to defaults on DB error (success still true)', async () => {
     const db = makeAppDb({ rows: [], nextId: 1, raiseOnFirst: true });
-    const result = await getMatchConfig(db);
+    const result = await getMatchConfig(db, TEST_COMPANY);
 
     // Python returns success=true even on error so the frontend has values
     expect(result.success).toBe(true);
@@ -99,7 +123,7 @@ describe('updateMatchConfig', () => {
   it('inserts a new row with the given thresholds', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await updateMatchConfig(db, {
+    const result = await updateMatchConfig(db, TEST_COMPANY, {
       min_match_score: 0.55,
       learn_threshold: 0.9,
       ambiguity_threshold: 0.05,
@@ -124,7 +148,7 @@ describe('updateMatchConfig', () => {
   it('clamps thresholds to [0, 1]', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    await updateMatchConfig(db, {
+    await updateMatchConfig(db, TEST_COMPANY, {
       min_match_score: 1.5,
       learn_threshold: -0.2,
       ambiguity_threshold: 999,
@@ -143,7 +167,7 @@ describe('updateMatchConfig', () => {
       throw new Error('insert failed');
     };
     db.fn = { now: () => 'NOW()' };
-    const result = await updateMatchConfig(db, {
+    const result = await updateMatchConfig(db, TEST_COMPANY, {
       min_match_score: 0.6,
       learn_threshold: 0.8,
       ambiguity_threshold: 0.15,

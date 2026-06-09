@@ -344,8 +344,14 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/health-check', async (req, res) => {
     const operaDb = getOperaDb(req, res);
     if (!operaDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
-      const result = await runHealthCheck({ operaDb, appDb: ctx.db.app });
+      const result = await runHealthCheck({
+        operaDb,
+        appDb: ctx.db.app,
+        companyCode: company,
+      });
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Health check failed', err);
@@ -1029,8 +1035,10 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/config', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
-      const result = await getMatchConfig(appDb);
+      const result = await getMatchConfig(appDb, company);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Match config fetch failed', err);
@@ -1048,9 +1056,11 @@ export function createRouter(ctx: AppContext): Router {
   router.put('/api/bank-import/config', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const q = req.query;
-      const result = await updateMatchConfig(appDb, {
+      const result = await updateMatchConfig(appDb, company, {
         min_match_score:
           q.min_match_score !== undefined ? Number(q.min_match_score) : 0.6,
         learn_threshold:
@@ -1229,9 +1239,11 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/bank-import/draft', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const result = await saveImportDraft(appDb, {
+      const result = await saveImportDraft(appDb, company, {
         bankCode: String(body.bank_code ?? ''),
         source: String(body.source ?? ''),
         filename: String(body.filename ?? ''),
@@ -1260,6 +1272,8 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/draft', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const q = req.query;
       const bankCode = String(q.bank_code ?? '').trim();
@@ -1271,7 +1285,7 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
-      const result = await loadImportDraft(appDb, {
+      const result = await loadImportDraft(appDb, company, {
         bankCode,
         source,
         emailId:
@@ -1303,6 +1317,8 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const q = req.query;
         const bankCode = String(q.bank_code ?? '').trim();
@@ -1314,7 +1330,7 @@ export function createRouter(ctx: AppContext): Router {
           });
           return;
         }
-        const result = await deleteImportDraft(appDb, {
+        const result = await deleteImportDraft(appDb, company, {
           bankCode,
           source,
           emailId:
@@ -1724,9 +1740,11 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const q = req.query;
-        const result = await recordCorrection(appDb, {
+        const result = await recordCorrection(appDb, company, {
           bank_name: String(q.bank_name ?? ''),
           wrong_account: String(q.wrong_account ?? ''),
           correct_account: String(q.correct_account ?? ''),
@@ -3125,6 +3143,8 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const operaDb = getOperaDb(req, res);
       if (!operaDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       const llm = (ctx.llm as LlmService | undefined) ?? null;
       const extractorAdapter = (ctx as unknown as {
         bankPdfExtractor?: PdfExtractor;
@@ -3149,6 +3169,7 @@ export function createRouter(ctx: AppContext): Router {
           },
           extractorAdapter,
           getAppDb(req, res) ?? null,
+          company,
         );
         res.json(result);
       } catch (err: any) {
@@ -3173,6 +3194,8 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const operaDb = getOperaDb(req, res);
       if (!operaDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       const appDb = getAppDb(req, res) ?? null;
       const llm = (ctx.llm as LlmService | undefined) ?? null;
       const extractor =
@@ -3214,6 +3237,7 @@ export function createRouter(ctx: AppContext): Router {
           },
           extractor,
           appDb,
+          company,
         );
         res.json(result);
       } catch (err: any) {
@@ -3367,6 +3391,8 @@ export function createRouter(ctx: AppContext): Router {
   const handleProcessStatement = async (req: Request, res: Response) => {
     const operaDb = getOperaDb(req, res);
     if (!operaDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const llm = (ctx.llm as LlmService | undefined) ?? null;
     if (!llm) {
       res.status(503).json({
@@ -3385,6 +3411,7 @@ export function createRouter(ctx: AppContext): Router {
           bankCode: String(req.query.bank_code ?? body.bank_code ?? ''),
         },
         ctx.db.app,
+        company,
       );
       res.json(result);
     } catch (err: any) {

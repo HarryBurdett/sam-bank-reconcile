@@ -9,6 +9,7 @@
  * references.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 const APP_NAME = 'bank_reconcile';
 const MAX_ORPHANS_RETURNED = 50;
@@ -64,6 +65,7 @@ async function fetchValidCodes(
 
 async function checkBankAliases(
   appDb: Knex,
+  companyCode: string,
   validBankCodes: Set<string>,
   validCustomerCodes: Set<string>,
   validSupplierCodes: Set<string>,
@@ -77,12 +79,14 @@ async function checkBankAliases(
     bank_code: string | null;
   }>;
   try {
-    rows = (await appDb('bank_import_aliases').select(
-      'bank_name',
-      'account_code',
-      'ledger_type',
-      'bank_code',
-    )) as unknown as typeof rows;
+    rows = (await appDb('bank_import_aliases')
+      .where(companyScope(companyCode))
+      .select(
+        'bank_name',
+        'account_code',
+        'ledger_type',
+        'bank_code',
+      )) as unknown as typeof rows;
   } catch (err: any) {
     items.push({
       name: 'Bank aliases',
@@ -338,6 +342,7 @@ function checkOperaCodesPresent(
 export async function runHealthCheck(opts: {
   operaDb: Knex;
   appDb: Knex | null;
+  companyCode: string;
 }): Promise<HealthCheckResult> {
   const checks: HealthCheckItem[] = [];
 
@@ -350,6 +355,7 @@ export async function runHealthCheck(opts: {
     checks.push(
       ...(await checkBankAliases(
         opts.appDb,
+        opts.companyCode,
         validBankCodes,
         validCustomerCodes,
         validSupplierCodes,
