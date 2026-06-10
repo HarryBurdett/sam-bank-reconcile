@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { markEntriesReconciled } from '../src/services/mark-reconciled.js';
 
+const TEST_COMPANY = 'C';
+
 interface AppLockRow {
   id: number;
+  company_code: string;
   bank_code: string;
   locked_at: Date;
   locked_by: string;
@@ -33,6 +36,7 @@ function makeAppDb(state: AppMockState): any {
         }
         return builder;
       },
+      andWhere: (cond: any, op?: any, val?: any) => builder.where(cond, op, val),
       first: () => {
         const found = state.lockRows.find((r) =>
           Object.entries(conds).every(([k, v]) => (r as any)[k] === v),
@@ -55,11 +59,19 @@ function makeAppDb(state: AppMockState): any {
         return Promise.resolve(before - state.lockRows.length);
       },
       insert: (row: any) => {
-        if (state.lockRows.some((r) => r.bank_code === row.bank_code)) {
+        // Composite UNIQUE (company_code, bank_code) — only conflict if BOTH match.
+        if (
+          state.lockRows.some(
+            (r) =>
+              r.bank_code === row.bank_code &&
+              r.company_code === String(row.company_code ?? ''),
+          )
+        ) {
           return Promise.reject(new Error('UNIQUE constraint'));
         }
         state.lockRows.push({
           id: state.nextId++,
+          company_code: String(row.company_code ?? ''),
           bank_code: row.bank_code,
           locked_at: new Date(),
           locked_by: row.locked_by ?? 'unknown',
@@ -157,6 +169,7 @@ describe('markEntriesReconciled - validation', () => {
   it('rejects bad bank_code', async () => {
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({
         nk_lstrecl: 0,
         nk_recbal: 0,
@@ -179,6 +192,7 @@ describe('markEntriesReconciled - validation', () => {
   it('rejects empty entries', async () => {
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({
         nk_lstrecl: 0,
         nk_recbal: 0,
@@ -209,6 +223,7 @@ describe('markEntriesReconciled - validation', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -236,6 +251,7 @@ describe('markEntriesReconciled - validation', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -264,6 +280,7 @@ describe('markEntriesReconciled - happy path full', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -311,6 +328,7 @@ describe('markEntriesReconciled - happy path full', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -342,6 +360,7 @@ describe('markEntriesReconciled - happy path full', () => {
     };
     await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -385,6 +404,7 @@ describe('markEntriesReconciled - partial mode', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -412,7 +432,7 @@ describe('markEntriesReconciled - locking', () => {
     const appState: AppMockState = {
       lockRows: [
         {
-          id: 1, bank_code: 'BC010', locked_at: new Date(),
+          id: 1, company_code: TEST_COMPANY, bank_code: 'BC010', locked_at: new Date(),
           locked_by: 'other', endpoint: 'other', description: '',
         },
       ],
@@ -420,6 +440,7 @@ describe('markEntriesReconciled - locking', () => {
     };
     const result = await markEntriesReconciled(
       makeAppDb(appState),
+      TEST_COMPANY,
       makeOperaDb({
         nk_lstrecl: 0, nk_recbal: 0, nk_curbal: 0, nk_lststno: 0,
         aentries: new Map(), capturedSql: [], capturedParams: [],

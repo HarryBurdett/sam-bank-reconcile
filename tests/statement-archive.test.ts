@@ -7,8 +7,11 @@ import {
   manageStatements,
 } from '../src/services/statement-archive.js';
 
+const TEST_COMPANY = 'C';
+
 interface Row {
   id: number;
+  company_code: string;
   bank_code: string;
   source_ref: string;
   source: string;
@@ -28,6 +31,7 @@ function makeAppDb(state: State): any {
     let idFilter: number | null = null;
     let statusFilter: string[] | null = null;
     let bankFilter: string | null = null;
+    let companyFilter: string | null = null;
     let limitN: number | null = null;
     let notArchived = false;
 
@@ -37,6 +41,7 @@ function makeAppDb(state: State): any {
           if (cond.id) idFilter = cond.id;
           if (cond.import_status) statusFilter = [cond.import_status];
           if (cond.bank_code) bankFilter = cond.bank_code;
+          if (cond.company_code) companyFilter = cond.company_code;
         }
         if (typeof cond === 'string' && cond === 'bank_code') {
           // legacy 2-arg form
@@ -58,13 +63,21 @@ function makeAppDb(state: State): any {
       },
       first: async () => {
         if (idFilter !== null) {
-          return state.rows.find((r) => r.id === idFilter);
+          return state.rows.find(
+            (r) =>
+              r.id === idFilter &&
+              (!companyFilter || r.company_code === companyFilter),
+          );
         }
         return undefined;
       },
       update: async (payload: any) => {
         if (idFilter === null) return 0;
-        const idx = state.rows.findIndex((r) => r.id === idFilter);
+        const idx = state.rows.findIndex(
+          (r) =>
+            r.id === idFilter &&
+            (!companyFilter || r.company_code === companyFilter),
+        );
         if (idx < 0) return 0;
         if (statusFilter && !statusFilter.includes(state.rows[idx]!.import_status)) {
           return 0;
@@ -77,6 +90,7 @@ function makeAppDb(state: State): any {
         const before = state.rows.length;
         state.rows = state.rows.filter((r) => {
           if (r.id !== idFilter) return true;
+          if (companyFilter && r.company_code !== companyFilter) return true;
           if (statusFilter && !statusFilter.includes(r.import_status)) return true;
           return false;
         });
@@ -84,6 +98,9 @@ function makeAppDb(state: State): any {
       },
       then: async (resolve: any) => {
         let rows = state.rows;
+        if (companyFilter) {
+          rows = rows.filter((r) => r.company_code === companyFilter);
+        }
         if (statusFilter) {
           rows = rows.filter((r) => statusFilter!.includes(r.import_status));
         }
@@ -106,6 +123,7 @@ function makeAppDb(state: State): any {
 
 const baseRow = (overrides: Partial<Row> = {}): Row => ({
   id: 1,
+  company_code: TEST_COMPANY,
   bank_code: 'BC010',
   source_ref: '/tmp/statement.pdf',
   source: 'file',
@@ -119,13 +137,13 @@ const baseRow = (overrides: Partial<Row> = {}): Row => ({
 
 describe('archiveStatement', () => {
   it('rejects invalid id', async () => {
-    const r = await archiveStatement(makeAppDb({ rows: [] }), 0, 'admin');
+    const r = await archiveStatement(makeAppDb({ rows: [] }), TEST_COMPANY, 0, 'admin');
     expect(r.success).toBe(false);
   });
 
   it('flips status to archived', async () => {
     const state: State = { rows: [baseRow()] };
-    const r = await archiveStatement(makeAppDb(state), 1, 'admin');
+    const r = await archiveStatement(makeAppDb(state), TEST_COMPANY,1, 'admin');
     expect(r.success).toBe(true);
     expect(state.rows[0]?.import_status).toBe('archived');
   });
@@ -139,7 +157,7 @@ describe('listArchivedStatements', () => {
         baseRow({ id: 2, import_status: 'imported' }),
       ],
     };
-    const r = await listArchivedStatements(makeAppDb(state));
+    const r = await listArchivedStatements(makeAppDb(state), TEST_COMPANY);
     expect(r.count).toBe(1);
     expect(r.statements[0]?.id).toBe(1);
   });
@@ -150,13 +168,13 @@ describe('restoreStatement', () => {
     const state: State = {
       rows: [baseRow({ id: 1, import_status: 'archived' })],
     };
-    const r = await restoreStatement(makeAppDb(state), 1);
+    const r = await restoreStatement(makeAppDb(state), TEST_COMPANY,1);
     expect(r.success).toBe(true);
     expect(state.rows[0]?.import_status).toBe('imported');
   });
   it('errors when not archived', async () => {
     const state: State = { rows: [baseRow({ id: 1, import_status: 'imported' })] };
-    const r = await restoreStatement(makeAppDb(state), 1);
+    const r = await restoreStatement(makeAppDb(state), TEST_COMPANY,1);
     expect(r.success).toBe(false);
   });
 });
@@ -166,7 +184,7 @@ describe('deleteArchivedStatement', () => {
     const state: State = {
       rows: [baseRow({ id: 1, import_status: 'archived' })],
     };
-    const r = await deleteArchivedStatement(makeAppDb(state), 1);
+    const r = await deleteArchivedStatement(makeAppDb(state), TEST_COMPANY,1);
     expect(r.success).toBe(true);
     expect(state.rows.length).toBe(0);
   });
@@ -180,7 +198,7 @@ describe('manageStatements', () => {
         baseRow({ id: 2, import_status: 'archived' }),
       ],
     };
-    const r = await manageStatements(makeAppDb(state), null, false);
+    const r = await manageStatements(makeAppDb(state), TEST_COMPANY, null,false);
     expect(r.count).toBe(1);
   });
   it('includes archived when flag true', async () => {
@@ -190,7 +208,7 @@ describe('manageStatements', () => {
         baseRow({ id: 2, import_status: 'archived' }),
       ],
     };
-    const r = await manageStatements(makeAppDb(state), null, true);
+    const r = await manageStatements(makeAppDb(state), TEST_COMPANY, null,true);
     expect(r.count).toBe(2);
   });
 });

@@ -16,6 +16,7 @@
  * couldn't be determined).
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface CycleRow {
   id: number;
@@ -26,10 +27,12 @@ export interface CycleRow {
 
 export async function findExistingCycleRow(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   periodStart: string | null | undefined,
 ): Promise<CycleRow | null> {
   if (!periodStart) return null;
+  const scope = companyScope(companyCode);
   // Normalise to YYYY-MM-DD (first 10 chars). SQLite stores DATE
   // flexibly — some rows have '2026-04-01', others have
   // '2026-04-01T00:00:00' depending on whether knex passed a Date
@@ -39,7 +42,7 @@ export async function findExistingCycleRow(
   const target = String(periodStart).slice(0, 10);
   const row = (await appDb('bank_statement_imports')
     .select('id', 'is_reconciled', 'period_end', 'closing_balance')
-    .where({ bank_code: bankCode })
+    .where({ ...scope, bank_code: bankCode })
     .andWhereRaw('SUBSTR(period_start, 1, 10) = ?', [target])
     .orderBy('id', 'desc')
     .first()) as

@@ -6,8 +6,11 @@ import {
   deleteIgnoredTransactionByRecordId,
 } from '../src/services/deferred-items.js';
 
+const TEST_COMPANY = 'C';
+
 interface DeferredRow {
   id: number;
+  company_code: string;
   bank_code: string;
   statement_date: string;
   amount: number;
@@ -25,6 +28,7 @@ interface State {
 function makeAppDb(state: State): any {
   function tableBuilder(table: string) {
     let bankFilter: string | null = null;
+    let companyFilter: string | null = null;
     let idFilter: number | null = null;
     let idsFilter: number[] | null = null;
 
@@ -33,6 +37,7 @@ function makeAppDb(state: State): any {
         if (typeof cond === 'object') {
           if (cond.bank_code) bankFilter = cond.bank_code;
           if (cond.id) idFilter = cond.id;
+          if (cond.company_code) companyFilter = cond.company_code;
         }
         return builder;
       },
@@ -47,6 +52,7 @@ function makeAppDb(state: State): any {
           if (table === 'deferred_transactions') {
             state.deferred.push({
               id,
+              company_code: String(payload.company_code ?? ''),
               bank_code: payload.bank_code,
               statement_date: payload.statement_date,
               amount: payload.amount,
@@ -63,6 +69,7 @@ function makeAppDb(state: State): any {
           const before = state.deferred.length;
           state.deferred = state.deferred.filter((d) => {
             if (d.bank_code !== bankFilter) return true;
+            if (companyFilter && d.company_code !== companyFilter) return true;
             if (idsFilter && !idsFilter.includes(d.id)) return true;
             return false;
           });
@@ -79,6 +86,8 @@ function makeAppDb(state: State): any {
         if (table === 'deferred_transactions') {
           let rows = state.deferred;
           if (bankFilter) rows = rows.filter((d) => d.bank_code === bankFilter);
+          if (companyFilter)
+            rows = rows.filter((d) => d.company_code === companyFilter);
           return resolve(rows);
         }
         return resolve([]);
@@ -94,7 +103,7 @@ function makeAppDb(state: State): any {
 describe('recordDeferredTransaction', () => {
   it('rejects empty bank_code', async () => {
     const state: State = { deferred: [], ignored: [], nextId: 1 };
-    const r = await recordDeferredTransaction(makeAppDb(state), {
+    const r = await recordDeferredTransaction(makeAppDb(state), TEST_COMPANY, {
       bankCode: '',
       statementDate: '2026-04-15',
       amount: 100,
@@ -105,7 +114,7 @@ describe('recordDeferredTransaction', () => {
   });
   it('inserts a row and returns id', async () => {
     const state: State = { deferred: [], ignored: [], nextId: 1 };
-    const r = await recordDeferredTransaction(makeAppDb(state), {
+    const r = await recordDeferredTransaction(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       statementDate: '2026-04-15',
       amount: 100,
@@ -123,6 +132,7 @@ describe('listDeferredItems', () => {
       deferred: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           statement_date: '2026-04-15',
           amount: 100,
@@ -132,6 +142,7 @@ describe('listDeferredItems', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC020',
           statement_date: '2026-04-15',
           amount: 50,
@@ -143,7 +154,7 @@ describe('listDeferredItems', () => {
       ignored: [],
       nextId: 3,
     };
-    const r = await listDeferredItems(makeAppDb(state), 'BC010');
+    const r = await listDeferredItems(makeAppDb(state), TEST_COMPANY, 'BC010');
     expect(r.items.length).toBe(1);
     expect(r.items[0]?.bank_code).toBe('BC010');
   });
@@ -155,6 +166,7 @@ describe('deleteDeferredItems', () => {
       deferred: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           statement_date: '2026-04-15',
           amount: 100,
@@ -164,6 +176,7 @@ describe('deleteDeferredItems', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           statement_date: '2026-04-15',
           amount: 50,
@@ -175,7 +188,7 @@ describe('deleteDeferredItems', () => {
       ignored: [],
       nextId: 3,
     };
-    const r = await deleteDeferredItems(makeAppDb(state), 'BC010', [1]);
+    const r = await deleteDeferredItems(makeAppDb(state), TEST_COMPANY, 'BC010', [1]);
     expect(r.success).toBe(true);
     expect(r.deleted).toBe(1);
     expect(state.deferred.length).toBe(1);

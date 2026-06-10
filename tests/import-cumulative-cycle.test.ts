@@ -9,8 +9,11 @@ import {
   type PdfExtractionResult,
 } from '../src/services/import-from-pdf.js';
 
+const TEST_COMPANY = 'C';
+
 const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   bank_code TEXT NOT NULL,
   statement_date DATE,
   period_start DATE,
@@ -37,6 +40,7 @@ const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
 )`;
 const TXNS_SCHEMA = `CREATE TABLE bank_statement_transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   import_id INTEGER NOT NULL,
   line_number INTEGER NOT NULL,
   post_date TEXT NOT NULL,
@@ -91,7 +95,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     const appDb = await makeAppDb();
     // Pre-existing reconciled row for the same cycle.
     await appDb('bank_statement_imports').insert({
-      bank_code: 'BC010',
+      company_code: TEST_COMPANY, bank_code: 'BC010',
       period_start: '2026-05-01',
       period_end: '2026-05-15',
       closing_balance: 90000,
@@ -123,7 +127,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
       appDb,
       {
         filePath: '/tmp/May 1-22.pdf',
-        bankCode: 'BC010',
+        bankCode: 'BC010', companyCode: TEST_COMPANY,
         filename: 'May 1-22.pdf',
       },
       extractor, executor, lock, overlap,
@@ -140,7 +144,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
   it('preserves reconciled rows across cycle-merge with newest-first extraction order', async () => {
     const appDb = await makeAppDb();
     const [firstId] = await appDb('bank_statement_imports').insert({
-      bank_code: 'BC010', period_start: '2026-05-01', period_end: '2026-05-08',
+      company_code: TEST_COMPANY, bank_code: 'BC010', period_start:'2026-05-01', period_end: '2026-05-08',
       opening_balance: 125912.72, closing_balance: 100000,
       is_reconciled: 0, filename: 'May 1-8.pdf', source: 'email',
       target_system: 'opera_se',
@@ -154,6 +158,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     // "reconciled" through Opera).
     for (let i = 1; i <= 12; i++) {
       await appDb('bank_statement_transactions').insert({
+        company_code: TEST_COMPANY,
         import_id: firstImportId,
         line_number: i,
         post_date: `2026-05-${String(i).padStart(2, '0')}`,
@@ -205,7 +210,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
 
     const result = await importBankStatementFromPdf(
       makeOperaDb(), appDb,
-      { filePath: '/tmp/May 1-22.pdf', bankCode: 'BC010', filename: 'May 1-22.pdf' },
+      { filePath: '/tmp/May 1-22.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY, filename: 'May 1-22.pdf' },
       extractor, executor, lock, overlap,
     );
     expect(result.success).toBe(true);
@@ -232,7 +237,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
   it('accumulates running totals on cycle-merge UPDATE', async () => {
     const appDb = await makeAppDb();
     await appDb('bank_statement_imports').insert({
-      bank_code: 'BC010', period_start: '2026-05-01', period_end: '2026-05-08',
+      company_code: TEST_COMPANY, bank_code: 'BC010', period_start: '2026-05-01', period_end: '2026-05-08',
       opening_balance: 125912.72, closing_balance: 100000,
       is_reconciled: 0, filename: 'May 1-8.pdf', source: 'email',
       target_system: 'opera_se',
@@ -268,7 +273,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
 
     const result = await importBankStatementFromPdf(
       makeOperaDb(), appDb,
-      { filePath: '/tmp/X.pdf', bankCode: 'BC010', filename: 'X.pdf' },
+      { filePath: '/tmp/X.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY, filename: 'X.pdf' },
       extractor, executor, lock, overlap,
     );
     expect(result.success).toBe(true);
@@ -294,7 +299,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     const appDb = await makeAppDb();
     // Existing cycle row: May 1-22 (longer pull already imported)
     await appDb('bank_statement_imports').insert({
-      bank_code: 'BC010',
+      company_code: TEST_COMPANY, bank_code: 'BC010',
       period_start: '2026-05-01',
       period_end: '2026-05-22',
       closing_balance: 75000,
@@ -330,7 +335,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     };
     const result = await importBankStatementFromPdf(
       makeOperaDb(), appDb,
-      { filePath: '/tmp/May 1-15.pdf', bankCode: 'BC010',
+      { filePath: '/tmp/May 1-15.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY,
         filename: 'May 1-15.pdf' },
       extractor, executor, lock, overlap,
     );
@@ -344,7 +349,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     const appDb = await makeAppDb();
     // Existing row for April 17 statement (reconciled).
     await appDb('bank_statement_imports').insert({
-      bank_code: 'BC010',
+      company_code: TEST_COMPANY, bank_code: 'BC010',
       period_start: '2026-04-13',
       period_end: '2026-04-17',
       closing_balance: 119822.40,
@@ -387,7 +392,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     };
     const result = await importBankStatementFromPdf(
       makeOperaDb(), appDb,
-      { filePath: '/tmp/Statement 24-APR.pdf', bankCode: 'BC010',
+      { filePath: '/tmp/Statement 24-APR.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY,
         filename: 'Statement 24-APR.pdf' },
       extractor, executor, lock, overlap,
     );
@@ -408,6 +413,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     // Pre-existing UNreconciled cycle row from a prior pull (May 1-8).
     const [firstId] = await appDb('bank_statement_imports')
       .insert({
+        company_code: TEST_COMPANY,
         bank_code: 'BC010',
         period_start: '2026-05-01',
         period_end: '2026-05-08',
@@ -426,6 +432,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
     // Pre-existing transactions on the first pull (12 lines, May 1-8).
     for (let i = 1; i <= 12; i++) {
       await appDb('bank_statement_transactions').insert({
+        company_code: TEST_COMPANY,
         import_id: firstImportId,
         line_number: i,
         post_date: `2026-05-0${i <= 9 ? i : i}`,
@@ -487,7 +494,7 @@ describe('cumulative-cycle import — reconciled-cycle refusal', () => {
       appDb,
       {
         filePath: '/tmp/May 1-22.pdf',
-        bankCode: 'BC010',
+        bankCode: 'BC010', companyCode: TEST_COMPANY,
         filename: 'May 1-22.pdf',
       },
       extractor, executor, lock, overlap,

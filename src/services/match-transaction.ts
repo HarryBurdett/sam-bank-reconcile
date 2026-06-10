@@ -161,7 +161,7 @@ export async function matchTransaction(
 
   // === Stage 0: repeat entry ===
   try {
-    const repeat = await checkRepeatEntry(operaDb, appDb, {
+    const repeat = await checkRepeatEntry(operaDb, appDb, ctx.companyCode, {
       bankCode: ctx.bankCode,
       date: input.date,
       amountPounds: input.amount,

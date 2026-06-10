@@ -13,8 +13,15 @@
  * Stored in `duplicate_overrides` (per-app DB) keyed by transaction
  * hash. Upsert semantics: re-overriding the same hash updates the
  * reason and timestamp.
+ *
+ * Multi-company note: migration 020 added a `company_code` column but
+ * kept the UNIQUE on `transaction_hash` (content-addressed). We add
+ * `company_code` to every write + read so each company sees only its
+ * own overrides, even when two companies happen to hash the same
+ * statement line.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface RecordDuplicateOverrideInput {
   transactionHash: string;
@@ -30,6 +37,7 @@ export interface RecordDuplicateOverrideResponse {
 
 export async function recordDuplicateOverride(
   appDb: Knex,
+  companyCode: string,
   input: RecordDuplicateOverrideInput,
 ): Promise<RecordDuplicateOverrideResponse> {
   const transactionHash = (input.transactionHash ?? '').trim();
@@ -40,6 +48,7 @@ export async function recordDuplicateOverride(
   if (!reason) {
     return { success: false, error: 'reason is required' };
   }
+  const scope = companyScope(companyCode);
 
   try {
     // Mirror Python's INSERT OR REPLACE semantics: if a row exists for
@@ -47,12 +56,12 @@ export async function recordDuplicateOverride(
     // doesn't have INSERT OR REPLACE so we do an explicit
     // existence-check + update/insert pair.
     const existing = (await appDb('duplicate_overrides')
-      .where({ transaction_hash: transactionHash })
+      .where({ ...scope, transaction_hash: transactionHash })
       .first()) as { id: number } | undefined;
 
     if (existing) {
       await appDb('duplicate_overrides')
-        .where({ id: existing.id })
+        .where({ ...scope, id: existing.id })
         .update({
           override_reason: reason,
           user_code: input.userCode ?? null,
@@ -60,6 +69,7 @@ export async function recordDuplicateOverride(
         });
     } else {
       await appDb('duplicate_overrides').insert({
+        ...scope,
         transaction_hash: transactionHash,
         override_reason: reason,
         user_code: input.userCode ?? null,
@@ -87,12 +97,14 @@ export interface DuplicateOverrideRow {
 
 export async function getDuplicateOverride(
   appDb: Knex,
+  companyCode: string,
   transactionHash: string,
 ): Promise<DuplicateOverrideRow | null> {
   if (!transactionHash) return null;
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('duplicate_overrides')
-      .where({ transaction_hash: transactionHash })
+      .where({ ...scope, transaction_hash: transactionHash })
       .first()) as DuplicateOverrideRow | undefined;
     return row ?? null;
   } catch {

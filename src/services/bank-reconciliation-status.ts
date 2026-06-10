@@ -11,6 +11,7 @@
  * statement transactions for review.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface BankReconciliationStatusEntry {
   bank_code: string;
@@ -144,6 +145,7 @@ export interface StatementTransaction {
 
 export async function getStatementTransactionsForImport(
   appDb: Knex,
+  companyCode: string,
   importId: number,
 ): Promise<{
   success: boolean;
@@ -153,6 +155,7 @@ export async function getStatementTransactionsForImport(
   if (!Number.isFinite(importId) || importId <= 0) {
     return { success: false, transactions: [], error: 'invalid import_id' };
   }
+  const scope = companyScope(companyCode);
   try {
     // Columns mirror the SAM migration 013 schema. Frontend
     // (Imports.tsx alreadyPostedRows loader) reads `line_number` +
@@ -163,7 +166,7 @@ export async function getStatementTransactionsForImport(
     // to show every line as Posted — alreadyPostedRows was being
     // populated from legacy email_data.db instead.
     const rows = (await appDb('bank_statement_transactions')
-      .where({ import_id: importId })
+      .where({ ...scope, import_id: importId })
       .orderBy('line_number', 'asc')) as unknown as Array<{
       line_number: number;
       post_date: string | Date | null;

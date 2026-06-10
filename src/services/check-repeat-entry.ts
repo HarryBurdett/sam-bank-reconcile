@@ -159,6 +159,7 @@ function escapeLike(s: string): string {
 export async function checkRepeatEntry(
   operaDb: Knex,
   appDb: Knex | null,
+  companyCode: string,
   txn: {
     bankCode: string;
     /** YYYY-MM-DD transaction date. */
@@ -173,7 +174,7 @@ export async function checkRepeatEntry(
   // === Phase 1 — alias fast-path ===
   if (appDb) {
     try {
-      const alias = await lookupRepeatEntryAlias(appDb, txn.name, txn.bankCode);
+      const alias = await lookupRepeatEntryAlias(appDb, companyCode, txn.name, txn.bankCode);
       if (alias?.entry_ref) {
         const row = await validateAliasMatch(
           operaDb,

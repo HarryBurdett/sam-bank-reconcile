@@ -17,8 +17,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import knexLib, { type Knex } from 'knex';
 import { recoverFromOperaDivergence } from '../src/services/reconciliation-status.js';
 
+const TEST_COMPANY = 'C';
+
 const APP_SCHEMA_IMPORTS = `CREATE TABLE bank_statement_imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   bank_code TEXT NOT NULL,
   statement_date DATE,
   closing_balance REAL,
@@ -31,6 +34,7 @@ const APP_SCHEMA_IMPORTS = `CREATE TABLE bank_statement_imports (
 
 const APP_SCHEMA_TXNS = `CREATE TABLE bank_statement_transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   import_id INTEGER NOT NULL,
   line_number INTEGER NOT NULL,
   post_date DATE NOT NULL,
@@ -87,16 +91,16 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
       // got imported and posted to Opera but whose is_reconciled
       // flag never flipped.
       await appDb('bank_statement_imports').insert([
-        { id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+        { id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
           closing_balance: 119822.40, is_reconciled: 1,
           reconciled_at: '2026-05-02T18:44:18', filename: '17-APR.pdf' },
-        { id: 25, bank_code: 'BC010', statement_date: '2026-04-27',
+        { id: 25, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-27',
           closing_balance: 116726.07, is_reconciled: 1,
           reconciled_at: '2026-05-02T19:23:48', filename: '24-APR.pdf' },
-        { id: 27, bank_code: 'BC010', statement_date: '2026-05-01',
+        { id: 27, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-05-01',
           closing_balance: 115064.71, is_reconciled: 1,
           reconciled_at: '2026-05-05T13:19:51', filename: '01-MAY.pdf' },
-        { id: 31, bank_code: 'BC010', statement_date: '2026-05-08',
+        { id: 31, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-05-08',
           closing_balance: 125912.72, is_reconciled: 0,
           filename: '08-MAY.pdf' },
       ]);
@@ -104,7 +108,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
 
     it('promotes the matching unreconciled statement to is_reconciled=1', async () => {
       const opera = makeFakeOperaDb(125912.72);
-      const result = await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      const result = await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       expect(result.success).toBe(true);
       expect(result.direction).toBe('extra');
       expect(result.promoted).toBe(1);
@@ -114,7 +118,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
 
     it('flips is_reconciled and sets reconciled_at on the matched row', async () => {
       const opera = makeFakeOperaDb(125912.72);
-      await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       const row = await appDb('bank_statement_imports').where({ id: 31 }).first();
       expect(row.is_reconciled).toBe(1);
       expect(row.reconciled_at).not.toBeNull();
@@ -123,7 +127,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
 
     it('uses the supplied user when provided', async () => {
       const opera = makeFakeOperaDb(125912.72);
-      await recoverFromOperaDivergence(opera, appDb, 'BC010', { user: 'harry' });
+      await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010', { user: 'harry' });
       const row = await appDb('bank_statement_imports').where({ id: 31 }).first();
       expect(row.reconciled_by).toBe('harry');
     });
@@ -131,7 +135,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
     it('returns failure with diagnostic when no SAM statement matches', async () => {
       // Opera nk_recbal at a value SAM never saw
       const opera = makeFakeOperaDb(999999.99);
-      const result = await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      const result = await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       expect(result.success).toBe(false);
       expect(result.direction).toBe('extra');
       expect(result.error).toContain('999999.99');
@@ -145,7 +149,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
         .delete();
       // Only id=24 remains reconciled at 119822.40.
       const opera = makeFakeOperaDb(119822.40);
-      const result = await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      const result = await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       expect(result.success).toBe(true);
       expect(result.direction).toBe('none');
       expect(result.promoted).toBe(0);
@@ -162,16 +166,16 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
       // got rolled back to where the 24-APR statement was the
       // latest reconciled (nk_recbal=116726.07).
       await appDb('bank_statement_imports').insert([
-        { id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+        { id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
           closing_balance: 119822.40, is_reconciled: 1,
           reconciled_at: '2026-05-02T18:44:18', filename: '17-APR.pdf' },
-        { id: 25, bank_code: 'BC010', statement_date: '2026-04-27',
+        { id: 25, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-27',
           closing_balance: 116726.07, is_reconciled: 1,
           reconciled_at: '2026-05-02T19:23:48', filename: '24-APR.pdf' },
-        { id: 27, bank_code: 'BC010', statement_date: '2026-05-01',
+        { id: 27, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-05-01',
           closing_balance: 115064.71, is_reconciled: 1,
           reconciled_at: '2026-05-05T13:19:51', filename: '01-MAY.pdf' },
-        { id: 31, bank_code: 'BC010', statement_date: '2026-05-08',
+        { id: 31, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-05-08',
           closing_balance: 125912.72, is_reconciled: 1,
           reconciled_at: '2026-05-15T09:00:00', filename: '08-MAY.pdf' },
       ]);
@@ -179,7 +183,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
 
     it('clears stale is_reconciled on statements after the anchor', async () => {
       const opera = makeFakeOperaDb(116726.07);
-      const result = await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      const result = await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       expect(result.success).toBe(true);
       expect(result.direction).toBe('restore');
       expect(result.cleared).toBe(2); // id=27, id=31
@@ -189,7 +193,7 @@ describe('recoverFromOperaDivergence — bidirectional', () => {
     it('returns failure when Opera lands on a value SAM never saw', async () => {
       // 117000 — not equal to any SAM statement's closing
       const opera = makeFakeOperaDb(117000);
-      const result = await recoverFromOperaDivergence(opera, appDb, 'BC010');
+      const result = await recoverFromOperaDivergence(opera, appDb, TEST_COMPANY, 'BC010');
       expect(result.success).toBe(false);
       expect(result.direction).toBe('restore');
       expect(result.error).toContain('no SAM statement matches');

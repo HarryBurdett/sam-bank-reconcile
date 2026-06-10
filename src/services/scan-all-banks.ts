@@ -117,6 +117,7 @@ interface BankRow {
  */
 async function readBalancesFromExtractionCache(
   appDb: Knex,
+  companyCode: string,
   filePath: string,
   logger: Logger,
 ): Promise<{
@@ -132,8 +133,12 @@ async function readBalancesFromExtractionCache(
   try {
     const bytes = await readFile(filePath);
     const hash = createHash('sha256').update(bytes).digest('hex');
+    // extraction_cache has a content-addressed UNIQUE on content_hash
+    // (intentionally global — same PDF can be observed by multiple
+    // companies). We still scope the read by company_code so each
+    // company sees only its own cache hits.
     const row = (await appDb('extraction_cache')
-      .where({ content_hash: hash })
+      .where({ ...companyScope(companyCode), content_hash: hash })
       .first()) as { extraction_json?: string } | undefined;
     if (!row?.extraction_json) return null;
     const parsed = JSON.parse(row.extraction_json) as {
@@ -380,7 +385,7 @@ export async function scanAllBanksFaithful(
 
   // Tracking data — matches legacy line 6720
   const tracking: StatementTrackingData = appDb
-    ? await getAllStatementTrackingData(appDb).catch(() => emptyTracking())
+    ? await getAllStatementTrackingData(appDb, companyCode).catch(() => emptyTracking())
     : emptyTracking();
   logger.info(
     `Scan: got ${tracking.managed_keys.size} managed_keys, ${tracking.managed_filenames.size} managed_filenames`,
@@ -829,6 +834,7 @@ export async function scanAllBanksFaithful(
           } else if (validateBalances && appDb) {
             const extracted = await readBalancesFromExtractionCache(
               appDb,
+              companyCode,
               fullPath,
               logger,
             );
@@ -1093,7 +1099,7 @@ export async function scanAllBanksFaithful(
   // and idempotent — no rows changed means no log noise.
   if (appDb) {
     for (const [code] of Object.entries(allBanks)) {
-      await autoCleanResolvedDefers(appDb, operaDb, code);
+      await autoCleanResolvedDefers(appDb, companyCode, operaDb, code);
     }
   }
 
@@ -1211,7 +1217,7 @@ export async function scanAllBanksFaithful(
       if (!appDb) continue;
       const recBal = bank.reconciled_balance;
       if (recBal === null || recBal === undefined) continue;
-      const healed = await selfHealBalanceMatch(operaDb, appDb, code);
+      const healed = await selfHealBalanceMatch(operaDb, appDb, companyCode, code);
       if (healed.promoted) {
         // Mark the promoted statement as reconciled in the in-memory
         // scan result too, so the post-cleanup filter drops it from
@@ -1280,7 +1286,7 @@ export async function scanAllBanksFaithful(
           finalRecFilenames.add(fn);
           if (appDb) {
             try {
-              await markStatementReconciled(appDb, {
+              await markStatementReconciled(appDb, companyCode, {
                 filename: fn,
                 reconciledCount: 0,
                 bankCode: code,
@@ -1693,6 +1699,7 @@ export async function scanAllBanksFaithful(
         try {
           const cycle = await findExistingCycleRow(
             appDb,
+            companyCode,
             bank.bank_code,
             stmt.period_start,
           );

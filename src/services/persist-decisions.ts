@@ -30,6 +30,7 @@
  *      both writes complete.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface PersistDecisionsInput {
   bankCode: string;
@@ -63,6 +64,7 @@ const ARCHIVED_STATUSES = new Set(['archived', 'deleted', 'retained']);
 
 export async function persistImportDecisions(
   appDb: Knex,
+  companyCode: string,
   input: PersistDecisionsInput,
 ): Promise<PersistDecisionsResponse> {
   const bankCode = (input.bankCode ?? '').trim();
@@ -83,13 +85,14 @@ export async function persistImportDecisions(
 
   // Normalise source: pdf → file, email → email
   const source = sourceRaw === 'pdf' ? 'file' : sourceRaw;
+  const scope = companyScope(companyCode);
 
   try {
     // Step 1: UPSERT-ish bank_statement_imports row
     let importId: number | undefined;
     try {
       const existing = (await appDb('bank_statement_imports')
-        .where({ bank_code: bankCode, filename })
+        .where({ ...scope, bank_code: bankCode, filename })
         .whereNotIn('target_system', [...ARCHIVED_STATUSES])
         .orderBy('id', 'desc')
         .first()) as { id: number } | undefined;
@@ -98,6 +101,7 @@ export async function persistImportDecisions(
       } else {
         const inserted = await appDb('bank_statement_imports')
           .insert({
+            ...scope,
             bank_code: bankCode,
             filename,
             source,
@@ -134,6 +138,7 @@ export async function persistImportDecisions(
     let deferredCount = 0;
     try {
       let delQuery = appDb('deferred_transactions').where({
+        ...scope,
         bank_code: bankCode,
       });
       if (stmt.period_start && stmt.period_end) {
@@ -149,6 +154,7 @@ export async function persistImportDecisions(
         const description = (d.description ?? '').toString().slice(0, 500);
         try {
           await appDb('deferred_transactions').insert({
+            ...scope,
             bank_code: bankCode,
             post_date: post_date || null,
             amount,

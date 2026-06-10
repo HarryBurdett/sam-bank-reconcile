@@ -257,10 +257,11 @@ describe('previewMultiformat / validateCsv', () => {
 });
 
 describe('getStatementReview', () => {
+  const TEST_COMPANY = 'C';
   it('rejects invalid import_id', async () => {
     const db: any = () => ({ where: () => ({ first: async () => undefined }) });
     db.raw = async () => [];
-    const r = await getStatementReview(db, 0);
+    const r = await getStatementReview(db, TEST_COMPANY, 0);
     expect(r.success).toBe(false);
   });
   it('returns mapped row', async () => {
@@ -280,7 +281,7 @@ describe('getStatementReview', () => {
       }),
     });
     db.raw = async () => [];
-    const r = await getStatementReview(db, 99);
+    const r = await getStatementReview(db, TEST_COMPANY, 99);
     expect(r.success).toBe(true);
     expect(r.review?.records_imported).toBe(5);
   });

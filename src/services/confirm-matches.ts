@@ -52,6 +52,7 @@ export interface ConfirmMatchesResponse extends MarkReconciledResponse {
 
 export async function confirmStatementMatches(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex,
   input: ConfirmMatchesInput,
 ): Promise<ConfirmMatchesResponse> {
@@ -93,7 +94,7 @@ export async function confirmStatementMatches(
     statement_line: (i + 1) * 10,
   }));
 
-  const result = await markEntriesReconciled(appDb, operaDb, {
+  const result = await markEntriesReconciled(appDb, companyCode, operaDb, {
     bankCode,
     entries,
     statementNumber: nextStatementNumber,

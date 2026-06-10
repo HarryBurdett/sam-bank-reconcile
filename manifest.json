@@ -2,7 +2,7 @@
   "id": "bank-reconcile",
   "name": "Bank Reconciliation",
   "description": "Bank statement scan and AI-extracted reconciliation. Imports statements from PDF or via SAM email service, matches transactions against Opera customers/suppliers/nominals using fuzzy matching and pattern learning, then posts to Opera as cashbook entries with full bank-statement reconciliation.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "IntSys",
   "category": "finance",
   "type": "full-stack",

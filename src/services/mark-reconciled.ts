@@ -103,6 +103,7 @@ function formatGbp(pence: number): string {
 
 export async function markEntriesReconciled(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex,
   input: MarkReconciledInput,
 ): Promise<MarkReconciledResponse> {
@@ -140,6 +141,7 @@ export async function markEntriesReconciled(
   try {
     return await withImportLock(
       appDb,
+      companyCode,
       bankCode,
       { locked_by: 'api', endpoint: 'mark-reconciled' },
       async () =>

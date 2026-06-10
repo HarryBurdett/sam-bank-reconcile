@@ -4,6 +4,8 @@ import {
   listImportedStatements,
 } from '../src/services/statement-files.js';
 
+const TEST_COMPANY = 'C';
+
 interface MockState {
   rows: Array<Record<string, unknown> & { id: number }>;
 }
@@ -82,6 +84,7 @@ describe('markStatementReconciled', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           filename: 'statement-2026-04.pdf',
           is_reconciled: false,
@@ -89,7 +92,7 @@ describe('markStatementReconciled', () => {
       ],
     };
     const db = makeAppDb(state);
-    const result = await markStatementReconciled(db, {
+    const result = await markStatementReconciled(db, TEST_COMPANY, {
       filename: 'statement-2026-04.pdf',
       bankCode: 'BC010',
       reconciledCount: 25,
@@ -103,7 +106,7 @@ describe('markStatementReconciled', () => {
   it('returns success=false when no match', async () => {
     const state: MockState = { rows: [] };
     const db = makeAppDb(state);
-    const result = await markStatementReconciled(db, {
+    const result = await markStatementReconciled(db, TEST_COMPANY, {
       filename: 'ghost.pdf',
     });
     expect(result.success).toBe(false);
@@ -117,6 +120,7 @@ describe('listImportedStatements', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           filename: 'a.pdf',
           target_system: 'opera_se',
@@ -125,6 +129,7 @@ describe('listImportedStatements', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           filename: 'b.pdf',
           target_system: 'opera_se',
@@ -134,7 +139,7 @@ describe('listImportedStatements', () => {
       ],
     };
     const db = makeAppDb(state);
-    const result = await listImportedStatements(db, { bankCode: 'BC010' });
+    const result = await listImportedStatements(db, TEST_COMPANY, { bankCode: 'BC010' });
     expect(result.count).toBe(1);
     expect(result.statements[0]?.id).toBe(1);
   });
@@ -144,6 +149,7 @@ describe('listImportedStatements', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           filename: 'a.pdf',
           target_system: 'opera_se',
@@ -153,7 +159,7 @@ describe('listImportedStatements', () => {
       ],
     };
     const db = makeAppDb(state);
-    const result = await listImportedStatements(db, {
+    const result = await listImportedStatements(db, TEST_COMPANY, {
       bankCode: 'BC010',
       includeReconciled: true,
     });
@@ -165,6 +171,7 @@ describe('listImportedStatements', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           target_system: 'opera_se',
           is_reconciled: false,
@@ -172,6 +179,7 @@ describe('listImportedStatements', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           target_system: 'opera_3',
           is_reconciled: false,
@@ -180,7 +188,7 @@ describe('listImportedStatements', () => {
       ],
     };
     const db = makeAppDb(state);
-    const result = await listImportedStatements(db);
+    const result = await listImportedStatements(db, TEST_COMPANY);
     expect(result.count).toBe(1);
     expect(result.statements[0]?.target_system).toBe('opera_se');
   });

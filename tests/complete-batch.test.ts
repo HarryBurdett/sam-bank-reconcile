@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { completeBatch } from '../src/services/complete-batch.js';
 
+const TEST_COMPANY = 'C';
+
 interface AppLockRow {
   id: number;
+  company_code: string;
   bank_code: string;
   locked_at: Date;
   locked_by: string;
@@ -33,6 +36,7 @@ function makeAppDb(state: AppMockState): any {
         }
         return builder;
       },
+      andWhere: (cond: any, op?: any, val?: any) => builder.where(cond, op, val),
       first: () => {
         const found = state.lockRows.find((r) =>
           Object.entries(conds).every(([k, v]) => (r as any)[k] === v),
@@ -55,11 +59,18 @@ function makeAppDb(state: AppMockState): any {
         return Promise.resolve(before - state.lockRows.length);
       },
       insert: (row: any) => {
-        if (state.lockRows.some((r) => r.bank_code === row.bank_code)) {
+        if (
+          state.lockRows.some(
+            (r) =>
+              r.bank_code === row.bank_code &&
+              r.company_code === String(row.company_code ?? ''),
+          )
+        ) {
           return Promise.reject(new Error('UNIQUE constraint'));
         }
         state.lockRows.push({
           id: state.nextId++,
+          company_code: String(row.company_code ?? ''),
           bank_code: row.bank_code,
           locked_at: new Date(),
           locked_by: row.locked_by ?? 'unknown',
@@ -235,6 +246,7 @@ describe('completeBatch - validation', () => {
   it('rejects bad bank_code', async () => {
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(emptyOpera()),
       { bankCode: "BC';--", entryNumber: 'R200001234' },
     );
@@ -245,6 +257,7 @@ describe('completeBatch - validation', () => {
   it('rejects bad entry_number', async () => {
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(emptyOpera()),
       { bankCode: 'BC010', entryNumber: "R'1;--" },
     );
@@ -255,6 +268,7 @@ describe('completeBatch - validation', () => {
   it('returns errors when entry not found', async () => {
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(emptyOpera()),
       { bankCode: 'BC010', entryNumber: 'R200001234' },
     );
@@ -274,6 +288,7 @@ describe('completeBatch - validation', () => {
     });
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(opera),
       { bankCode: 'BC010', entryNumber: 'R200001234' },
     );
@@ -301,6 +316,7 @@ describe('completeBatch - happy paths', () => {
     // No anoml rows — fast path
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(opera),
       { bankCode: 'BC010', entryNumber: 'R200001234' },
     );
@@ -352,6 +368,7 @@ describe('completeBatch - happy paths', () => {
     opera.nbank.BC010 = { nk_curbal: 0 };
     const result = await completeBatch(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(opera),
       { bankCode: 'BC010', entryNumber: 'R200001234' },
     );
@@ -370,12 +387,13 @@ describe('completeBatch - locking', () => {
       makeAppDb({
         lockRows: [
           {
-            id: 1, bank_code: 'BC010', locked_at: new Date(),
+            id: 1, company_code: TEST_COMPANY, bank_code: 'BC010', locked_at: new Date(),
             locked_by: 'other', endpoint: 'other', description: '',
           },
         ],
         nextId: 2,
       }),
+      TEST_COMPANY,
       makeOperaDb(emptyOpera()),
       { bankCode: 'BC010', entryNumber: 'R200001234' },
     );

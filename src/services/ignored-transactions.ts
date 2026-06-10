@@ -5,9 +5,11 @@
  *
  * Storage: under Python lives in core-email's email_data.db; under SAM
  * moves to the bank-reconcile per-app database (table
- * `ignored_bank_transactions`).
+ * `ignored_bank_transactions`). Migration 020 added a `company_code`
+ * column — every read and write is now company-scoped.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface IgnoredTransaction {
   id: number;
@@ -49,11 +51,14 @@ export interface IgnoreResponse {
 
 export async function ignoreTransaction(
   appDb: Knex,
+  companyCode: string,
   input: IgnoreInput,
 ): Promise<IgnoreResponse> {
+  const scope = companyScope(companyCode);
   try {
     const inserted = await appDb('ignored_bank_transactions')
       .insert({
+        ...scope,
         bank_code: input.bankCode,
         transaction_date: input.transactionDate,
         amount: input.amount,
@@ -90,12 +95,14 @@ export interface IgnoredListResponse {
 
 export async function listIgnoredTransactions(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   limit = 100,
 ): Promise<IgnoredListResponse> {
+  const scope = companyScope(companyCode);
   try {
     const rows = (await appDb('ignored_bank_transactions')
-      .where({ bank_code: bankCode })
+      .where({ ...scope, bank_code: bankCode })
       .orderBy('transaction_date', 'desc')
       .limit(limit)) as unknown as Array<{
       id: number;
@@ -144,11 +151,13 @@ export interface UnignoreResponse {
 /** Remove an ignored-transaction record by id. */
 export async function unignoreTransactionById(
   appDb: Knex,
+  companyCode: string,
   recordId: number,
 ): Promise<UnignoreResponse> {
+  const scope = companyScope(companyCode);
   try {
     const deleted = await appDb('ignored_bank_transactions')
-      .where({ id: recordId })
+      .where({ ...scope, id: recordId })
       .delete();
     if (deleted > 0) {
       return { success: true, message: 'Transaction removed from ignored list' };
@@ -165,13 +174,16 @@ export async function unignoreTransactionById(
  */
 export async function unignoreTransactionByMatch(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   transactionDate: string,
   amount: number,
 ): Promise<UnignoreResponse> {
+  const scope = companyScope(companyCode);
   try {
     const deleted = await appDb('ignored_bank_transactions')
       .where({
+        ...scope,
         bank_code: bankCode,
         transaction_date: transactionDate,
         amount,

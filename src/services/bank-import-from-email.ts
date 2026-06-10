@@ -34,6 +34,10 @@ export interface BankImportFromEmailInput {
   dateOverrides?: unknown[];
   rejectedRefundRows?: number[];
   skipOverlapCheck?: boolean;
+  /** Opera company code — threaded into the synthesised
+   *  ImportFromPdfInput so all per-company table writes scope by it. */
+  companyCode?: string | null;
+  importedBy?: string | null;
 }
 
 export async function importBankStatementFromEmail(
@@ -85,6 +89,8 @@ export async function importBankStatementFromEmail(
     dateOverrides: input.dateOverrides ?? [],
     rejectedRefundRows: input.rejectedRefundRows ?? [],
     skipOverlapCheck: !!input.skipOverlapCheck,
+    companyCode: input.companyCode ?? null,
+    importedBy: input.importedBy ?? null,
   };
 
   return importBankStatementFromPdf(

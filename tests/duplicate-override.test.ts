@@ -4,8 +4,11 @@ import {
   getDuplicateOverride,
 } from '../src/services/duplicate-override.js';
 
+const TEST_COMPANY = 'C';
+
 interface Row {
   id: number;
+  company_code: string;
   transaction_hash: string;
   override_reason: string;
   user_code: string | null;
@@ -22,14 +25,17 @@ function makeAppDb(state: MockState): any {
     if (table !== 'duplicate_overrides') {
       throw new Error(`Unexpected table: ${table}`);
     }
-    let whereCond: { transaction_hash?: string; id?: number } = {};
+    let whereCond: { transaction_hash?: string; id?: number; company_code?: string } = {};
     const builder: any = {
-      where: (cond: { transaction_hash?: string; id?: number }) => {
+      where: (cond: { transaction_hash?: string; id?: number; company_code?: string }) => {
         whereCond = { ...whereCond, ...cond };
         return builder;
       },
       first: () => {
         const row = state.rows.find((r) => {
+          if (whereCond.company_code !== undefined && r.company_code !== whereCond.company_code) {
+            return false;
+          }
           if (whereCond.transaction_hash !== undefined) {
             return r.transaction_hash === whereCond.transaction_hash;
           }
@@ -42,6 +48,7 @@ function makeAppDb(state: MockState): any {
         const id = state.nextId++;
         state.rows.push({
           id,
+          company_code: String(data.company_code ?? ''),
           transaction_hash: String(data.transaction_hash ?? ''),
           override_reason: String(data.override_reason ?? ''),
           user_code: (data.user_code as string | null) ?? null,
@@ -50,7 +57,12 @@ function makeAppDb(state: MockState): any {
         return Promise.resolve([id]);
       },
       update: (data: Record<string, unknown>) => {
-        const target = state.rows.find((r) => r.id === whereCond.id);
+        const target = state.rows.find(
+          (r) =>
+            r.id === whereCond.id &&
+            (whereCond.company_code === undefined ||
+              r.company_code === whereCond.company_code),
+        );
         if (target) {
           if ('override_reason' in data)
             target.override_reason = String(data.override_reason);
@@ -71,7 +83,7 @@ describe('recordDuplicateOverride', () => {
   it('inserts a new override row', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await recordDuplicateOverride(db, {
+    const result = await recordDuplicateOverride(db, TEST_COMPANY, {
       transactionHash: 'abc123',
       reason: 'Genuine separate transaction',
       userCode: 'admin',
@@ -90,12 +102,12 @@ describe('recordDuplicateOverride', () => {
   it('updates existing row instead of duplicating (upsert by hash)', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    await recordDuplicateOverride(db, {
+    await recordDuplicateOverride(db, TEST_COMPANY, {
       transactionHash: 'h1',
       reason: 'first',
       userCode: 'a',
     });
-    await recordDuplicateOverride(db, {
+    await recordDuplicateOverride(db, TEST_COMPANY, {
       transactionHash: 'h1',
       reason: 'updated',
       userCode: 'b',
@@ -106,7 +118,7 @@ describe('recordDuplicateOverride', () => {
   });
 
   it('rejects empty transaction hash', async () => {
-    const result = await recordDuplicateOverride(makeAppDb({ rows: [], nextId: 1 }), {
+    const result = await recordDuplicateOverride(makeAppDb({ rows: [], nextId: 1 }), TEST_COMPANY, {
       transactionHash: '',
       reason: 'irrelevant',
     });
@@ -115,7 +127,7 @@ describe('recordDuplicateOverride', () => {
   });
 
   it('rejects empty reason', async () => {
-    const result = await recordDuplicateOverride(makeAppDb({ rows: [], nextId: 1 }), {
+    const result = await recordDuplicateOverride(makeAppDb({ rows: [], nextId: 1 }), TEST_COMPANY, {
       transactionHash: 'h',
       reason: '   ',
     });
@@ -125,7 +137,7 @@ describe('recordDuplicateOverride', () => {
 
   it('handles userCode null gracefully', async () => {
     const state: MockState = { rows: [], nextId: 1 };
-    await recordDuplicateOverride(makeAppDb(state), {
+    await recordDuplicateOverride(makeAppDb(state), TEST_COMPANY, {
       transactionHash: 'h',
       reason: 'r',
     });
@@ -139,6 +151,7 @@ describe('getDuplicateOverride', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           transaction_hash: 'XYZ',
           override_reason: 'manual',
           user_code: null,
@@ -148,19 +161,19 @@ describe('getDuplicateOverride', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    const row = await getDuplicateOverride(db, 'XYZ');
+    const row = await getDuplicateOverride(db, TEST_COMPANY, 'XYZ');
     expect(row?.override_reason).toBe('manual');
   });
 
   it('returns null when not found', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const row = await getDuplicateOverride(db, 'missing');
+    const row = await getDuplicateOverride(db, TEST_COMPANY,'missing');
     expect(row).toBeNull();
   });
 
   it('returns null on empty input', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    const row = await getDuplicateOverride(db, '');
+    const row = await getDuplicateOverride(db, TEST_COMPANY,'');
     expect(row).toBeNull();
   });
 });

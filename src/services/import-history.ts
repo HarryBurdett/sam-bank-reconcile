@@ -13,6 +13,7 @@
  * date range, target_system (default opera_se).
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface BankStatementImportRow {
   id: number;
@@ -106,12 +107,14 @@ function rowToImport(r: any): BankStatementImportRow {
 
 export async function listImportHistory(
   appDb: Knex,
+  companyCode: string,
   opts: ListImportHistoryOptions = {},
 ): Promise<ListImportHistoryResponse> {
+  const scope = companyScope(companyCode);
   try {
     const target = opts.targetSystem ?? 'opera_se';
     let query = appDb('bank_statement_imports')
-      .where({ target_system: target })
+      .where({ ...scope, target_system: target })
       .orderBy('imported_at', 'desc')
       .limit(opts.limit ?? 50);
     if (opts.bankCode) {
@@ -144,14 +147,16 @@ export interface DeleteImportRecordResponse {
 
 export async function deleteImportRecord(
   appDb: Knex,
+  companyCode: string,
   recordId: number,
 ): Promise<DeleteImportRecordResponse> {
   if (!Number.isFinite(recordId) || recordId <= 0) {
     return { success: false, error: 'Invalid record_id' };
   }
+  const scope = companyScope(companyCode);
   try {
     const deleted = await appDb('bank_statement_imports')
-      .where({ id: recordId })
+      .where({ ...scope, id: recordId })
       .delete();
     if (Number(deleted) === 0) {
       return { success: false, error: `Record ${recordId} not found` };
@@ -180,10 +185,12 @@ export interface ClearImportHistoryResponse {
 
 export async function clearImportHistory(
   appDb: Knex,
+  companyCode: string,
   opts: ClearImportHistoryOptions = {},
 ): Promise<ClearImportHistoryResponse> {
+  const scope = companyScope(companyCode);
   try {
-    let query = appDb('bank_statement_imports');
+    let query = appDb('bank_statement_imports').where(scope);
     if (opts.bankCode) query = query.where({ bank_code: opts.bankCode });
     if (opts.fromDate)
       query = query.where('statement_date', '>=', opts.fromDate);

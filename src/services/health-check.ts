@@ -265,11 +265,13 @@ async function checkBankPatterns(
 
 async function checkAuditBankCodes(
   appDb: Knex,
+  companyCode: string,
   validBankCodes: Set<string>,
 ): Promise<HealthCheckItem> {
   let rows: Array<{ bank_code: string | null }>;
   try {
     rows = (await appDb('bank_statement_imports')
+      .where(companyScope(companyCode))
       .distinct('bank_code')
       .whereNotNull('bank_code')) as unknown as typeof rows;
   } catch (err: any) {
@@ -369,7 +371,9 @@ export async function runHealthCheck(opts: {
         validNominalCodes,
       )),
     );
-    checks.push(await checkAuditBankCodes(opts.appDb, validBankCodes));
+    checks.push(
+      await checkAuditBankCodes(opts.appDb, opts.companyCode, validBankCodes),
+    );
   } else {
     checks.push({
       name: 'Bank aliases',

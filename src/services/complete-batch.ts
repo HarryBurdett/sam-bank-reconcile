@@ -62,6 +62,7 @@ export interface CompleteBatchResponse {
 
 export async function completeBatch(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex,
   input: CompleteBatchInput,
 ): Promise<CompleteBatchResponse> {
@@ -80,6 +81,7 @@ export async function completeBatch(
   try {
     return await withImportLock(
       appDb,
+      companyCode,
       bankCode,
       { locked_by: 'api', endpoint: 'complete-batch' },
       async () => {

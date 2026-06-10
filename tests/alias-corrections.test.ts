@@ -22,6 +22,7 @@ interface AliasRow {
 
 interface CorrectionRow {
   id: number;
+  company_code: string;
   bank_name: string;
   wrong_account: string;
   correct_account: string;
@@ -32,6 +33,7 @@ interface CorrectionRow {
 
 interface NegRow {
   id: number;
+  company_code: string;
   bank_name: string;
   wrong_account: string;
   created_at: string;
@@ -117,6 +119,7 @@ function makeAppDb(state: MockState): any {
           const id = state.nextCorrId++;
           state.corrections.push({
             id,
+            company_code: String(row.company_code ?? ''),
             bank_name: String(row.bank_name ?? ''),
             wrong_account: String(row.wrong_account ?? ''),
             correct_account: String(row.correct_account ?? ''),
@@ -130,6 +133,7 @@ function makeAppDb(state: MockState): any {
           const id = state.nextNegId++;
           state.negatives.push({
             id,
+            company_code: String(row.company_code ?? ''),
             bank_name: String(row.bank_name ?? ''),
             wrong_account: String(row.wrong_account ?? ''),
             created_at: new Date().toISOString(),
@@ -293,24 +297,25 @@ describe('isNegativeMatch', () => {
     const state = emptyState();
     state.negatives.push({
       id: 1,
+      company_code: TEST_COMPANY,
       bank_name: 'ACME',
       wrong_account: 'CUST_WRONG',
       created_at: '2026-04-15',
     });
     expect(
-      await isNegativeMatch(makeAppDb(state), 'acme', 'CUST_WRONG'),
+      await isNegativeMatch(makeAppDb(state), TEST_COMPANY, 'acme', 'CUST_WRONG'),
     ).toBe(true);
   });
 
   it('returns false when missing', async () => {
     expect(
-      await isNegativeMatch(makeAppDb(emptyState()), 'X', 'Y'),
+      await isNegativeMatch(makeAppDb(emptyState()), TEST_COMPANY, 'X', 'Y'),
     ).toBe(false);
   });
 
   it('returns false on empty input', async () => {
     expect(
-      await isNegativeMatch(makeAppDb(emptyState()), '', 'X'),
+      await isNegativeMatch(makeAppDb(emptyState()), TEST_COMPANY, '', 'X'),
     ).toBe(false);
   });
 });
@@ -320,15 +325,15 @@ describe('listCorrections', () => {
     const state = emptyState();
     state.corrections.push(
       {
-        id: 1, bank_name: 'A', wrong_account: 'W1', correct_account: 'C1',
+        id: 1, company_code: TEST_COMPANY, bank_name: 'A', wrong_account: 'W1', correct_account: 'C1',
         ledger_type: 'C', corrected_by: 'admin', created_at: '2026-04-10',
       },
       {
-        id: 2, bank_name: 'B', wrong_account: 'W2', correct_account: 'C2',
+        id: 2, company_code: TEST_COMPANY, bank_name: 'B', wrong_account: 'W2', correct_account: 'C2',
         ledger_type: 'S', corrected_by: 'admin', created_at: '2026-04-15',
       },
     );
-    const result = await listCorrections(makeAppDb(state));
+    const result = await listCorrections(makeAppDb(state), TEST_COMPANY);
     expect(result.entries[0]?.id).toBe(2);
   });
 
@@ -336,15 +341,15 @@ describe('listCorrections', () => {
     const state = emptyState();
     state.corrections.push(
       {
-        id: 1, bank_name: 'Acme', wrong_account: 'W', correct_account: 'C',
+        id: 1, company_code: TEST_COMPANY, bank_name: 'Acme', wrong_account: 'W', correct_account: 'C',
         ledger_type: 'C', corrected_by: '', created_at: '2026-04-10',
       },
       {
-        id: 2, bank_name: 'Beta', wrong_account: 'W', correct_account: 'C',
+        id: 2, company_code: TEST_COMPANY, bank_name: 'Beta', wrong_account: 'W', correct_account: 'C',
         ledger_type: 'C', corrected_by: '', created_at: '2026-04-15',
       },
     );
-    const result = await listCorrections(makeAppDb(state), {
+    const result = await listCorrections(makeAppDb(state), TEST_COMPANY, {
       bankName: 'Acme',
     });
     expect(result.count).toBe(1);

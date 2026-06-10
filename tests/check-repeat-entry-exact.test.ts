@@ -11,6 +11,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import knexLib, { type Knex } from 'knex';
 import { checkRepeatEntry } from '../src/services/check-repeat-entry.js';
 
+const TEST_COMPANY = 'C';
+
 // Minimal arhead/arline schema matching Opera SE column shapes.
 const ARHEAD_SCHEMA = `CREATE TABLE arhead (
   ae_entry TEXT,
@@ -60,7 +62,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
       at_comment: 'Bounce',
     });
 
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-14',
       amountPounds: -54.99,  // bank line: £54.99 Amazon
@@ -85,7 +87,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
       at_comment: 'Bounce',
     });
 
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-14',
       amountPounds: -55.00,
@@ -114,7 +116,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
       at_comment: 'AWS',
     });
 
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-14',
       amountPounds: -54.99,
@@ -138,7 +140,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
       at_entry: 'REC1', at_acnt: 'BC010', at_value: -1000, at_comment: 'Sub',
     });
 
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-15',
       amountPounds: -10.05,
@@ -161,7 +163,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
       at_value: -5499.0,  // explicitly a float
       at_comment: 'X',
     });
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-15',
       amountPounds: -54.99,
@@ -182,7 +184,7 @@ describe('checkRepeatEntry — exact-amount rule', () => {
     await opera('arline').insert({
       at_entry: 'DONE', at_acnt: 'BC010', at_value: -5499, at_comment: 'X',
     });
-    const result = await checkRepeatEntry(opera, null, {
+    const result = await checkRepeatEntry(opera, null, TEST_COMPANY, {
       bankCode: 'BC010',
       date: '2026-05-15',
       amountPounds: -54.99,

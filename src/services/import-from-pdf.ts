@@ -37,6 +37,7 @@ import { learnPattern } from './bank-pattern-learner.js';
 import { recordDeferredTransaction } from './deferred-items.js';
 import { findExistingCycleRow } from './cycle-row-lookup.js';
 import { fingerprintTransactionLine } from './transaction-fingerprint.js';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface PdfExtractionResult {
   bank_name: string | null;
@@ -249,6 +250,10 @@ export async function importBankStatementFromPdf(
   importLock: ImportLockAdapter,
   overlapChecker: PeriodOverlapChecker,
 ): Promise<ImportFromPdfResponse> {
+  // Fail-loud on missing company — every read/write below is
+  // company-scoped. Positioned OUTSIDE the try so the throw isn't
+  // swallowed into a graceful "success: false" default.
+  const scope = companyScope(input.companyCode ?? '');
   let bankCode: string;
   try {
     bankCode = validateBankCode(input.bankCode);
@@ -342,6 +347,7 @@ export async function importBankStatementFromPdf(
   if (!effectiveResumeImportId && extracted.period_start) {
     const cycleRow = await findExistingCycleRow(
       appDb,
+      scope.company_code,
       bankCode,
       extracted.period_start,
     );
@@ -516,7 +522,7 @@ export async function importBankStatementFromPdf(
     if (effectiveResumeImportId) {
       try {
         const rows = (await appDb('bank_statement_transactions')
-          .where({ import_id: effectiveResumeImportId })
+          .where({ ...scope, import_id: effectiveResumeImportId })
           .whereNotNull('posted_entry_number')
           .select('line_number', 'posted_entry_number')) as Array<{
           line_number: number;
@@ -559,13 +565,17 @@ export async function importBankStatementFromPdf(
         if (!txn) continue;
         const statementDate = (txn.date ?? '').slice(0, 10);
         const description = (txn.memo ?? txn.name ?? '').toString().slice(0, 255);
-        const recRes = await recordDeferredTransaction(appDb, {
-          bankCode,
-          statementDate,
-          amount: Number(txn.amount ?? 0),
-          description,
-          deferredBy,
-        });
+        const recRes = await recordDeferredTransaction(
+          appDb,
+          scope.company_code,
+          {
+            bankCode,
+            statementDate,
+            amount: Number(txn.amount ?? 0),
+            description,
+            deferredBy,
+          },
+        );
         if (recRes.success) deferredCount += 1;
       }
       if (deferredCount > 0) {
@@ -754,7 +764,7 @@ export async function importBankStatementFromPdf(
         if (effectiveResumeImportId) {
           try {
             const existing = (await appDb('bank_statement_imports')
-              .where({ id: effectiveResumeImportId })
+              .where({ ...scope, id: effectiveResumeImportId })
               .first()) as
               | {
                   records_imported?: number | null;
@@ -768,7 +778,7 @@ export async function importBankStatementFromPdf(
             const prevReceipts = Number(existing?.total_receipts ?? 0);
             const prevPayments = Number(existing?.total_payments ?? 0);
             await appDb('bank_statement_imports')
-              .where({ id: effectiveResumeImportId })
+              .where({ ...scope, id: effectiveResumeImportId })
               .update({
                 closing_balance: extracted.closing_balance,
                 total_receipts: prevReceipts + totalReceipts,
@@ -796,6 +806,7 @@ export async function importBankStatementFromPdf(
         if (!importId && extracted.period_start) {
           const cycleRow = await findExistingCycleRow(
             appDb,
+            scope.company_code,
             bankCode,
             extracted.period_start,
           );
@@ -810,7 +821,7 @@ export async function importBankStatementFromPdf(
                   ? cycleRow.period_end
                   : extracted.period_end;
               const existing = (await appDb('bank_statement_imports')
-                .where({ id: cycleRow.id })
+                .where({ ...scope, id: cycleRow.id })
                 .first()) as
                 | {
                     records_imported?: number | null;
@@ -824,7 +835,7 @@ export async function importBankStatementFromPdf(
               const prevReceipts = Number(existing?.total_receipts ?? 0);
               const prevPayments = Number(existing?.total_payments ?? 0);
               await appDb('bank_statement_imports')
-                .where({ id: cycleRow.id })
+                .where({ ...scope, id: cycleRow.id })
                 .update({
                   period_end: newPeriodEnd,
                   closing_balance: extracted.closing_balance,
@@ -853,6 +864,7 @@ export async function importBankStatementFromPdf(
         if (!importId) {
           const [insertedId] = (await appDb('bank_statement_imports')
             .insert({
+              ...scope,
               bank_code: bankCode,
               source: 'file',
               source_ref: input.filename ?? input.filePath,
@@ -901,7 +913,7 @@ export async function importBankStatementFromPdf(
         if (importId) {
           // 1. Snapshot existing rows for this import_id, indexed by fingerprint.
           const existingLines = (await appDb('bank_statement_transactions')
-            .where({ import_id: importId })
+            .where({ ...scope, import_id: importId })
             .select(
               'post_date',
               'amount',
@@ -940,7 +952,7 @@ export async function importBankStatementFromPdf(
 
           // 2. Wipe existing rows.
           await appDb('bank_statement_transactions')
-            .where({ import_id: importId })
+            .where({ ...scope, import_id: importId })
             .delete();
 
           // 3. Rebuild from extracted.transactions, preserving state when
@@ -954,6 +966,7 @@ export async function importBankStatementFromPdf(
             );
             const preserved = existingByFingerprint.get(fp);
             return {
+              ...scope,
               import_id: importId,
               line_number: idx + 1,
               post_date: (t.date ?? '').slice(0, 10) || null,
@@ -976,7 +989,7 @@ export async function importBankStatementFromPdf(
           if (Array.isArray(result.posted_lines)) {
             for (const line of result.posted_lines) {
               await appDb('bank_statement_transactions')
-                .where({ import_id: importId, line_number: line.line_number })
+                .where({ ...scope, import_id: importId, line_number: line.line_number })
                 .update({
                   posted_entry_number: line.posted_entry_number,
                   posted_at: appDb.fn.now(),
@@ -1182,13 +1195,18 @@ export async function importBankStatementFromPdf(
             );
           }
 
-          const reconRes = await markEntriesReconciled(appDb, operaDb, {
-            bankCode,
-            entries,
-            statementNumber,
-            statementDate: latestDate,
-            reconciliationDate: new Date().toISOString().slice(0, 10),
-          });
+          const reconRes = await markEntriesReconciled(
+            appDb,
+            scope.company_code,
+            operaDb,
+            {
+              bankCode,
+              entries,
+              statementNumber,
+              statementDate: latestDate,
+              reconciliationDate: new Date().toISOString().slice(0, 10),
+            },
+          );
 
           reconciliationResult = {
             success: !!reconRes.success,

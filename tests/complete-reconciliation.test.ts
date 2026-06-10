@@ -70,6 +70,8 @@ describe('calculateStatementLineNumbers', () => {
 
 import { completeReconciliation } from '../src/services/complete-reconciliation.js';
 
+const TEST_COMPANY = 'C';
+
 interface NbankRow {
   reconciled_balance: number;
   current_balance: number;
@@ -170,6 +172,7 @@ describe('completeReconciliation', () => {
     const result = await completeReconciliation(
       makeOperaDb(state),
       makeAppDb(),
+      TEST_COMPANY,
       {
         bankCode: 'BANK01',
         statementNumber: 1,
@@ -192,6 +195,7 @@ describe('completeReconciliation', () => {
     const result = await completeReconciliation(
       makeOperaDb(state),
       makeAppDb(),
+      TEST_COMPANY,
       {
         bankCode: 'MISSING',
         statementNumber: 1,
@@ -222,6 +226,7 @@ describe('completeReconciliation', () => {
     const result = await completeReconciliation(
       makeOperaDb(state),
       makeAppDb(),
+      TEST_COMPANY,
       {
         bankCode: 'BANK01',
         statementNumber: 1,
@@ -252,6 +257,7 @@ describe('completeReconciliation', () => {
     const result = await completeReconciliation(
       makeOperaDb(state),
       makeAppDb(),
+      TEST_COMPANY,
       {
         bankCode: 'BANK01',
         statementNumber: 1,

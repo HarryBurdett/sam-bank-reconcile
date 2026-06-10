@@ -71,6 +71,7 @@ export interface RestoreCheckAllResponse {
 export async function checkRestoreAcrossAllBanks(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
 ): Promise<RestoreCheckAllResponse> {
   try {
     const banks = (await operaDb('nbank')
@@ -97,15 +98,15 @@ export async function checkRestoreAcrossAllBanks(
       // selfHealBalanceMatch enforces strict safety (exactly one
       // match + at-or-after the anchor's statement_date), so a
       // false-positive promotion is impossible.
-      await selfHealBalanceMatch(operaDb, appDb, code);
+      await selfHealBalanceMatch(operaDb, appDb, companyCode, code);
 
       const [status, orphans, orphanLinks] = await Promise.all([
-        getReconciliationStatus(operaDb, code, appDb, null),
-        checkOrphanedTransactions(operaDb, appDb, code),
+        getReconciliationStatus(operaDb, code, appDb, companyCode, null),
+        checkOrphanedTransactions(operaDb, appDb, companyCode, code),
         // Orphan-link check: bank_statement_transactions rows whose
         // import_id no longer resolves to any bank_statement_imports
         // row. Detect via dry-run — no mutation.
-        repairOrphanTransactionLinks(appDb, code, { dryRun: true }),
+        repairOrphanTransactionLinks(appDb, companyCode, code, { dryRun: true }),
       ]);
       const divDetected = !!status.opera_divergence_detected;
       const orphanLines = orphans.success ? orphans.orphan_line_count : 0;

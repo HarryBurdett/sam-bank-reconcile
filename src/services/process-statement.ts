@@ -182,6 +182,7 @@ export async function processStatement(
   const info = preview.statement_info ?? null;
   const trackedByKey = await buildBankLineTracking({
     appDb: appDb ?? null,
+    companyCode,
     bankCode: input.bankCode,
     scopeAnchor:
       info?.statement_date ?? info?.period_end ?? info?.period_start ?? null,

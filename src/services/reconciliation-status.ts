@@ -9,6 +9,7 @@
  * Read-only against Opera SQL with NOLOCK.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 // =====================================================================
 // get_unreconciled_entries
@@ -162,8 +163,13 @@ export async function getReconciliationStatus(
   operaDb: Knex,
   bankCode: string,
   appDb: Knex | null = null,
+  companyCode: string | null = null,
   currentFilename: string | null = null,
 ): Promise<ReconciliationStatus> {
+  // companyScope throws on empty — fail loud when appDb is provided
+  // without a company. Positioned OUTSIDE the try below per the
+  // multi-company isolation discipline.
+  const scope = appDb ? companyScope(companyCode ?? '') : null;
   try {
     const nbankRows = (await operaDb.raw(
       `
@@ -247,11 +253,12 @@ export async function getReconciliationStatus(
       // the user is processing the deferred-row statement itself
       // (sequential_gating_self) vs a subsequent statement in the
       // chain. Faithful port of routes.py:743-797.
-      if (appDb) {
+      if (appDb && scope) {
         try {
           const pendingRows = (await appDb('bank_statement_imports')
             .distinct('filename')
-            .where('bank_code', bankCode)
+            .where(scope)
+            .andWhere('bank_code', bankCode)
             .andWhere(function notReconciled(this: Knex.QueryBuilder) {
               this.where('is_reconciled', 0).orWhereNull('is_reconciled');
             })
@@ -320,11 +327,12 @@ export async function getReconciliationStatus(
     let operaDivergenceMessage: string | null = null;
     let operaDivergenceDirection: 'restore' | 'extra' | null = null;
     let staleStatements: StaleReconciledStatement[] = [];
-    if (appDb) {
+    if (appDb && scope) {
       try {
         const mostRecent = (await appDb('bank_statement_imports')
           .select('id', 'filename', 'statement_date', 'closing_balance', 'reconciled_at')
-          .where('bank_code', bankCode)
+          .where(scope)
+          .andWhere('bank_code', bankCode)
           .andWhere('is_reconciled', 1)
           .orderBy('reconciled_at', 'desc')
           .orderBy('statement_date', 'desc')
@@ -355,7 +363,8 @@ export async function getReconciliationStatus(
           // whose closing == nk_recbal.
           const anchor = (await appDb('bank_statement_imports')
             .select('id', 'reconciled_at', 'statement_date')
-            .where('bank_code', bankCode)
+            .where(scope)
+            .andWhere('bank_code', bankCode)
             .andWhere('is_reconciled', 1)
             .andWhereRaw('ABS(closing_balance - ?) < 0.005', [reconciledBalance])
             .orderBy('reconciled_at', 'desc')
@@ -368,7 +377,8 @@ export async function getReconciliationStatus(
           if (anchor) {
             const staleRows = (await appDb('bank_statement_imports')
               .select('id', 'filename', 'statement_date', 'closing_balance')
-              .where('bank_code', bankCode)
+              .where(scope)
+              .andWhere('bank_code', bankCode)
               .andWhere('is_reconciled', 1)
               .andWhere('id', '!=', anchor.id)
               .andWhere(function afterAnchor(this: Knex.QueryBuilder) {
@@ -434,7 +444,8 @@ export async function getReconciliationStatus(
             // Look up unreconciled candidates so the message can
             // describe the real situation.
             const matchingCount = (await appDb('bank_statement_imports')
-              .where('bank_code', bankCode)
+              .where(scope)
+              .andWhere('bank_code', bankCode)
               .andWhere('is_reconciled', 0)
               .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
                 reconciledBalance,
@@ -465,7 +476,8 @@ export async function getReconciliationStatus(
               // SAM thinks is the candidate so they can decide.
               const refused = (await appDb('bank_statement_imports')
                 .select('id', 'filename', 'statement_date')
-                .where('bank_code', bankCode)
+                .where(scope)
+                .andWhere('bank_code', bankCode)
                 .andWhere('is_reconciled', 0)
                 .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
                   reconciledBalance,
@@ -564,9 +576,11 @@ export interface OperaDivergenceRecoveryResult {
 export async function recoverFromOperaDivergence(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   opts: { user?: string } = {},
 ): Promise<OperaDivergenceRecoveryResult> {
+  const scope = companyScope(companyCode);
   try {
     const nbank = (await operaDb('nbank')
       .select(operaDb.raw('nk_recbal / 100.0 AS reconciled_balance'))
@@ -586,7 +600,8 @@ export async function recoverFromOperaDivergence(
     // divergence; nothing to clear.
     const mostRecent = (await appDb('bank_statement_imports')
       .select('id', 'closing_balance')
-      .where('bank_code', bankCode)
+      .where(scope)
+      .andWhere('bank_code', bankCode)
       .andWhere('is_reconciled', 1)
       .orderBy('reconciled_at', 'desc')
       .orderBy('statement_date', 'desc')
@@ -630,7 +645,8 @@ export async function recoverFromOperaDivergence(
       // anchor should be promoted.
       const matchingUnreconciled = (await appDb('bank_statement_imports')
         .select('id', 'filename', 'statement_date', 'closing_balance', 'statement_date')
-        .where('bank_code', bankCode)
+        .where(scope)
+        .andWhere('bank_code', bankCode)
         .andWhere('is_reconciled', 0)
         .andWhereRaw('ABS(closing_balance - ?) < 0.005', [reconciledBalance])
         .orderBy('statement_date', 'desc')
@@ -677,14 +693,15 @@ export async function recoverFromOperaDivergence(
       ];
 
       const recCount = (await appDb('bank_statement_transactions')
-        .where('import_id', matchingUnreconciled.id)
+        .where(scope)
+        .andWhere('import_id', matchingUnreconciled.id)
         .count<{ c: number }[]>({ c: '*' })
         .first()) as { c: number } | undefined;
       const reconciledLineCount = Number(recCount?.c ?? 0);
 
       const promoted = Number(
         await appDb('bank_statement_imports')
-          .where({ id: matchingUnreconciled.id })
+          .where({ ...scope, id: matchingUnreconciled.id })
           .update({
             is_reconciled: 1,
             reconciled_count: reconciledLineCount,
@@ -716,7 +733,8 @@ export async function recoverFromOperaDivergence(
     // after this anchor are stale.
     const anchor = (await appDb('bank_statement_imports')
       .select('id', 'reconciled_at')
-      .where('bank_code', bankCode)
+      .where(scope)
+      .andWhere('bank_code', bankCode)
       .andWhere('is_reconciled', 1)
       .andWhereRaw('ABS(closing_balance - ?) < 0.005', [reconciledBalance])
       .orderBy('reconciled_at', 'desc')
@@ -738,7 +756,8 @@ export async function recoverFromOperaDivergence(
 
     const stale = (await appDb('bank_statement_imports')
       .select('id', 'filename', 'statement_date', 'closing_balance')
-      .where('bank_code', bankCode)
+      .where(scope)
+      .andWhere('bank_code', bankCode)
       .andWhere('is_reconciled', 1)
       .andWhere('id', '!=', anchor.id)
       .andWhere(function afterAnchor(this: Knex.QueryBuilder) {
@@ -768,6 +787,7 @@ export async function recoverFromOperaDivergence(
     const ids = stale.map((s) => s.id);
     const cleared = Number(
       await appDb('bank_statement_imports')
+        .where(scope)
         .whereIn('id', ids)
         .update({
           is_reconciled: 0,
@@ -800,11 +820,13 @@ export async function recoverFromOperaDivergence(
  */
 async function getStatementDate(
   appDb: Knex,
+  companyCode: string,
   importId: number,
 ): Promise<string | null> {
+  const scope = companyScope(companyCode);
   const row = (await appDb('bank_statement_imports')
     .select('statement_date')
-    .where({ id: importId })
+    .where({ ...scope, id: importId })
     .first()) as { statement_date: Date | string | null } | undefined;
   return dateToYmd(row?.statement_date ?? null) || null;
 }

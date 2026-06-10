@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { confirmStatementMatches } from '../src/services/confirm-matches.js';
 
+const TEST_COMPANY = 'C';
+
 interface AppLockRow {
   id: number;
+  company_code: string;
   bank_code: string;
   locked_at: Date;
   locked_by: string;
@@ -33,7 +36,13 @@ function makeAppDb(state: AppMockState): any {
         }
         return builder;
       },
-      first: () => Promise.resolve(state.lockRows[0]),
+      andWhere: (cond: any, op?: any, val?: any) => builder.where(cond, op, val),
+      first: () => {
+        const found = state.lockRows.find((r) =>
+          Object.entries(conds).every(([k, v]) => (r as any)[k] === v),
+        );
+        return Promise.resolve(found);
+      },
       delete: () => {
         if (lessThanCol && lessThanVal) {
           const before = state.lockRows.length;
@@ -51,6 +60,7 @@ function makeAppDb(state: AppMockState): any {
       insert: (row: any) => {
         state.lockRows.push({
           id: state.nextId++,
+          company_code: String(row.company_code ?? ''),
           bank_code: row.bank_code,
           locked_at: new Date(),
           locked_by: row.locked_by ?? 'unknown',
@@ -121,6 +131,7 @@ describe('confirmStatementMatches', () => {
   it('rejects bad bank_code', async () => {
     const result = await confirmStatementMatches(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ lststno: 0, capturedSql: [], capturedParams: [] }),
       {
         bankCode: "BC';--",
@@ -136,6 +147,7 @@ describe('confirmStatementMatches', () => {
   it('rejects empty matches', async () => {
     const result = await confirmStatementMatches(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ lststno: 0, capturedSql: [], capturedParams: [] }),
       {
         bankCode: 'BC010',
@@ -155,6 +167,7 @@ describe('confirmStatementMatches', () => {
     };
     const result = await confirmStatementMatches(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       opera as any,
       {
         bankCode: 'BC999',
@@ -175,6 +188,7 @@ describe('confirmStatementMatches', () => {
     };
     const result = await confirmStatementMatches(
       makeAppDb({ lockRows: [], nextId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',

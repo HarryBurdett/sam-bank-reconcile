@@ -11,6 +11,7 @@
  * version preserves that ordering exactly.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export type EmailAttachmentKey = string; // "<email_id>:<attachment_id>"
 
@@ -59,7 +60,9 @@ const MANAGED_SYSTEMS = new Set(['archived', 'deleted', 'retained']);
 
 export async function getAllStatementTrackingData(
   appDb: Knex,
+  companyCode: string,
 ): Promise<StatementTrackingData> {
+  const scope = companyScope(companyCode);
   const data: StatementTrackingData = {
     reconciled_keys: new Set(),
     reconciled_filenames: new Set(),
@@ -83,6 +86,7 @@ export async function getAllStatementTrackingData(
   let rows: Array<Record<string, unknown>>;
   try {
     rows = (await appDb('bank_statement_imports')
+      .where(scope)
       .select(
         'id',
         'source',

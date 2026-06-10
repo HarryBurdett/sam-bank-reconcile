@@ -14,6 +14,7 @@ import type {
   ImportLockAdapter,
   PeriodOverlapChecker,
 } from './import-from-pdf.js';
+import { companyScope } from '../_shared/get-company.js';
 
 const STALE_LOCK_MS = 5 * 60 * 1000;
 const locks = new Map<string, { locker: string; acquiredAt: number }>();
@@ -34,7 +35,9 @@ export const inMemoryImportLock: ImportLockAdapter = {
 
 export function makeBankStatementOverlapChecker(
   appDb: Knex,
+  companyCode: string,
 ): PeriodOverlapChecker {
+  const scope = companyScope(companyCode);
   return {
     async checkOverlap({
       bankCode,
@@ -77,7 +80,8 @@ export function makeBankStatementOverlapChecker(
         // Exclude the current resume_import_id so a resume doesn't
         // re-trigger overlap against itself. Audit 2026-05-14 HIGH.
         const query = appDb('bank_statement_imports')
-          .where('bank_code', bankCode)
+          .where(scope)
+          .andWhere('bank_code', bankCode)
           .andWhere(function overlap(this: Knex.QueryBuilder) {
             // Two ranges overlap iff start <= other_end AND end >= other_start
             this.where('period_start', '<=', effEnd).andWhere(

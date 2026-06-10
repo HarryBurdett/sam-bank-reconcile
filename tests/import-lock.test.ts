@@ -8,8 +8,11 @@ import {
   LOCK_EXPIRY_SECONDS,
 } from '../src/services/import-lock.js';
 
+const TEST_COMPANY = 'C';
+
 interface LockRow {
   id: number;
+  company_code: string;
   bank_code: string;
   locked_at: Date;
   locked_by: string;
@@ -72,12 +75,20 @@ function makeAppDb(state: MockState): any {
         const lockedBy = (row as any).locked_by ?? 'unknown';
         const endpoint = (row as any).endpoint ?? 'unknown';
         const desc = (row as any).description ?? '';
-        // Simulate UNIQUE constraint on bank_code
-        if (state.rows.some((r) => r.bank_code === (row as any).bank_code)) {
+        const companyCode = String((row as any).company_code ?? '');
+        // Composite UNIQUE (company_code, bank_code) per migration 020.
+        if (
+          state.rows.some(
+            (r) =>
+              r.bank_code === (row as any).bank_code &&
+              r.company_code === companyCode,
+          )
+        ) {
           return Promise.reject(new Error('UNIQUE constraint'));
         }
         state.rows.push({
           id: state.nextId++,
+          company_code: companyCode,
           bank_code: String((row as any).bank_code ?? ''),
           locked_at: (row as any).locked_at instanceof Date
             ? (row as any).locked_at
@@ -103,6 +114,7 @@ function makeAppDb(state: MockState): any {
       }
       return origWhere(cond, op);
     };
+    builder.andWhere = (cond: any, op?: any, val?: any) => builder.where(cond, op, val);
     return builder;
   };
   db.fn = { now: () => new Date() };
@@ -113,7 +125,7 @@ describe('acquireImportLock + releaseImportLock', () => {
   it('acquires a lock when none held', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const ok = await acquireImportLock(db, 'BC010', {
+    const ok = await acquireImportLock(db, TEST_COMPANY, 'BC010', {
       locked_by: 'api',
       endpoint: 'import',
     });
@@ -127,19 +139,19 @@ describe('acquireImportLock + releaseImportLock', () => {
   it('refuses second acquire while held', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    expect(await acquireImportLock(db, 'BC010')).toBe(true);
-    expect(await acquireImportLock(db, 'BC010')).toBe(false);
+    expect(await acquireImportLock(db, TEST_COMPANY, 'BC010')).toBe(true);
+    expect(await acquireImportLock(db, TEST_COMPANY, 'BC010')).toBe(false);
     expect(state.rows).toHaveLength(1);
   });
 
   it('releases the lock', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    await acquireImportLock(db, 'BC010');
-    await releaseImportLock(db, 'BC010');
+    await acquireImportLock(db, TEST_COMPANY, 'BC010');
+    await releaseImportLock(db, TEST_COMPANY, 'BC010');
     expect(state.rows).toHaveLength(0);
     // Re-acquirable after release
-    expect(await acquireImportLock(db, 'BC010')).toBe(true);
+    expect(await acquireImportLock(db, TEST_COMPANY, 'BC010')).toBe(true);
   });
 
   it('cleans up stale locks before acquiring (locks older than LOCK_EXPIRY_SECONDS)', async () => {
@@ -148,6 +160,7 @@ describe('acquireImportLock + releaseImportLock', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           locked_at: stale,
           locked_by: 'old',
@@ -158,7 +171,7 @@ describe('acquireImportLock + releaseImportLock', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    const ok = await acquireImportLock(db, 'BC010', { locked_by: 'new' });
+    const ok = await acquireImportLock(db, TEST_COMPANY, 'BC010', { locked_by: 'new' });
     expect(ok).toBe(true);
     expect(state.rows).toHaveLength(1);
     expect(state.rows[0]?.locked_by).toBe('new');
@@ -170,6 +183,7 @@ describe('acquireImportLock + releaseImportLock', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           locked_at: fresh,
           locked_by: 'fresh',
@@ -180,13 +194,13 @@ describe('acquireImportLock + releaseImportLock', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    expect(await acquireImportLock(db, 'BC010')).toBe(false);
+    expect(await acquireImportLock(db, TEST_COMPANY, 'BC010')).toBe(false);
   });
 
   it('rejects empty bank code', async () => {
     const db = makeAppDb({ rows: [], nextId: 1 });
-    expect(await acquireImportLock(db, '')).toBe(false);
-    expect(await acquireImportLock(db, '   ')).toBe(false);
+    expect(await acquireImportLock(db, TEST_COMPANY, '')).toBe(false);
+    expect(await acquireImportLock(db, TEST_COMPANY, '   ')).toBe(false);
   });
 });
 
@@ -197,6 +211,7 @@ describe('getActiveLocks', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           locked_at: lockedAt,
           locked_by: 'api',
@@ -206,7 +221,7 @@ describe('getActiveLocks', () => {
       ],
       nextId: 2,
     };
-    const locks = await getActiveLocks(makeAppDb(state));
+    const locks = await getActiveLocks(makeAppDb(state), TEST_COMPANY);
     expect(locks).toHaveLength(1);
     expect(locks[0]?.bank_code).toBe('BC010');
     expect(locks[0]?.age_seconds).toBeGreaterThanOrEqual(59);
@@ -220,6 +235,7 @@ describe('withImportLock', () => {
     const db = makeAppDb(state);
     const result = await withImportLock(
       db,
+      TEST_COMPANY,
       'BC010',
       { locked_by: 'api' },
       async () => {
@@ -236,7 +252,7 @@ describe('withImportLock', () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
     await expect(
-      withImportLock(db, 'BC010', { locked_by: 'api' }, async () => {
+      withImportLock(db, TEST_COMPANY, 'BC010', { locked_by: 'api' }, async () => {
         throw new Error('inner bang');
       }),
     ).rejects.toThrow(/inner bang/);
@@ -248,6 +264,7 @@ describe('withImportLock', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           locked_at: new Date(),
           locked_by: 'other',
@@ -260,7 +277,7 @@ describe('withImportLock', () => {
     const db = makeAppDb(state);
     let caught: unknown = null;
     try {
-      await withImportLock(db, 'BC010', { locked_by: 'me' }, async () => 'ok');
+      await withImportLock(db, TEST_COMPANY, 'BC010', { locked_by: 'me' }, async () => 'ok');
     } catch (e) {
       caught = e;
     }

@@ -21,8 +21,11 @@ import {
   bankLineTrackingKey,
 } from '../src/services/bank-line-tracking.js';
 
+const TEST_COMPANY = 'C';
+
 const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   bank_code TEXT NOT NULL,
   statement_date DATE,
   period_start DATE,
@@ -31,6 +34,7 @@ const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
 
 const TRANSACTIONS_SCHEMA = `CREATE TABLE bank_statement_transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   import_id INTEGER NOT NULL,
   post_date DATE,
   amount REAL,
@@ -54,8 +58,10 @@ async function seedImport(
   db: Knex,
   bankCode: string,
   statementDate: string,
+  companyCode: string = TEST_COMPANY,
 ): Promise<number> {
   const [id] = await db('bank_statement_imports').insert({
+    company_code: companyCode,
     bank_code: bankCode,
     statement_date: statementDate,
   });
@@ -67,9 +73,10 @@ async function seedTxn(
   importId: number,
   postDate: string,
   amount: number,
-  opts: { is_reconciled?: number; posted_entry_number?: string | null } = {},
+  opts: { is_reconciled?: number; posted_entry_number?: string | null; company_code?: string } = {},
 ): Promise<void> {
   await db('bank_statement_transactions').insert({
+    company_code: opts.company_code ?? TEST_COMPANY,
     import_id: importId,
     post_date: postDate,
     amount,
@@ -88,6 +95,7 @@ describe('buildBankLineTracking', () => {
   it('returns empty map when appDb is null', async () => {
     const m = await buildBankLineTracking({
       appDb: null,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -97,6 +105,7 @@ describe('buildBankLineTracking', () => {
   it('returns empty map when scopeAnchor is null', async () => {
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: null,
     });
@@ -106,6 +115,7 @@ describe('buildBankLineTracking', () => {
   it('returns empty map when scopeAnchor is unparseable', async () => {
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: 'not-a-date',
     });
@@ -121,6 +131,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -138,6 +149,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -157,6 +169,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -172,6 +185,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005', // different bank
       scopeAnchor: '2026-05-18',
     });
@@ -185,6 +199,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -207,6 +222,7 @@ describe('buildBankLineTracking', () => {
 
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -222,6 +238,7 @@ describe('buildBankLineTracking', () => {
     await db.schema.dropTable('bank_statement_transactions');
     const m = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -243,6 +260,7 @@ describe('buildBankLineTracking', () => {
 
     const tight = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
     });
@@ -250,6 +268,7 @@ describe('buildBankLineTracking', () => {
 
     const wide = await buildBankLineTracking({
       appDb: db,
+      companyCode: TEST_COMPANY,
       bankCode: 'BB005',
       scopeAnchor: '2026-05-18',
       toleranceDays: 14,

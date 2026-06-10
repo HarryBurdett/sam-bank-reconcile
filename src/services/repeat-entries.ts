@@ -24,6 +24,7 @@ import {
   SqlInputValidationError,
 } from '../_shared/index.js';
 import { withImportLock, ImportLockError } from './import-lock.js';
+import { companyScope } from '../_shared/get-company.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -181,6 +182,7 @@ export async function listRepeatEntries(
 
 export async function updateRepeatEntryDate(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex,
   input: UpdateRepeatEntryDateInput,
 ): Promise<UpdateRepeatEntryDateResponse> {
@@ -204,9 +206,12 @@ export async function updateRepeatEntryDate(
     };
   }
 
+  const scope = companyScope(companyCode);
+
   try {
     return await withImportLock(
       appDb,
+      companyCode,
       bankCode,
       { locked_by: 'api', endpoint: 'update-repeat-entry-date' },
       async () => {
@@ -265,11 +270,11 @@ export async function updateRepeatEntryDate(
         if (statementName) {
           try {
             const existingAlias = (await appDb('repeat_entry_aliases')
-              .where({ bank_code: bankCode, memo_pattern: statementName })
+              .where({ ...scope, bank_code: bankCode, memo_pattern: statementName })
               .first()) as { id: number } | undefined;
             if (existingAlias) {
               await appDb('repeat_entry_aliases')
-                .where({ id: existingAlias.id })
+                .where({ ...scope, id: existingAlias.id })
                 .update({
                   opera_repeat_ref: entryRef,
                   // description not in this table — keep schema simple
@@ -277,6 +282,7 @@ export async function updateRepeatEntryDate(
               aliasSaved = true;
             } else {
               await appDb('repeat_entry_aliases').insert({
+                ...scope,
                 bank_code: bankCode,
                 memo_pattern: statementName,
                 opera_repeat_ref: entryRef,

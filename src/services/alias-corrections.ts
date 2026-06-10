@@ -79,6 +79,7 @@ export async function recordCorrection(
     await appDb.transaction(async (trx) => {
       // 1. Audit log
       await trx('alias_corrections').insert({
+        ...scope,
         bank_name: bankName,
         wrong_account: wrongAccount,
         correct_account: correctAccount,
@@ -122,14 +123,16 @@ export async function recordCorrection(
         });
       }
 
-      // 3. Negative example. UNIQUE(bank_name, wrong_account) — on
-      //    conflict, skip silently (matches Python's INSERT OR IGNORE).
+      // 3. Negative example. Migration 020 made the UNIQUE composite
+      //    (company_code, bank_name, wrong_account); on conflict, skip
+      //    silently (matches Python's INSERT OR IGNORE).
       const negKey = bankName.toUpperCase();
       const negExisting = (await trx('negative_aliases')
-        .where({ bank_name: negKey, wrong_account: wrongAccount })
+        .where({ ...scope, bank_name: negKey, wrong_account: wrongAccount })
         .first()) as { id: number } | undefined;
       if (!negExisting) {
         await trx('negative_aliases').insert({
+          ...scope,
           bank_name: negKey,
           wrong_account: wrongAccount,
         });
@@ -151,15 +154,17 @@ export async function recordCorrection(
 
 export async function isNegativeMatch(
   appDb: Knex,
+  companyCode: string,
   bankName: string,
   account: string,
 ): Promise<boolean> {
   const key = (bankName ?? '').trim().toUpperCase();
   const acct = (account ?? '').trim();
   if (!key || !acct) return false;
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('negative_aliases')
-      .where({ bank_name: key, wrong_account: acct })
+      .where({ ...scope, bank_name: key, wrong_account: acct })
       .first()) as { id: number } | undefined;
     return !!row;
   } catch {
@@ -205,11 +210,14 @@ function dateToIso(d: Date | string | null): string {
 
 export async function listCorrections(
   appDb: Knex,
+  companyCode: string,
   opts: ListCorrectionsOptions = {},
 ): Promise<ListCorrectionsResponse> {
+  const scope = companyScope(companyCode);
   try {
     const limit = opts.limit ?? 200;
     let query = appDb('alias_corrections')
+      .where(scope)
       .orderBy('created_at', 'desc')
       .limit(limit);
     if (opts.bankName) {

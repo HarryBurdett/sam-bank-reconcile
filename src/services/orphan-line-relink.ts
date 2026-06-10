@@ -28,6 +28,7 @@
  */
 
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface OrphanLineGroup {
   orphan_import_id: number;
@@ -60,10 +61,12 @@ export interface OrphanLineRepairResult {
  */
 export async function repairOrphanTransactionLinks(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   opts: { dryRun?: boolean } = {},
 ): Promise<OrphanLineRepairResult> {
   const dryRun = opts.dryRun ?? false;
+  const scope = companyScope(companyCode);
   try {
     // Step 1: find orphan import_id values across all transactions
     // for this bank. A row is orphan when its import_id doesn't exist
@@ -74,6 +77,7 @@ export async function repairOrphanTransactionLinks(
     // transactions, then check which ones lack a matching parent.
     const orphanIds = (await appDb('bank_statement_transactions as t')
       .leftJoin('bank_statement_imports as i', 't.import_id', 'i.id')
+      .where('t.company_code', scope.company_code)
       .whereNull('i.id')
       .distinct<{ orphan_import_id: number }[]>(
         't.import_id as orphan_import_id',
@@ -96,7 +100,8 @@ export async function repairOrphanTransactionLinks(
     const orphanGroups: OrphanLineGroup[] = [];
     for (const { orphan_import_id } of orphanIds) {
       const summary = (await appDb('bank_statement_transactions')
-        .where('import_id', orphan_import_id)
+        .where(scope)
+        .andWhere('import_id', orphan_import_id)
         .select(
           appDb.raw('COUNT(*) AS row_count'),
           appDb.raw('MIN(post_date) AS first_date'),
@@ -117,7 +122,8 @@ export async function repairOrphanTransactionLinks(
       // brackets the child date range AND whose closing balance
       // matches the orphan group's highest observed balance.
       const candidates = (await appDb('bank_statement_imports')
-        .where('bank_code', bankCode)
+        .where(scope)
+        .andWhere('bank_code', bankCode)
         .andWhereRaw('period_start IS NOT NULL')
         .andWhereRaw('period_end IS NOT NULL')
         .andWhereRaw('period_start <= ?', [summary.first_date])
@@ -194,7 +200,8 @@ export async function repairOrphanTransactionLinks(
       if (!dryRun) {
         const updated = Number(
           await appDb('bank_statement_transactions')
-            .where('import_id', g.orphan_import_id)
+            .where(scope)
+            .andWhere('import_id', g.orphan_import_id)
             .update({ import_id: g.matched_parent_import_id }),
         );
         relinkedRows += updated;

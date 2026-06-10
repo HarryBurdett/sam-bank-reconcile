@@ -109,6 +109,7 @@ interface AentryValueRow {
 export async function completeReconciliation(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
   input: CompleteReconciliationInput,
 ): Promise<CompleteReconciliationResponse> {
   const matchedEntries = input.matchedEntries ?? [];
@@ -263,7 +264,7 @@ export async function completeReconciliation(
       ? input.statementDate.toISOString().slice(0, 10)
       : (input.statementDate ?? null);
 
-  const result = await markEntriesReconciled(appDb, operaDb, {
+  const result = await markEntriesReconciled(appDb, companyCode, operaDb, {
     bankCode: input.bankCode,
     entries: entriesWithLines,
     statementNumber: input.statementNumber,

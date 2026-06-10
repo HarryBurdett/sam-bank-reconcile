@@ -57,6 +57,7 @@ interface PriorRow {
 
 export async function unreconcileEntries(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex,
   input: UnreconcileInput,
 ): Promise<UnreconcileResponse> {
@@ -81,6 +82,7 @@ export async function unreconcileEntries(
   try {
     return await withImportLock(
       appDb,
+      companyCode,
       bankCode,
       { locked_by: 'api', endpoint: 'unreconcile' },
       async () => {

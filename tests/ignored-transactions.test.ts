@@ -6,6 +6,8 @@ import {
   unignoreTransactionByMatch,
 } from '../src/services/ignored-transactions.js';
 
+const TEST_COMPANY = 'C';
+
 interface MockState {
   rows: Array<Record<string, unknown> & { id: number }>;
   nextId: number;
@@ -61,7 +63,7 @@ describe('ignoreTransaction', () => {
   it('inserts a row and returns the new record id', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await ignoreTransaction(db, {
+    const result = await ignoreTransaction(db, TEST_COMPANY, {
       bankCode: 'BC010',
       transactionDate: '2026-04-15',
       amount: 1500,
@@ -83,6 +85,7 @@ describe('listIgnoredTransactions', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           transaction_date: '2026-04-15',
           amount: 100,
@@ -94,6 +97,7 @@ describe('listIgnoredTransactions', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           transaction_date: '2026-04-16',
           amount: 200,
@@ -105,6 +109,7 @@ describe('listIgnoredTransactions', () => {
         },
         {
           id: 3,
+          company_code: TEST_COMPANY,
           bank_code: 'BC020',
           transaction_date: '2026-04-15',
           amount: 50,
@@ -118,7 +123,7 @@ describe('listIgnoredTransactions', () => {
       nextId: 4,
     };
     const db = makeAppDb(state);
-    const result = await listIgnoredTransactions(db, 'BC010');
+    const result = await listIgnoredTransactions(db, TEST_COMPANY, 'BC010');
     expect(result.success).toBe(true);
     expect(result.count).toBe(2);
     expect(result.transactions.every((t) => t.bank_code === 'BC010')).toBe(true);
@@ -128,6 +133,7 @@ describe('listIgnoredTransactions', () => {
     const state: MockState = {
       rows: Array.from({ length: 5 }, (_, i) => ({
         id: i + 1,
+        company_code: TEST_COMPANY,
         bank_code: 'BC010',
         transaction_date: '2026-04-15',
         amount: 100 + i,
@@ -140,7 +146,7 @@ describe('listIgnoredTransactions', () => {
       nextId: 6,
     };
     const db = makeAppDb(state);
-    const result = await listIgnoredTransactions(db, 'BC010', 3);
+    const result = await listIgnoredTransactions(db, TEST_COMPANY, 'BC010', 3);
     expect(result.count).toBe(3);
   });
 });
@@ -151,6 +157,7 @@ describe('unignoreTransactionById', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           transaction_date: '2026-04-15',
           amount: 100,
@@ -159,7 +166,7 @@ describe('unignoreTransactionById', () => {
       nextId: 2,
     };
     const db = makeAppDb(state);
-    const result = await unignoreTransactionById(db, 1);
+    const result = await unignoreTransactionById(db, TEST_COMPANY,1);
     expect(result.success).toBe(true);
     expect(state.rows).toHaveLength(0);
   });
@@ -167,7 +174,7 @@ describe('unignoreTransactionById', () => {
   it('returns error when record not found', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await unignoreTransactionById(db, 999);
+    const result = await unignoreTransactionById(db, TEST_COMPANY,999);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/not found/);
   });
@@ -179,12 +186,14 @@ describe('unignoreTransactionByMatch', () => {
       rows: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           transaction_date: '2026-04-15',
           amount: 100,
         } as any,
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           transaction_date: '2026-04-16',
           amount: 200,
@@ -193,7 +202,7 @@ describe('unignoreTransactionByMatch', () => {
       nextId: 3,
     };
     const db = makeAppDb(state);
-    const result = await unignoreTransactionByMatch(db, 'BC010', '2026-04-15', 100);
+    const result = await unignoreTransactionByMatch(db, TEST_COMPANY, 'BC010', '2026-04-15', 100);
     expect(result.success).toBe(true);
     expect(state.rows).toHaveLength(1);
     expect(state.rows[0]?.id).toBe(2);
@@ -202,7 +211,7 @@ describe('unignoreTransactionByMatch', () => {
   it('returns error when no match', async () => {
     const state: MockState = { rows: [], nextId: 1 };
     const db = makeAppDb(state);
-    const result = await unignoreTransactionByMatch(db, 'BC010', '2026-04-15', 100);
+    const result = await unignoreTransactionByMatch(db, TEST_COMPANY, 'BC010', '2026-04-15', 100);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/No matching/);
   });

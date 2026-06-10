@@ -7,6 +7,7 @@
  * reconciliation tracking (mark as reconciled, list pending).
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface ImportedStatement {
   id: number;
@@ -61,10 +62,12 @@ export interface MarkReconciledResponse {
 
 export async function markStatementReconciled(
   appDb: Knex,
+  companyCode: string,
   input: MarkReconciledInput,
 ): Promise<MarkReconciledResponse> {
+  const scope = companyScope(companyCode);
   try {
-    const filters: Record<string, unknown> = { filename: input.filename };
+    const filters: Record<string, unknown> = { ...scope, filename: input.filename };
     if (input.bankCode) filters.bank_code = input.bankCode;
 
     const updated = await appDb('bank_statement_imports')
@@ -122,14 +125,16 @@ export interface ImportedStatementsResponse {
  */
 export async function listImportedStatements(
   appDb: Knex,
+  companyCode: string,
   opts: ImportedStatementsOptions = {},
 ): Promise<ImportedStatementsResponse> {
+  const scope = companyScope(companyCode);
   try {
     const limit = opts.limit ?? 200;
     const targetSystem = opts.targetSystem ?? 'opera_se';
 
     let query = appDb('bank_statement_imports')
-      .where({ target_system: targetSystem })
+      .where({ ...scope, target_system: targetSystem })
       .orderBy('imported_at', 'desc')
       .limit(limit);
 

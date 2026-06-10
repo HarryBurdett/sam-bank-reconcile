@@ -8,6 +8,8 @@ import {
   type PdfExtractionResult,
 } from '../src/services/import-from-pdf.js';
 
+const TEST_COMPANY = 'C';
+
 interface OperaState {
   banks: string[];
 }
@@ -100,7 +102,7 @@ describe('importBankStatementFromPdf', () => {
     const result = await importBankStatementFromPdf(
       makeOperaDb({ banks: ['BC010'] }),
       makeAppDb(),
-      { filePath: '', bankCode: 'BC010' },
+      { filePath: '', bankCode: 'BC010', companyCode: TEST_COMPANY },
       extractor,
       executor,
       lock,
@@ -141,7 +143,7 @@ describe('importBankStatementFromPdf', () => {
       {
         filePath: 'email://812/2',
         bytes,
-        bankCode: 'BC010',
+        bankCode: 'BC010', companyCode: TEST_COMPANY,
         filename: 'Statement 15-MAY-26.pdf',
       },
       extractor,
@@ -175,7 +177,7 @@ describe('importBankStatementFromPdf', () => {
     const result = await importBankStatementFromPdf(
       makeOperaDb({ banks: [] }),
       makeAppDb(),
-      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010' },
+      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY },
       extractor,
       executor,
       lock,
@@ -202,7 +204,7 @@ describe('importBankStatementFromPdf', () => {
     const result = await importBankStatementFromPdf(
       makeOperaDb({ banks: ['BC010'] }),
       makeAppDb(),
-      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010' },
+      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY },
       extractor,
       executor,
       lock,
@@ -236,7 +238,7 @@ describe('importBankStatementFromPdf', () => {
     const result = await importBankStatementFromPdf(
       makeOperaDb({ banks: ['BC010'] }),
       makeAppDb(),
-      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010' },
+      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY },
       extractor,
       executor,
       lock,
@@ -270,7 +272,7 @@ describe('importBankStatementFromPdf', () => {
     const result = await importBankStatementFromPdf(
       makeOperaDb({ banks: ['BC010'] }),
       makeAppDb(),
-      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010' },
+      { filePath: '/tmp/stmt.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY },
       extractor,
       executor,
       lock,
@@ -306,7 +308,7 @@ describe('importBankStatementFromPdf', () => {
       makeAppDb(),
       {
         filePath: '/tmp/stmt.pdf',
-        bankCode: 'BC010',
+        bankCode: 'BC010', companyCode: TEST_COMPANY,
         autoAllocate: true,
       },
       extractor,
@@ -340,7 +342,7 @@ describe('importBankStatementFromPdf', () => {
       importBankStatementFromPdf(
         makeOperaDb({ banks: ['BC010'] }),
         makeAppDb(),
-        { filePath: '/tmp/stmt.pdf', bankCode: 'BC010' },
+        { filePath: '/tmp/stmt.pdf', bankCode: 'BC010', companyCode: TEST_COMPANY },
         extractor,
         executor,
         lock,

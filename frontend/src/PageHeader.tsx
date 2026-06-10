@@ -3,25 +3,27 @@ import { RefreshCw } from 'lucide-react';
 
 /**
  * Single source of truth for the version label rendered next to
- * every page header (e.g. "Bank Statements - Live Version 1.3").
+ * every page header (e.g. "Bank Statements - Live Version 1.4").
  * Bump on each release.
  *
- * 1.3 — Phase B1 of per-company isolation: migration 019 +
- *       companyCode plumbed through bank_import_drafts,
- *       match_config, and bank_import_aliases queries. These three
- *       tables sit in the hot path of every reconciliation and a
- *       leak there could mark statement matches against the wrong
- *       Opera company.
+ * 1.4 — Phase B2+B3 of per-company isolation: migration 020 +
+ *       companyCode plumbed through every remaining per-company
+ *       table — bank_statement_imports, bank_statement_transactions,
+ *       alias_corrections, deferred_transactions, repeat_entry_aliases,
+ *       import_locks (composite (company_code, bank_code) UNIQUE),
+ *       ignored_bank_transactions, file_archive_log,
+ *       duplicate_overrides, negative_aliases (composite UNIQUE),
+ *       extraction_cache, ai_suggestions. Cross-tenant isolation
+ *       is now complete across the entire plugin.
  *
- * 1.2 — Phase A of per-company isolation: migration 018 +
- *       companyScope fail-loud helper + companyCode plumbed through
- *       getRecurringEntriesMode / setRecurringEntriesMode /
- *       getFolderSettings / saveFolderSettings /
- *       createFolderBackedFileStorage / createFolderBackedPdfContentReader /
- *       scanAllBanksFaithful / checkRecurringEntries.
- *       Mirrors sam-gocardless 1.2.0.
+ * 1.3 — Phase B1: migration 019 + companyCode plumbed through
+ *       bank_import_drafts, match_config, and bank_import_aliases.
+ *
+ * 1.2 — Phase A: migration 018 + companyScope fail-loud helper +
+ *       companyCode plumbed through settings, folder-settings,
+ *       folder-backed-storage, scan-all-banks, check-recurring-entries.
  */
-export const LIVE_VERSION = '1.3';
+export const LIVE_VERSION = '1.4';
 
 interface PageHeaderProps {
   icon: React.ComponentType<{ className?: string }>;

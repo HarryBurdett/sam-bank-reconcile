@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { persistImportDecisions } from '../src/services/persist-decisions.js';
 
+const TEST_COMPANY = 'C';
+
 interface ImportRow {
   id: number;
+  company_code: string;
   bank_code: string;
   filename: string;
   source: string;
@@ -16,6 +19,7 @@ interface ImportRow {
 
 interface DeferredRow {
   id: number;
+  company_code: string;
   bank_code: string;
   post_date: string | null;
   amount: number;
@@ -75,6 +79,7 @@ function makeAppDb(state: MockState): any {
             const id = state.nextImportId++;
             state.imports.push({
               id,
+              company_code: String((row as any).company_code ?? ''),
               bank_code: String(row.bank_code ?? ''),
               filename: String(row.filename ?? ''),
               source: String(row.source ?? 'file'),
@@ -120,6 +125,7 @@ function makeAppDb(state: MockState): any {
           const id = state.nextDeferredId++;
           state.deferred.push({
             id,
+            company_code: String((row as any).company_code ?? ''),
             bank_code: String(row.bank_code ?? ''),
             post_date: (row.post_date as string) ?? null,
             amount: Number(row.amount ?? 0),
@@ -141,6 +147,7 @@ describe('persistImportDecisions - validation', () => {
   it('rejects missing bank_code', async () => {
     const result = await persistImportDecisions(
       makeAppDb({ imports: [], deferred: [], nextImportId: 1, nextDeferredId: 1 }),
+      TEST_COMPANY,
       { bankCode: '', filename: 'x.pdf', source: 'pdf' },
     );
     expect(result.success).toBe(false);
@@ -150,6 +157,7 @@ describe('persistImportDecisions - validation', () => {
   it('rejects missing filename', async () => {
     const result = await persistImportDecisions(
       makeAppDb({ imports: [], deferred: [], nextImportId: 1, nextDeferredId: 1 }),
+      TEST_COMPANY,
       { bankCode: 'BC010', filename: '', source: 'pdf' },
     );
     expect(result.success).toBe(false);
@@ -164,7 +172,7 @@ describe('persistImportDecisions - happy path', () => {
       nextImportId: 1,
       nextDeferredId: 1,
     };
-    const result = await persistImportDecisions(makeAppDb(state), {
+    const result = await persistImportDecisions(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       filename: 'Statement-Apr.pdf',
       source: 'pdf',
@@ -195,6 +203,7 @@ describe('persistImportDecisions - happy path', () => {
       imports: [
         {
           id: 99,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           filename: 'Statement-Apr.pdf',
           source: 'file',
@@ -210,7 +219,7 @@ describe('persistImportDecisions - happy path', () => {
       nextImportId: 100,
       nextDeferredId: 1,
     };
-    const result = await persistImportDecisions(makeAppDb(state), {
+    const result = await persistImportDecisions(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       filename: 'Statement-Apr.pdf',
       source: 'pdf',
@@ -229,6 +238,7 @@ describe('persistImportDecisions - happy path', () => {
       deferred: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           post_date: '2026-04-12',
           amount: 50,
@@ -239,7 +249,7 @@ describe('persistImportDecisions - happy path', () => {
       nextImportId: 1,
       nextDeferredId: 2,
     };
-    await persistImportDecisions(makeAppDb(state), {
+    await persistImportDecisions(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       filename: 'X.pdf',
       source: 'pdf',
@@ -263,6 +273,7 @@ describe('persistImportDecisions - happy path', () => {
       deferred: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           post_date: '2026-03-15', // outside Apr period
           amount: 50,
@@ -271,6 +282,7 @@ describe('persistImportDecisions - happy path', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           post_date: '2026-04-12', // inside
           amount: 60,
@@ -281,7 +293,7 @@ describe('persistImportDecisions - happy path', () => {
       nextImportId: 1,
       nextDeferredId: 3,
     };
-    await persistImportDecisions(makeAppDb(state), {
+    await persistImportDecisions(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       filename: 'X.pdf',
       source: 'pdf',
@@ -301,6 +313,7 @@ describe('persistImportDecisions - happy path', () => {
       deferred: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           post_date: '2026-03-15',
           amount: 50,
@@ -309,6 +322,7 @@ describe('persistImportDecisions - happy path', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           bank_code: 'BC010',
           post_date: '2026-04-12',
           amount: 60,
@@ -319,7 +333,7 @@ describe('persistImportDecisions - happy path', () => {
       nextImportId: 1,
       nextDeferredId: 3,
     };
-    await persistImportDecisions(makeAppDb(state), {
+    await persistImportDecisions(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BC010',
       filename: 'X.pdf',
       source: 'pdf',

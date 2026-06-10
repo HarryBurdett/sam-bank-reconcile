@@ -38,6 +38,7 @@
  */
 
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface SelfHealResult {
   promoted: boolean;
@@ -71,9 +72,11 @@ function dateToYmd(d: Date | string | null | undefined): string {
 export async function selfHealBalanceMatch(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   opts: { user?: string } = {},
 ): Promise<SelfHealResult> {
+  const scope = companyScope(companyCode);
   // 1. Opera's reconciled balance — the source of truth.
   const nbank = (await operaDb('nbank')
     .select(operaDb.raw('nk_recbal / 100.0 AS reconciled_balance'))
@@ -85,7 +88,8 @@ export async function selfHealBalanceMatch(
   // 2. SAM's most-recently-reconciled statement.
   const mostRecent = (await appDb('bank_statement_imports')
     .select('id', 'statement_date', 'closing_balance')
-    .where('bank_code', bankCode)
+    .where(scope)
+    .andWhere('bank_code', bankCode)
     .andWhere('is_reconciled', 1)
     .orderBy('reconciled_at', 'desc')
     .orderBy('statement_date', 'desc')
@@ -120,7 +124,8 @@ export async function selfHealBalanceMatch(
   //    nk_recbal exactly.
   const candidates = (await appDb('bank_statement_imports')
     .select('id', 'filename', 'statement_date', 'closing_balance')
-    .where('bank_code', bankCode)
+    .where(scope)
+    .andWhere('bank_code', bankCode)
     .andWhere('is_reconciled', 0)
     .andWhereRaw('ABS(closing_balance - ?) < 0.005', [recBal])
     .orderBy('statement_date', 'desc')) as Array<{
@@ -157,12 +162,13 @@ export async function selfHealBalanceMatch(
 
   // All safety conditions met. Promote.
   const recCountRow = (await appDb('bank_statement_transactions')
-    .where('import_id', target.id)
+    .where(scope)
+    .andWhere('import_id', target.id)
     .count<{ c: number }[]>({ c: '*' })
     .first()) as { c: number } | undefined;
   const reconciledCount = Number(recCountRow?.c ?? 0);
 
-  await appDb('bank_statement_imports').where({ id: target.id }).update({
+  await appDb('bank_statement_imports').where({ ...scope, id: target.id }).update({
     is_reconciled: 1,
     reconciled_count: reconciledCount,
     reconciled_at: appDb.fn.now(),

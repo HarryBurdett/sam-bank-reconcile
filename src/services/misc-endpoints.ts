@@ -21,6 +21,7 @@
  * requirements when the dependencies aren't wired.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 import type { FileStorageAdapter } from './archive.js';
 import type {
   EmailAttachmentProvider,
@@ -380,12 +381,15 @@ function pickBank(
  */
 async function loadAlreadyProcessed(
   appDb: Knex | null,
+  companyCode: string,
 ): Promise<{ emailIds: Set<number>; filenames: Set<string> }> {
   const emailIds = new Set<number>();
   const filenames = new Set<string>();
   if (!appDb) return { emailIds, filenames };
+  const scope = companyScope(companyCode);
   try {
     const rows = (await appDb('bank_statement_imports')
+      .where(scope)
       .select('source', 'source_ref')) as Array<{
       source: string | null;
       source_ref: string | null;
@@ -444,6 +448,7 @@ export async function scanAllBanks(
   operaDb: Knex,
   mailbox: BankMailboxAdapter | null = null,
   appDb: Knex | null = null,
+  companyCode: string = '',
   opts: ScanAllBanksOptions = {},
 ): Promise<ScanAllBanksResponse> {
   const daysBack = Number.isFinite(opts.daysBack) ? Number(opts.daysBack) : 30;
@@ -520,7 +525,7 @@ export async function scanAllBanks(
     try {
       const { emails } = await mailbox.list({ fromDate, pageSize });
       totalEmailsScanned = emails.length;
-      const { emailIds, filenames } = await loadAlreadyProcessed(appDb);
+      const { emailIds, filenames } = await loadAlreadyProcessed(appDb, companyCode);
 
       for (const email of emails) {
         const attachments = email.attachments ?? [];
@@ -790,6 +795,7 @@ export interface StatementReviewSummary {
 
 export async function getStatementReview(
   appDb: Knex,
+  companyCode: string,
   importId: number,
 ): Promise<{
   success: boolean;
@@ -799,9 +805,10 @@ export async function getStatementReview(
   if (!Number.isFinite(importId) || importId <= 0) {
     return { success: false, error: 'invalid import_id' };
   }
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('bank_statement_imports')
-      .where({ id: importId })
+      .where({ ...scope, id: importId })
       .first()) as
       | {
           id: number;

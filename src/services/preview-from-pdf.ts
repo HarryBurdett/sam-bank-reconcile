@@ -579,6 +579,7 @@ export async function previewBankImportFromPdf(
   // cases, just no extra gating.
   const trackedByKey = await buildBankLineTracking({
     appDb,
+    companyCode,
     bankCode: bank.code,
     scopeAnchor:
       extracted.statement_date ?? extracted.period_end ?? extracted.period_start ?? null,

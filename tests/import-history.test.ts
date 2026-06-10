@@ -5,8 +5,11 @@ import {
   clearImportHistory,
 } from '../src/services/import-history.js';
 
+const TEST_COMPANY = 'C';
+
 interface ImportRow {
   id: number;
+  company_code: string;
   bank_code: string;
   filename: string | null;
   statement_date: string | null;
@@ -104,6 +107,7 @@ function makeAppDb(state: MockState): any {
 function emptyRow(over: Partial<ImportRow> = {}): ImportRow {
   return {
     id: 1,
+    company_code: TEST_COMPANY,
     bank_code: 'BANK01',
     filename: 'stmt.pdf',
     statement_date: '2026-04-01',
@@ -141,7 +145,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 2, imported_at: '2026-04-15T10:00:00Z' }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state));
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY);
     expect(result.success).toBe(true);
     expect(result.count).toBe(2);
     expect(result.imports[0]?.id).toBe(2);
@@ -154,7 +158,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 2, bank_code: 'BANK02' }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state), {
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BANK02',
     });
     expect(result.count).toBe(1);
@@ -169,7 +173,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 3, statement_date: '2026-05-15' }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state), {
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY, {
       fromDate: '2026-04-01',
       toDate: '2026-04-30',
     });
@@ -186,7 +190,7 @@ describe('listImportHistory', () => {
         }),
       ),
     };
-    const result = await listImportHistory(makeAppDb(state), { limit: 3 });
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY, { limit: 3 });
     expect(result.count).toBe(3);
   });
 
@@ -197,7 +201,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 2, target_system: 'opera3' }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state));
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY);
     expect(result.count).toBe(1);
     expect(result.imports[0]?.target_system).toBe('opera_se');
   });
@@ -209,7 +213,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 2, target_system: 'opera3' }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state), {
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY, {
       targetSystem: 'opera3',
     });
     expect(result.count).toBe(1);
@@ -223,7 +227,7 @@ describe('listImportHistory', () => {
         emptyRow({ id: 2, is_reconciled: 0 }),
       ],
     };
-    const result = await listImportHistory(makeAppDb(state));
+    const result = await listImportHistory(makeAppDb(state), TEST_COMPANY);
     const map = Object.fromEntries(
       result.imports.map((r) => [r.id, r.is_reconciled]),
     );
@@ -239,21 +243,21 @@ describe('listImportHistory', () => {
 describe('deleteImportRecord', () => {
   it('deletes the row and returns success', async () => {
     const state: MockState = { rows: [emptyRow({ id: 42 })] };
-    const result = await deleteImportRecord(makeAppDb(state), 42);
+    const result = await deleteImportRecord(makeAppDb(state), TEST_COMPANY,42);
     expect(result.success).toBe(true);
     expect(state.rows).toHaveLength(0);
   });
 
   it('returns 404-style error when record_id missing', async () => {
     const state: MockState = { rows: [] };
-    const result = await deleteImportRecord(makeAppDb(state), 99);
+    const result = await deleteImportRecord(makeAppDb(state), TEST_COMPANY,99);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/not found/);
   });
 
   it('rejects invalid record_id', async () => {
     const state: MockState = { rows: [] };
-    const result = await deleteImportRecord(makeAppDb(state), NaN);
+    const result = await deleteImportRecord(makeAppDb(state), TEST_COMPANY,NaN);
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Invalid/);
   });
@@ -268,7 +272,7 @@ describe('clearImportHistory', () => {
     const state: MockState = {
       rows: [emptyRow({ id: 1 }), emptyRow({ id: 2 })],
     };
-    const result = await clearImportHistory(makeAppDb(state));
+    const result = await clearImportHistory(makeAppDb(state), TEST_COMPANY);
     expect(result.success).toBe(true);
     expect(result.deleted_count).toBe(2);
     expect(state.rows).toHaveLength(0);
@@ -281,7 +285,7 @@ describe('clearImportHistory', () => {
         emptyRow({ id: 2, bank_code: 'BANK02' }),
       ],
     };
-    const result = await clearImportHistory(makeAppDb(state), {
+    const result = await clearImportHistory(makeAppDb(state), TEST_COMPANY, {
       bankCode: 'BANK01',
     });
     expect(result.deleted_count).toBe(1);
@@ -297,7 +301,7 @@ describe('clearImportHistory', () => {
         emptyRow({ id: 3, statement_date: '2026-05-15' }),
       ],
     };
-    const result = await clearImportHistory(makeAppDb(state), {
+    const result = await clearImportHistory(makeAppDb(state), TEST_COMPANY, {
       fromDate: '2026-04-01',
       toDate: '2026-04-30',
     });

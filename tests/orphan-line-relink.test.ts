@@ -12,8 +12,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import knexLib, { type Knex } from 'knex';
 import { repairOrphanTransactionLinks } from '../src/services/orphan-line-relink.js';
 
+const TEST_COMPANY = 'C';
+
 const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   bank_code TEXT NOT NULL,
   statement_date DATE,
   period_start DATE,
@@ -25,6 +28,7 @@ const IMPORTS_SCHEMA = `CREATE TABLE bank_statement_imports (
 
 const TXNS_SCHEMA = `CREATE TABLE bank_statement_transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company_code TEXT,
   import_id INTEGER NOT NULL,
   line_number INTEGER NOT NULL,
   post_date DATE NOT NULL,
@@ -54,17 +58,17 @@ describe('orphan-line repair', () => {
 
   it('reports zero orphans when everything is linked', async () => {
     await db('bank_statement_imports').insert({
-      id: 1, bank_code: 'BC010', statement_date: '2026-04-17',
+      id: 1, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
       period_start: '2026-04-13', period_end: '2026-04-17',
       closing_balance: 119822.40, filename: '17-APR.pdf',
     });
     await db('bank_statement_transactions').insert([
-      { import_id: 1, line_number: 1, post_date: '2026-04-13',
+      { company_code: TEST_COMPANY, import_id: 1, line_number: 1, post_date: '2026-04-13',
         amount: -100, balance: 119722.40 },
-      { import_id: 1, line_number: 2, post_date: '2026-04-17',
+      { company_code: TEST_COMPANY, import_id: 1, line_number: 2, post_date: '2026-04-17',
         amount: 100, balance: 119822.40 },
     ]);
-    const result = await repairOrphanTransactionLinks(db, 'BC010');
+    const result = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010');
     expect(result.success).toBe(true);
     expect(result.orphan_groups).toEqual([]);
     expect(result.relinked_rows).toBe(0);
@@ -75,17 +79,17 @@ describe('orphan-line repair', () => {
     // at import_id=67. Period brackets the orphan dates AND the
     // orphan's highest balance matches the parent's closing.
     await db('bank_statement_imports').insert({
-      id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+      id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
       period_start: '2026-04-13', period_end: '2026-04-17',
       closing_balance: 119822.40, filename: '17-APR.pdf',
     });
     await db('bank_statement_transactions').insert([
-      { import_id: 67, line_number: 1, post_date: '2026-04-13',
+      { company_code: TEST_COMPANY, import_id: 67, line_number: 1, post_date: '2026-04-13',
         amount: -100, balance: 119722.40 },
-      { import_id: 67, line_number: 2, post_date: '2026-04-17',
+      { company_code: TEST_COMPANY, import_id: 67, line_number: 2, post_date: '2026-04-17',
         amount: 100, balance: 119822.40 },
     ]);
-    const result = await repairOrphanTransactionLinks(db, 'BC010');
+    const result = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010');
     expect(result.success).toBe(true);
     expect(result.orphan_groups).toHaveLength(1);
     expect(result.orphan_groups[0]?.orphan_import_id).toBe(67);
@@ -103,15 +107,15 @@ describe('orphan-line repair', () => {
 
   it('dry-run reports intent without mutating', async () => {
     await db('bank_statement_imports').insert({
-      id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+      id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
       period_start: '2026-04-13', period_end: '2026-04-17',
       closing_balance: 119822.40,
     });
     await db('bank_statement_transactions').insert({
-      import_id: 67, line_number: 1, post_date: '2026-04-15',
+      company_code: TEST_COMPANY, import_id: 67, line_number: 1, post_date: '2026-04-15',
       amount: -50, balance: 119822.40,
     });
-    const dryRun = await repairOrphanTransactionLinks(db, 'BC010', { dryRun: true });
+    const dryRun = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010', { dryRun: true });
     expect(dryRun.dry_run).toBe(true);
     expect(dryRun.relinked_rows).toBe(1);
     // Verify NOT actually changed
@@ -123,18 +127,18 @@ describe('orphan-line repair', () => {
   it('refuses to relink when multiple parents share the same closing balance', async () => {
     // Two parent rows with the same closing balance — ambiguous.
     await db('bank_statement_imports').insert([
-      { id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+      { id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
         period_start: '2026-04-13', period_end: '2026-04-17',
         closing_balance: 119822.40 },
-      { id: 25, bank_code: 'BC010', statement_date: '2026-04-27',
+      { id: 25, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-27',
         period_start: '2026-04-10', period_end: '2026-04-30',
         closing_balance: 119822.40 },
     ]);
     await db('bank_statement_transactions').insert({
-      import_id: 67, line_number: 1, post_date: '2026-04-15',
+      company_code: TEST_COMPANY, import_id: 67, line_number: 1, post_date: '2026-04-15',
       amount: -50, balance: 119822.40,
     });
-    const result = await repairOrphanTransactionLinks(db, 'BC010');
+    const result = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010');
     expect(result.orphan_groups[0]?.matched_parent_import_id).toBeNull();
     expect(result.orphan_groups[0]?.match_reason).toContain('ambiguous');
     expect(result.relinked_groups).toBe(0);
@@ -143,50 +147,53 @@ describe('orphan-line repair', () => {
 
   it('falls back to unique period match when closing balance differs', async () => {
     await db('bank_statement_imports').insert({
-      id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+      id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
       period_start: '2026-04-13', period_end: '2026-04-17',
       closing_balance: 119822.40,
     });
     // Orphan dates fall in the period but the balance is different
     // (e.g. legacy data has a slightly different running balance)
     await db('bank_statement_transactions').insert({
-      import_id: 67, line_number: 1, post_date: '2026-04-15',
+      company_code: TEST_COMPANY, import_id: 67, line_number: 1, post_date: '2026-04-15',
       amount: -50, balance: 100000,
     });
-    const result = await repairOrphanTransactionLinks(db, 'BC010');
+    const result = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010');
     expect(result.orphan_groups[0]?.matched_parent_import_id).toBe(24);
     expect(result.orphan_groups[0]?.match_reason).toContain('unique period bracket');
   });
 
   it('handles the full intsys scenario — 3 orphan groups → 3 parents', async () => {
     await db('bank_statement_imports').insert([
-      { id: 24, bank_code: 'BC010', statement_date: '2026-04-17',
+      { id: 24, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-17',
         period_start: '2026-04-13', period_end: '2026-04-17',
         closing_balance: 119822.40, filename: '17-APR.pdf' },
-      { id: 25, bank_code: 'BC010', statement_date: '2026-04-27',
+      { id: 25, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-04-27',
         period_start: '2026-04-20', period_end: '2026-04-24',
         closing_balance: 116726.07, filename: '24-APR.pdf' },
-      { id: 27, bank_code: 'BC010', statement_date: '2026-05-01',
+      { id: 27, company_code: TEST_COMPANY, bank_code: 'BC010', statement_date: '2026-05-01',
         period_start: '2026-04-27', period_end: '2026-05-01',
         closing_balance: 115064.71, filename: '01-MAY.pdf' },
     ]);
     // Orphan groups matching each parent's period+balance
     const orphans = [
       ...Array.from({ length: 17 }, (_, i) => ({
+        company_code: TEST_COMPANY,
         import_id: 67, line_number: i + 1, post_date: '2026-04-15',
         amount: -100, balance: i === 16 ? 119822.40 : 119722.40,
       })),
       ...Array.from({ length: 24 }, (_, i) => ({
+        company_code: TEST_COMPANY,
         import_id: 68, line_number: i + 1, post_date: '2026-04-22',
         amount: -100, balance: i === 23 ? 116726.07 : 116626.07,
       })),
       ...Array.from({ length: 36 }, (_, i) => ({
+        company_code: TEST_COMPANY,
         import_id: 71, line_number: i + 1, post_date: '2026-04-30',
         amount: -100, balance: i === 35 ? 115064.71 : 114964.71,
       })),
     ];
     await db('bank_statement_transactions').insert(orphans);
-    const result = await repairOrphanTransactionLinks(db, 'BC010');
+    const result = await repairOrphanTransactionLinks(db, TEST_COMPANY, 'BC010');
     expect(result.relinked_groups).toBe(3);
     expect(result.relinked_rows).toBe(17 + 24 + 36);
     expect(result.unmatched_groups).toBe(0);

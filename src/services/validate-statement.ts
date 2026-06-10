@@ -13,6 +13,7 @@
  *      number supplied by the caller).
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface ValidateStatementInput {
   bankAccount: string;
@@ -29,6 +30,8 @@ export interface ValidateStatementInput {
    *  nbank.nk_recbal hasn't been advanced yet. Faithful port of
    *  routes.py:1504 imported_pending_closings. */
   appDb?: Knex | null;
+  /** Opera company code (required when appDb is set). */
+  companyCode?: string | null;
 }
 
 export interface ValidateStatementResponse {
@@ -101,12 +104,13 @@ export async function validateStatementForReconciliation(
     // closing equals the supplied opening (within 1p). Faithful port
     // of routes.py:1504 + _build_imported_pending_closings(92).
     if (!openingMatches && input.appDb) {
+      const scope = companyScope(input.companyCode ?? '');
       try {
         // Row existence implies "imported" — the `import_status` column
         // was dropped from the SAM SQLite schema (no such column); the
         // earlier filter on it was a silent error in the .catch below.
         const rows = (await input.appDb('bank_statement_imports')
-          .where({ bank_code: bankAccount })
+          .where({ ...scope, bank_code: bankAccount })
           .andWhere((qb) => {
             qb.where('is_reconciled', false)
               .orWhereNull('is_reconciled')

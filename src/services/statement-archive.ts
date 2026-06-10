@@ -18,6 +18,7 @@
  */
 import type { Knex } from 'knex';
 import type { FileStorageAdapter } from './archive.js';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface ArchivedStatement {
   id: number;
@@ -34,15 +35,17 @@ export interface ArchivedStatement {
 
 export async function archiveStatement(
   appDb: Knex,
+  companyCode: string,
   importId: number,
   by: string,
 ): Promise<{ success: boolean; error?: string }> {
   if (!Number.isFinite(importId) || importId <= 0) {
     return { success: false, error: 'invalid import_id' };
   }
+  const scope = companyScope(companyCode);
   try {
     const updated = await appDb('bank_statement_imports')
-      .where({ id: importId })
+      .where({ ...scope, id: importId })
       .update({
         import_status: 'archived',
         archived_at: appDb.fn.now(),
@@ -57,6 +60,7 @@ export async function archiveStatement(
 
 export async function listArchivedStatements(
   appDb: Knex,
+  companyCode: string,
   bankCode?: string | null,
   limit = 200,
 ): Promise<{
@@ -65,9 +69,10 @@ export async function listArchivedStatements(
   count: number;
   error?: string;
 }> {
+  const scope = companyScope(companyCode);
   try {
     let q = appDb('bank_statement_imports')
-      .where({ import_status: 'archived' })
+      .where({ ...scope, import_status: 'archived' })
       .orderBy('archived_at', 'desc')
       .limit(limit);
     if (bankCode) q = q.andWhere('bank_code', bankCode);
@@ -115,11 +120,13 @@ export async function listArchivedStatements(
 
 export async function restoreStatement(
   appDb: Knex,
+  companyCode: string,
   importId: number,
 ): Promise<{ success: boolean; error?: string }> {
+  const scope = companyScope(companyCode);
   try {
     const updated = await appDb('bank_statement_imports')
-      .where({ id: importId, import_status: 'archived' })
+      .where({ ...scope, id: importId, import_status: 'archived' })
       .update({
         import_status: 'imported',
         archived_at: null,
@@ -135,6 +142,7 @@ export async function restoreStatement(
 
 export async function getArchivedStatementPdf(
   appDb: Knex,
+  companyCode: string,
   storage: FileStorageAdapter | null,
   recordId: number,
 ): Promise<{
@@ -149,9 +157,10 @@ export async function getArchivedStatementPdf(
       error: 'ctx.fileStorage adapter not configured.',
     };
   }
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('bank_statement_imports')
-      .where({ id: recordId })
+      .where({ ...scope, id: recordId })
       .first()) as { source_ref?: string | null } | undefined;
     if (!row) return { success: false, error: 'Statement not found' };
     // Storage adapter is filesystem-bound; we surface the path for
@@ -167,11 +176,13 @@ export async function getArchivedStatementPdf(
 
 export async function deleteArchivedStatement(
   appDb: Knex,
+  companyCode: string,
   recordId: number,
 ): Promise<{ success: boolean; error?: string }> {
+  const scope = companyScope(companyCode);
   try {
     const deleted = await appDb('bank_statement_imports')
-      .where({ id: recordId, import_status: 'archived' })
+      .where({ ...scope, id: recordId, import_status: 'archived' })
       .delete();
     if (!deleted) return { success: false, error: 'Archived statement not found' };
     return { success: true };
@@ -194,6 +205,7 @@ export interface ManageStatementsRow {
 
 export async function manageStatements(
   appDb: Knex,
+  companyCode: string,
   bankCode: string | null,
   includeArchived: boolean,
 ): Promise<{
@@ -202,8 +214,11 @@ export async function manageStatements(
   count: number;
   error?: string;
 }> {
+  const scope = companyScope(companyCode);
   try {
-    let q = appDb('bank_statement_imports').orderBy('imported_at', 'desc');
+    let q = appDb('bank_statement_imports')
+      .where(scope)
+      .orderBy('imported_at', 'desc');
     if (bankCode) q = q.where('bank_code', bankCode);
     if (!includeArchived) q = q.whereNot('import_status', 'archived');
     const rows = (await q) as unknown as Array<{

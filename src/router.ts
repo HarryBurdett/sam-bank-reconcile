@@ -473,6 +473,8 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/reconcile/bank/:bank_code/status', async (req, res) => {
     const operaDb = getOperaDb(req, res);
     if (!operaDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
@@ -487,6 +489,7 @@ export function createRouter(ctx: AppContext): Router {
         operaDb,
         bankCode,
         ctx.db.app,
+        company,
         currentFilename,
       );
       // Per-line orphan check — wider net than the statement-level
@@ -498,6 +501,7 @@ export function createRouter(ctx: AppContext): Router {
           const orphans = await checkOrphanedTransactions(
             operaDb,
             ctx.db.app,
+            company,
             bankCode,
           );
           if (orphans.success && orphans.orphan_line_count > 0) {
@@ -546,13 +550,15 @@ export function createRouter(ctx: AppContext): Router {
     if (!operaDb) return;
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
         res.status(400).json({ success: false, error: 'Missing bank_code' });
         return;
       }
-      const result = await checkOrphanedTransactions(operaDb, appDb, bankCode);
+      const result = await checkOrphanedTransactions(operaDb, appDb, company, bankCode);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Orphan transactions check failed', err);
@@ -574,13 +580,15 @@ export function createRouter(ctx: AppContext): Router {
     if (!operaDb) return;
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
         res.status(400).json({ success: false, error: 'Missing bank_code' });
         return;
       }
-      const result = await recoverOrphanedTransactions(operaDb, appDb, bankCode);
+      const result = await recoverOrphanedTransactions(operaDb, appDb, company, bankCode);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Orphan transactions recovery failed', err);
@@ -606,13 +614,15 @@ export function createRouter(ctx: AppContext): Router {
     if (!operaDb) return;
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
         res.status(400).json({ success: false, error: 'Missing bank_code' });
         return;
       }
-      const result = await recoverFromOperaDivergence(operaDb, appDb, bankCode);
+      const result = await recoverFromOperaDivergence(operaDb, appDb, company, bankCode);
       if (!result.success) {
         res.status(500).json(result);
         return;
@@ -641,6 +651,8 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
@@ -650,7 +662,7 @@ export function createRouter(ctx: AppContext): Router {
       const { repairOrphanTransactionLinks } = await import(
         './services/orphan-line-relink.js'
       );
-      const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+      const result = await repairOrphanTransactionLinks(appDb, company, bankCode, {
         dryRun: true,
       });
       res.json(result);
@@ -663,6 +675,8 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/reconcile/bank/:bank_code/repair-orphan-links', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       if (!bankCode) {
@@ -672,7 +686,7 @@ export function createRouter(ctx: AppContext): Router {
       const { repairOrphanTransactionLinks } = await import(
         './services/orphan-line-relink.js'
       );
-      const result = await repairOrphanTransactionLinks(appDb, bankCode, {
+      const result = await repairOrphanTransactionLinks(appDb, company, bankCode, {
         dryRun: false,
       });
       if (!result.success) {
@@ -707,7 +721,9 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
-      const result = await ignoreTransaction(appDb, {
+      const company = requireCompany(req, res);
+      if (!company) return;
+      const result = await ignoreTransaction(appDb, company, {
         bankCode,
         transactionDate: tx,
         amount: amt,
@@ -735,7 +751,9 @@ export function createRouter(ctx: AppContext): Router {
     try {
       const bankCode = String(req.params.bank_code ?? '').trim();
       const limit = req.query.limit ? Number(req.query.limit) : 100;
-      const result = await listIgnoredTransactions(appDb, bankCode, limit);
+      const company = requireCompany(req, res);
+      if (!company) return;
+      const result = await listIgnoredTransactions(appDb, company, bankCode, limit);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('List ignored transactions failed', err);
@@ -758,7 +776,9 @@ export function createRouter(ctx: AppContext): Router {
         res.status(400).json({ success: false, error: 'Invalid record_id' });
         return;
       }
-      const result = await unignoreTransactionById(appDb, recordId);
+      const company = requireCompany(req, res);
+      if (!company) return;
+      const result = await unignoreTransactionById(appDb, company, recordId);
       if (!result.success && result.error === 'Record not found') {
         res.status(404).json(result);
         return;
@@ -790,7 +810,9 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
-      const result = await unignoreTransactionByMatch(appDb, bankCode, tx, amt);
+      const company = requireCompany(req, res);
+      if (!company) return;
+      const result = await unignoreTransactionByMatch(appDb, company, bankCode, tx, amt);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Unignore (by match) failed', err);
@@ -807,6 +829,8 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/statement-files/mark-reconciled', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const filename = String(req.query.filename ?? '').trim();
       const bankCode = typeof req.query.bank_code === 'string' ? req.query.bank_code : null;
@@ -817,7 +841,7 @@ export function createRouter(ctx: AppContext): Router {
         res.status(400).json({ success: false, error: 'filename is required' });
         return;
       }
-      const result = await markStatementReconciled(appDb, {
+      const result = await markStatementReconciled(appDb, company, {
         filename,
         bankCode,
         reconciledCount,
@@ -839,11 +863,13 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/statement-files/imported-for-reconciliation', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const bankCode = typeof req.query.bank_code === 'string' ? req.query.bank_code : null;
       const limit = req.query.limit ? Number(req.query.limit) : 200;
       const includeReconciled = req.query.include_reconciled === 'true';
-      const result = await listImportedStatements(appDb, {
+      const result = await listImportedStatements(appDb, company, {
         bankCode,
         limit,
         includeReconciled,
@@ -1199,6 +1225,8 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const transactionHash = String(req.query.transaction_hash ?? '').trim();
         const reason = String(req.query.reason ?? '').trim();
@@ -1214,7 +1242,7 @@ export function createRouter(ctx: AppContext): Router {
           res.status(400).json({ success: false, error: 'reason is required' });
           return;
         }
-        const result = await recordDuplicateOverride(appDb, {
+        const result = await recordDuplicateOverride(appDb, company, {
           transactionHash,
           reason,
           userCode,
@@ -1622,6 +1650,8 @@ export function createRouter(ctx: AppContext): Router {
       if (!operaDb) return;
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const bankCode = String(req.params.bank_code ?? '');
         const body = req.body as
@@ -1640,7 +1670,7 @@ export function createRouter(ctx: AppContext): Router {
           });
           return;
         }
-        const result = await unreconcileEntries(appDb, operaDb, {
+        const result = await unreconcileEntries(appDb, company, operaDb, {
           bankCode,
           entryNumbers,
         });
@@ -1683,6 +1713,8 @@ export function createRouter(ctx: AppContext): Router {
       if (!operaDb) return;
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const bankCode = String(req.params.bank_code ?? '');
         const body = (req.body ?? {}) as {
@@ -1693,7 +1725,7 @@ export function createRouter(ctx: AppContext): Router {
           partial?: boolean;
           closing_balance?: number;
         };
-        const result = await markEntriesReconciled(appDb, operaDb, {
+        const result = await markEntriesReconciled(appDb, company, operaDb, {
           bankCode,
           entries: Array.isArray(body.entries) ? body.entries : [],
           statementNumber: Number(body.statement_number ?? 0),
@@ -1774,8 +1806,10 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await listCorrections(appDb, {
+        const result = await listCorrections(appDb, company, {
           bankName:
             typeof req.query.bank_name === 'string' ? req.query.bank_name : null,
           correctAccount:
@@ -1819,8 +1853,10 @@ export function createRouter(ctx: AppContext): Router {
       if (!operaDb) return;
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await completeBatch(appDb, operaDb, {
+        const result = await completeBatch(appDb, company, operaDb, {
           bankCode: String(req.params.bank_code ?? ''),
           entryNumber: String(req.params.entry_number ?? ''),
         });
@@ -1864,6 +1900,8 @@ export function createRouter(ctx: AppContext): Router {
     async (req: Request, res: Response) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const body = (req.body ?? {}) as {
           bank_code?: string;
@@ -1873,7 +1911,7 @@ export function createRouter(ctx: AppContext): Router {
           deferred_transactions?: any[];
           imported_by?: string;
         };
-        const result = await persistImportDecisions(appDb, {
+        const result = await persistImportDecisions(appDb, company, {
           bankCode: String(body.bank_code ?? ''),
           filename: String(body.filename ?? ''),
           source: String(body.source ?? 'pdf'),
@@ -1922,13 +1960,15 @@ export function createRouter(ctx: AppContext): Router {
       if (!operaDb) return;
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const body = (req.body ?? {}) as {
           matches?: ConfirmMatchInput[];
           statement_balance?: number;
           statement_date?: string;
         };
-        const result = await confirmStatementMatches(appDb, operaDb, {
+        const result = await confirmStatementMatches(appDb, company, operaDb, {
           bankCode: String(req.params.bank_code ?? ''),
           matches: Array.isArray(body.matches) ? body.matches : [],
           statementBalance: Number(body.statement_balance ?? 0),
@@ -2026,9 +2066,11 @@ export function createRouter(ctx: AppContext): Router {
       if (!operaDb) return;
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const q = req.query;
-        const result = await updateRepeatEntryDate(appDb, operaDb, {
+        const result = await updateRepeatEntryDate(appDb, company, operaDb, {
           bankCode: String(q.bank_code ?? ''),
           entryRef: String(q.entry_ref ?? ''),
           newDate: String(q.new_date ?? ''),
@@ -2073,8 +2115,10 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await listImportHistory(appDb, {
+        const result = await listImportHistory(appDb, company, {
           bankCode:
             typeof req.query.bank_code === 'string'
               ? req.query.bank_code
@@ -2117,8 +2161,10 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await listImportHistory(appDb, {
+        const result = await listImportHistory(appDb, company, {
           bankCode:
             typeof req.query.bank_code === 'string'
               ? req.query.bank_code
@@ -2161,9 +2207,11 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const id = Number(req.params.record_id);
-        const result = await deleteImportRecord(appDb, id);
+        const result = await deleteImportRecord(appDb, company, id);
         if (!result.success) {
           res
             .status(/not found/i.test(result.error ?? '') ? 404 : 400)
@@ -2197,8 +2245,10 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
-        const result = await clearImportHistory(appDb, {
+        const result = await clearImportHistory(appDb, company, {
           bankCode:
             typeof req.query.bank_code === 'string'
               ? req.query.bank_code
@@ -2379,6 +2429,8 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       try {
         const bankCode = String(req.query.bank_code ?? '').trim();
         const statementNumber = Number(req.query.statement_number);
@@ -2418,7 +2470,7 @@ export function createRouter(ctx: AppContext): Router {
           });
           return;
         }
-        const result = await completeReconciliation(operaDb, appDb, {
+        const result = await completeReconciliation(operaDb, appDb, company, {
           bankCode,
           statementNumber,
           statementDate,
@@ -2467,7 +2519,8 @@ export function createRouter(ctx: AppContext): Router {
             if (resolvedId === null) {
               const row = (await appDb('bank_statement_imports')
                 .select('id')
-                .where('bank_code', bankCode)
+                .where('company_code', company)
+                .andWhere('bank_code', bankCode)
                 .andWhereRaw('ABS(closing_balance - ?) < 0.005', [
                   closingBalance,
                 ])
@@ -2479,7 +2532,7 @@ export function createRouter(ctx: AppContext): Router {
             if (resolvedId !== null) {
               const updated = Number(
                 await appDb('bank_statement_imports')
-                  .where({ id: resolvedId })
+                  .where({ company_code: company, id: resolvedId })
                   .update({
                     is_reconciled: isReconciled,
                     reconciled_count: result.records_reconciled ?? 0,
@@ -2518,6 +2571,7 @@ export function createRouter(ctx: AppContext): Router {
               try {
                 const [insertedId] = (await appDb('bank_statement_imports')
                   .insert({
+                    company_code: company,
                     bank_code: bankCode,
                     statement_date: statementDate,
                     closing_balance: closingBalance,
@@ -2839,11 +2893,13 @@ export function createRouter(ctx: AppContext): Router {
         });
         return;
       }
+      const company = requireCompany(req, res);
+      if (!company) return;
       const executor = adapter.bankImportExecutor ?? bankImportPostingExecutor;
       const lock = adapter.bankImportLock ?? inMemoryImportLock;
       const overlapChecker =
         adapter.bankPeriodOverlapChecker ??
-        makeBankStatementOverlapChecker(appDb);
+        makeBankStatementOverlapChecker(appDb, company);
       try {
         const body = (req.body ?? {}) as Record<string, unknown>;
         const filePath = String(req.query.file_path ?? body.file_path ?? '');
@@ -2917,6 +2973,8 @@ export function createRouter(ctx: AppContext): Router {
                 ? (body.rejected_refund_rows as number[])
                 : [],
               skipOverlapCheck: body.skip_overlap_check === true,
+              companyCode: company,
+              importedBy: req.user?.userId ?? null,
             },
           );
           ctx.logger.info?.(
@@ -2953,11 +3011,10 @@ export function createRouter(ctx: AppContext): Router {
               : [],
             skipOverlapCheck: body.skip_overlap_check === true,
             importedBy: req.user?.userId ?? null,
-            // Tenant id (`standalone:<co>` in standalone mode, `<co>`
-            // in plain SAM) is what the legacy learner key expects.
-            // Stripping the namespace prefix keeps row reuse clean
-            // across mode switches.
-            companyCode: (ctx.tenantId ?? '').replace(/^standalone:/, '') || null,
+            // Opera company code from X-Opera-Company header — required
+            // for multi-company isolation. Every per-company table read/
+            // write below this point scopes by this code.
+            companyCode: company,
             paymentRequestLookup: adapter.bankPaymentRequestLookup ?? null,
           },
           extractor,
@@ -3273,7 +3330,7 @@ export function createRouter(ctx: AppContext): Router {
       const importType =
         (req.query.import_type as ImportType | undefined) ??
         (body.import_type as ImportType);
-      const result = await archiveFile(appDb, storage, {
+      const result = await archiveFile(appDb, company, storage, {
         filePath: String(req.query.file_path ?? body.file_path ?? ''),
         importType,
         transactionsExtracted: req.query.transactions_extracted
@@ -3303,10 +3360,12 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/archive/history', async (req: Request, res: Response) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
       const importType = (req.query.import_type as ImportType | undefined) ?? null;
       const limit = req.query.limit ? Number(req.query.limit) : 50;
-      const result = await getArchiveHistory(appDb, importType, limit);
+      const result = await getArchiveHistory(appDb, company, importType, limit);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('archive history failed', err);
@@ -3335,7 +3394,7 @@ export function createRouter(ctx: AppContext): Router {
       const archivePath = String(
         req.query.archive_path ?? body.archive_path ?? '',
       );
-      const result = await restoreArchivedFile(appDb, storage, archivePath);
+      const result = await restoreArchivedFile(appDb, company, storage, archivePath);
       if (!result.success) {
         res.status(400).json(result);
         return;
@@ -3486,8 +3545,10 @@ export function createRouter(ctx: AppContext): Router {
     async (req, res) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       const importId = Number(req.params.import_id);
-      res.json(await getStatementTransactionsForImport(appDb, importId));
+      res.json(await getStatementTransactionsForImport(appDb, company, importId));
     },
   );
 
@@ -3500,8 +3561,10 @@ export function createRouter(ctx: AppContext): Router {
     async (req, res) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const result = await recordDeferredTransaction(appDb, {
+      const result = await recordDeferredTransaction(appDb, company, {
         bankCode: String(req.params.bank_code ?? ''),
         statementDate: String(body.statement_date ?? ''),
         amount: Number(body.amount ?? 0),
@@ -3517,9 +3580,12 @@ export function createRouter(ctx: AppContext): Router {
     async (req, res) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       res.json(
         await listDeferredItems(
           appDb,
+          company,
           String(req.params.bank_code ?? ''),
         ),
       );
@@ -3531,10 +3597,13 @@ export function createRouter(ctx: AppContext): Router {
     async (req, res) => {
       const appDb = getAppDb(req, res);
       if (!appDb) return;
+      const company = requireCompany(req, res);
+      if (!company) return;
       const body = (req.body ?? {}) as { ids?: number[] };
       res.json(
         await deleteDeferredItems(
           appDb,
+          company,
           String(req.params.bank_code ?? ''),
           Array.isArray(body.ids) ? body.ids : undefined,
         ),
@@ -3627,10 +3696,13 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/bank-import/archive-statement', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const body = (req.body ?? {}) as { import_id?: number; archived_by?: string };
     res.json(
       await archiveStatement(
         appDb,
+        company,
         Number(body.import_id ?? req.query.import_id ?? 0),
         String(body.archived_by ?? 'system'),
       ),
@@ -3640,9 +3712,12 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/archived-statements', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     res.json(
       await listArchivedStatements(
         appDb,
+        company,
         (req.query.bank_code as string) || null,
         req.query.limit ? Number(req.query.limit) : 200,
       ),
@@ -3652,10 +3727,13 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/bank-import/restore-statement', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const body = (req.body ?? {}) as { import_id?: number };
     res.json(
       await restoreStatement(
         appDb,
+        company,
         Number(body.import_id ?? req.query.import_id ?? 0),
       ),
     );
@@ -3672,6 +3750,7 @@ export function createRouter(ctx: AppContext): Router {
       res.json(
         await getArchivedStatementPdf(
           appDb,
+          company,
           storage,
           Number(req.params.record_id),
         ),
@@ -3682,10 +3761,13 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/bank-import/delete-archived-statement', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const body = (req.body ?? {}) as { record_id?: number };
     res.json(
       await deleteArchivedStatement(
         appDb,
+        company,
         Number(body.record_id ?? req.query.record_id ?? 0),
       ),
     );
@@ -3694,6 +3776,8 @@ export function createRouter(ctx: AppContext): Router {
   router.post('/api/bank-import/manage-statements', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     const body = (req.body ?? {}) as {
       bank_code?: string;
       include_archived?: boolean;
@@ -3701,6 +3785,7 @@ export function createRouter(ctx: AppContext): Router {
     res.json(
       await manageStatements(
         appDb,
+        company,
         body.bank_code ?? null,
         !!body.include_archived,
       ),
@@ -3835,8 +3920,10 @@ export function createRouter(ctx: AppContext): Router {
     if (!operaDb) return;
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     try {
-      const result = await checkRestoreAcrossAllBanks(operaDb, appDb);
+      const result = await checkRestoreAcrossAllBanks(operaDb, appDb, company);
       res.json(result);
     } catch (err: any) {
       ctx.logger.error('Restore-check failed', err);
@@ -3940,8 +4027,10 @@ export function createRouter(ctx: AppContext): Router {
   router.get('/api/bank-import/statement-review/:import_id', async (req, res) => {
     const appDb = getAppDb(req, res);
     if (!appDb) return;
+    const company = requireCompany(req, res);
+    if (!company) return;
     res.json(
-      await getStatementReview(appDb, Number(req.params.import_id)),
+      await getStatementReview(appDb, company, Number(req.params.import_id)),
     );
   });
 
@@ -3970,9 +4059,11 @@ export function createRouter(ctx: AppContext): Router {
       });
       return;
     }
+    const company = requireCompany(req, res);
+    if (!company) return;
     const executor = adapter.bankImportExecutor ?? bankImportPostingExecutor;
     const lock = adapter.bankImportLock ?? inMemoryImportLock;
-    const overlap = adapter.bankPeriodOverlapChecker ?? makeBankStatementOverlapChecker(appDb);
+    const overlap = adapter.bankPeriodOverlapChecker ?? makeBankStatementOverlapChecker(appDb, company);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const input: BankImportFromEmailInput = {
       emailId: Number(req.query.email_id ?? body.email_id ?? 0),
@@ -3994,6 +4085,8 @@ export function createRouter(ctx: AppContext): Router {
         ? (body.rejected_refund_rows as number[])
         : [],
       skipOverlapCheck: body.skip_overlap_check === true,
+      companyCode: company,
+      importedBy: req.user?.userId ?? null,
     };
     res.json(
       await importBankStatementFromEmail(

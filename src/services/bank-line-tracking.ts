@@ -32,6 +32,7 @@
  * `count === 1` before applying overrides.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface BankLineTrackingEntry {
   /** Opera entry number this stored line was posted to, or null. */
@@ -52,6 +53,8 @@ export type BankLineTrackingMap = Map<string, BankLineTrackingEntry>;
 export interface BuildBankLineTrackingInput {
   /** Per-company app DB. Pass null/undefined to skip (returns empty map). */
   appDb: Knex | null | undefined;
+  /** Opera company code (e.g. 'C', 'I', 'Z'). Required when appDb is set. */
+  companyCode: string;
   /** Bank code (e.g. "BB005"). Must already be validated upstream. */
   bankCode: string;
   /**
@@ -73,8 +76,9 @@ export async function buildBankLineTracking(
   input: BuildBankLineTrackingInput,
 ): Promise<BankLineTrackingMap> {
   const out: BankLineTrackingMap = new Map();
-  const { appDb, bankCode, scopeAnchor, toleranceDays = 7 } = input;
+  const { appDb, companyCode, bankCode, scopeAnchor, toleranceDays = 7 } = input;
   if (!appDb || !scopeAnchor) return out;
+  const scope = companyScope(companyCode);
 
   const anchorMs = Date.parse(scopeAnchor);
   if (!Number.isFinite(anchorMs)) return out;
@@ -93,7 +97,9 @@ export async function buildBankLineTracking(
         'bank_statement_transactions.import_id',
         'bank_statement_imports.id',
       )
-      .where('bank_statement_imports.bank_code', bankCode)
+      .where('bank_statement_imports.company_code', scope.company_code)
+      .andWhere('bank_statement_transactions.company_code', scope.company_code)
+      .andWhere('bank_statement_imports.bank_code', bankCode)
       .andWhere('bank_statement_imports.statement_date', '>=', lo)
       .andWhere('bank_statement_imports.statement_date', '<=', hi)
       .select(

@@ -5,33 +5,35 @@
  * Faithful port of `sql_rag/import_lock.py`. The Python version uses
  * a per-company SQLite file (`import_locks.db`) — the SAM port uses
  * the per-app DB's `import_locks` table (provisioned by migration
- * 001_initial_schema.ts).
+ * 001_initial_schema.ts; migration 020 made the UNIQUE composite on
+ * (company_code, bank_code) so two companies can each hold their
+ * own lock for the same bank_code).
  *
  * Stale lock cleanup: any lock older than `LOCK_EXPIRY_SECONDS` is
  * deleted on each acquire. Default 5 minutes — same as Python.
  *
- * Lock granularity is per Opera bank account code (NOT per tenant)
- * because the import flow's destination is the Opera bank account,
- * not SAM tenant. Two tenants importing to the same Opera company's
- * BC010 must serialise; that's by design (per CLAUDE.md "this is a
+ * Lock granularity is per Opera bank account code within a SAM
+ * company. Two tenants importing to the same bank_code on the same
+ * SAM company must serialise; that's by design (per CLAUDE.md "this is a
  * finance system — no concurrent writes to the same bank").
  *
  * Usage:
- *   if (!await acquireImportLock(appDb, 'BC010', 'api', 'import')) {
+ *   if (!await acquireImportLock(appDb, company, 'BC010', { ... })) {
  *     return res.json({ success: false, error: 'Bank is locked' });
  *   }
  *   try {
  *     // do the import
  *   } finally {
- *     await releaseImportLock(appDb, 'BC010');
+ *     await releaseImportLock(appDb, company, 'BC010');
  *   }
  *
  * Or with the context-manager helper:
- *   await withImportLock(appDb, 'BC010', { locked_by, endpoint }, async () => {
+ *   await withImportLock(appDb, company, 'BC010', { locked_by, endpoint }, async () => {
  *     // do the import
  *   });
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export const LOCK_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -54,25 +56,34 @@ export interface ActiveLock {
 // acquire / release / list
 // ---------------------------------------------------------------------
 
-async function cleanupStaleLocks(appDb: Knex): Promise<number> {
+async function cleanupStaleLocks(
+  appDb: Knex,
+  companyCode: string,
+): Promise<number> {
+  const scope = companyScope(companyCode);
   const cutoff = new Date(Date.now() - LOCK_EXPIRY_SECONDS * 1000);
   return Number(
-    await appDb('import_locks').where('locked_at', '<', cutoff).delete(),
+    await appDb('import_locks')
+      .where(scope)
+      .andWhere('locked_at', '<', cutoff)
+      .delete(),
   );
 }
 
 export async function acquireImportLock(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   opts: ImportLockOptions = {},
 ): Promise<boolean> {
   const code = (bankCode ?? '').trim();
   if (!code) return false;
+  const scope = companyScope(companyCode);
 
-  await cleanupStaleLocks(appDb);
+  await cleanupStaleLocks(appDb, companyCode);
 
   const existing = (await appDb('import_locks')
-    .where({ bank_code: code })
+    .where({ ...scope, bank_code: code })
     .first()) as
     | { bank_code: string; locked_at: Date | string; locked_by: string }
     | undefined;
@@ -80,6 +91,7 @@ export async function acquireImportLock(
 
   try {
     await appDb('import_locks').insert({
+      ...scope,
       bank_code: code,
       locked_at: appDb.fn.now(),
       locked_by: opts.locked_by ?? 'unknown',
@@ -95,22 +107,30 @@ export async function acquireImportLock(
 
 export async function releaseImportLock(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<void> {
   const code = (bankCode ?? '').trim();
   if (!code) return;
-  await appDb('import_locks').where({ bank_code: code }).delete();
+  const scope = companyScope(companyCode);
+  await appDb('import_locks').where({ ...scope, bank_code: code }).delete();
 }
 
-export async function getActiveLocks(appDb: Knex): Promise<ActiveLock[]> {
-  await cleanupStaleLocks(appDb);
-  const rows = (await appDb('import_locks').select(
-    'bank_code',
-    'locked_at',
-    'locked_by',
-    'endpoint',
-    'description',
-  )) as unknown as Array<{
+export async function getActiveLocks(
+  appDb: Knex,
+  companyCode: string,
+): Promise<ActiveLock[]> {
+  const scope = companyScope(companyCode);
+  await cleanupStaleLocks(appDb, companyCode);
+  const rows = (await appDb('import_locks')
+    .where(scope)
+    .select(
+      'bank_code',
+      'locked_at',
+      'locked_by',
+      'endpoint',
+      'description',
+    )) as unknown as Array<{
     bank_code: string;
     locked_at: Date | string;
     locked_by: string | null;
@@ -148,11 +168,12 @@ export class ImportLockError extends Error {
 
 export async function withImportLock<T>(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   opts: ImportLockOptions,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const acquired = await acquireImportLock(appDb, bankCode, opts);
+  const acquired = await acquireImportLock(appDb, companyCode, bankCode, opts);
   if (!acquired) {
     throw new ImportLockError(
       `Bank account ${bankCode} is currently being imported by another user. ` +
@@ -162,6 +183,6 @@ export async function withImportLock<T>(
   try {
     return await fn();
   } finally {
-    await releaseImportLock(appDb, bankCode);
+    await releaseImportLock(appDb, companyCode, bankCode);
   }
 }

@@ -15,6 +15,7 @@
  * existing frontend doesn't need changes.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export type ImportType = 'bank-statement' | 'gocardless' | 'invoice';
 
@@ -130,6 +131,7 @@ export interface ArchiveFileInput {
 
 export async function archiveFile(
   appDb: Knex,
+  companyCode: string,
   storage: FileStorageAdapter,
   input: ArchiveFileInput,
 ): Promise<ArchiveResponse> {
@@ -140,6 +142,7 @@ export async function archiveFile(
       error: `Unsupported import_type: ${input.importType}`,
     };
   }
+  const scope = companyScope(companyCode);
   let archivePath: string;
   try {
     const r = await storage.archive({
@@ -160,6 +163,7 @@ export async function archiveFile(
   };
   try {
     await appDb('file_archive_log').insert({
+      ...scope,
       archived_at: appDb.fn.now(),
       original_path: input.filePath,
       archive_path: archivePath,
@@ -180,11 +184,14 @@ export async function archiveFile(
 
 export async function getArchiveHistory(
   appDb: Knex,
+  companyCode: string,
   importType: ImportType | null,
   limit = 50,
 ): Promise<ArchiveResponse> {
+  const scope = companyScope(companyCode);
   try {
     let q = appDb('file_archive_log')
+      .where(scope)
       .orderBy('archived_at', 'desc')
       .limit(limit);
     if (importType) q = q.where({ import_type: importType });
@@ -201,14 +208,16 @@ export async function getArchiveHistory(
 
 export async function restoreArchivedFile(
   appDb: Knex,
+  companyCode: string,
   storage: FileStorageAdapter,
   archivePath: string,
 ): Promise<ArchiveResponse> {
   if (!archivePath) {
     return { success: false, error: 'archive_path is required' };
   }
+  const scope = companyScope(companyCode);
   const row = (await appDb('file_archive_log')
-    .where({ archive_path: archivePath })
+    .where({ ...scope, archive_path: archivePath })
     .orderBy('archived_at', 'desc')
     .first()) as RawLogRow | undefined;
   if (!row) {
@@ -222,7 +231,7 @@ export async function restoreArchivedFile(
       archivePath,
       originalPath: row.original_path,
     });
-    await appDb('file_archive_log').where({ id: row.id }).update({
+    await appDb('file_archive_log').where({ ...scope, id: row.id }).update({
       restored_at: appDb.fn.now(),
       restored_to: result.restoredPath,
     });

@@ -189,15 +189,18 @@ export interface RepeatEntryAliasRow {
 
 export async function lookupRepeatEntryAlias(
   appDb: Knex | null,
+  companyCode: string,
   memoPattern: string,
   bankCode: string,
 ): Promise<RepeatEntryAliasRow | null> {
   if (!appDb) return null;
   const pattern = (memoPattern ?? '').trim();
   if (!pattern) return null;
+  const scope = companyScope(companyCode);
   try {
     const row = (await appDb('repeat_entry_aliases')
       .select('opera_repeat_ref', 'bank_code')
+      .where(scope)
       .whereRaw('UPPER(memo_pattern) = ?', [pattern.toUpperCase()])
       .andWhere('bank_code', bankCode)
       .first()) as
@@ -215,6 +218,7 @@ export async function lookupRepeatEntryAlias(
 
 export async function saveRepeatEntryAlias(
   appDb: Knex | null,
+  companyCode: string,
   memoPattern: string,
   bankCode: string,
   operaRepeatRef: string,
@@ -223,19 +227,22 @@ export async function saveRepeatEntryAlias(
   const pattern = (memoPattern ?? '').trim();
   const ref = (operaRepeatRef ?? '').trim();
   if (!pattern || !ref) return false;
+  const scope = companyScope(companyCode);
   try {
     const existing = (await appDb('repeat_entry_aliases')
       .select('id')
+      .where(scope)
       .whereRaw('UPPER(memo_pattern) = ?', [pattern.toUpperCase()])
       .andWhere('bank_code', bankCode)
       .first()) as { id: number } | undefined;
     if (existing?.id) {
       await appDb('repeat_entry_aliases')
-        .where({ id: existing.id })
+        .where({ ...scope, id: existing.id })
         .update({ opera_repeat_ref: ref });
       return true;
     }
     await appDb('repeat_entry_aliases').insert({
+      ...scope,
       bank_code: bankCode,
       memo_pattern: pattern,
       opera_repeat_ref: ref,

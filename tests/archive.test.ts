@@ -7,8 +7,11 @@ import {
   type FileStorageAdapter,
 } from '../src/services/archive.js';
 
+const TEST_COMPANY = 'C';
+
 interface LogRow {
   id: number;
+  company_code: string;
   archived_at: string;
   original_path: string;
   archive_path: string;
@@ -32,6 +35,7 @@ function makeAppDb(state: State): any {
     let typeFilter: string | null = null;
     let pathFilter: string | null = null;
     let idFilter: number | null = null;
+    let companyFilter: string | null = null;
     let limitN: number | null = null;
     const builder: any = {
       where: (cond: any) => {
@@ -39,6 +43,7 @@ function makeAppDb(state: State): any {
           if (cond.import_type) typeFilter = cond.import_type;
           if (cond.archive_path) pathFilter = cond.archive_path;
           if (cond.id) idFilter = cond.id;
+          if (cond.company_code) companyFilter = cond.company_code;
         }
         return builder;
       },
@@ -48,14 +53,20 @@ function makeAppDb(state: State): any {
         return builder;
       },
       first: async () => {
+        let rows = state.log;
+        if (companyFilter) rows = rows.filter((r) => r.company_code === companyFilter);
         if (pathFilter) {
-          return state.log.find((r) => r.archive_path === pathFilter);
+          return rows.find((r) => r.archive_path === pathFilter);
         }
         return undefined;
       },
       update: async (payload: any) => {
         if (idFilter !== null) {
-          const idx = state.log.findIndex((r) => r.id === idFilter);
+          const idx = state.log.findIndex(
+            (r) =>
+              r.id === idFilter &&
+              (!companyFilter || r.company_code === companyFilter),
+          );
           if (idx >= 0) {
             state.log[idx] = { ...state.log[idx]!, ...payload };
             return 1;
@@ -67,6 +78,7 @@ function makeAppDb(state: State): any {
         const id = state.nextId++;
         state.log.push({
           id,
+          company_code: String(payload.company_code ?? ''),
           archived_at: new Date().toISOString(),
           original_path: payload.original_path,
           archive_path: payload.archive_path,
@@ -80,6 +92,7 @@ function makeAppDb(state: State): any {
       },
       then: async (resolve: any) => {
         let rows = state.log;
+        if (companyFilter) rows = rows.filter((r) => r.company_code === companyFilter);
         if (typeFilter) rows = rows.filter((r) => r.import_type === typeFilter);
         rows = [...rows].sort((a, b) =>
           a.archived_at < b.archived_at ? 1 : -1,
@@ -125,7 +138,7 @@ describe('archiveFile', () => {
   it('archives + writes log row', async () => {
     const state: State = { log: [], nextId: 1 };
     const storage = makeStorage({});
-    const result = await archiveFile(makeAppDb(state), storage, {
+    const result = await archiveFile(makeAppDb(state), TEST_COMPANY, storage, {
       filePath: '/tmp/statement.pdf',
       importType: 'bank-statement',
       transactionsExtracted: 10,
@@ -140,6 +153,7 @@ describe('archiveFile', () => {
     const state: State = { log: [], nextId: 1 };
     const result = await archiveFile(
       makeAppDb(state),
+      TEST_COMPANY,
       makeStorage({}),
       { filePath: '/tmp/x', importType: 'foo' as any },
     );
@@ -150,6 +164,7 @@ describe('archiveFile', () => {
     const state: State = { log: [], nextId: 1 };
     const result = await archiveFile(
       makeAppDb(state),
+      TEST_COMPANY,
       makeStorage({ failArchive: true }),
       { filePath: '/tmp/x.pdf', importType: 'bank-statement' },
     );
@@ -164,6 +179,7 @@ describe('getArchiveHistory', () => {
       log: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           archived_at: '2026-04-01T00:00:00Z',
           original_path: '/tmp/a.pdf',
           archive_path: '/archive/a.pdf',
@@ -175,6 +191,7 @@ describe('getArchiveHistory', () => {
         },
         {
           id: 2,
+          company_code: TEST_COMPANY,
           archived_at: '2026-04-15T00:00:00Z',
           original_path: '/tmp/b.csv',
           archive_path: '/archive/b.csv',
@@ -187,11 +204,12 @@ describe('getArchiveHistory', () => {
       ],
       nextId: 3,
     };
-    const all = await getArchiveHistory(makeAppDb(state), null, 50);
+    const all = await getArchiveHistory(makeAppDb(state), TEST_COMPANY, null, 50);
     expect(all.count).toBe(2);
     expect(all.history?.[0]?.id).toBe(2);
     const onlyBank = await getArchiveHistory(
       makeAppDb(state),
+      TEST_COMPANY,
       'bank-statement',
       50,
     );
@@ -206,6 +224,7 @@ describe('restoreArchivedFile', () => {
       log: [
         {
           id: 1,
+          company_code: TEST_COMPANY,
           archived_at: '2026-04-01T00:00:00Z',
           original_path: '/tmp/a.pdf',
           archive_path: '/archive/a.pdf',
@@ -220,6 +239,7 @@ describe('restoreArchivedFile', () => {
     };
     const result = await restoreArchivedFile(
       makeAppDb(state),
+      TEST_COMPANY,
       makeStorage({}),
       '/archive/a.pdf',
     );
@@ -232,6 +252,7 @@ describe('restoreArchivedFile', () => {
     const state: State = { log: [], nextId: 1 };
     const result = await restoreArchivedFile(
       makeAppDb(state),
+      TEST_COMPANY,
       makeStorage({}),
       '/archive/ghost.pdf',
     );

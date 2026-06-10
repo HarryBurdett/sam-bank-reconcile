@@ -4,8 +4,11 @@ import {
   listRepeatEntries,
 } from '../src/services/repeat-entries.js';
 
+const TEST_COMPANY = 'C';
+
 interface AppLockRow {
   id: number;
+  company_code: string;
   bank_code: string;
   locked_at: Date;
   locked_by: string;
@@ -43,6 +46,7 @@ function makeAppDb(state: AppMockState): any {
           }
           return builder;
         },
+        andWhere: (cond: any, op?: any, val?: any) => builder.where(cond, op, val),
         first: () =>
           Promise.resolve(
             state.lockRows.find((r) =>
@@ -67,6 +71,7 @@ function makeAppDb(state: AppMockState): any {
         insert: (row: any) => {
           state.lockRows.push({
             id: state.nextLockId++,
+            company_code: String(row.company_code ?? ''),
             bank_code: row.bank_code,
             locked_at: new Date(),
             locked_by: row.locked_by ?? 'unknown',
@@ -174,6 +179,7 @@ describe('updateRepeatEntryDate - validation', () => {
   it('rejects bad bank_code', async () => {
     const result = await updateRepeatEntryDate(
       makeAppDb({ lockRows: [], aliases: [], nextLockId: 1, nextAliasId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ arhead: [], capturedSql: [] }),
       {
         bankCode: "BC';--",
@@ -188,6 +194,7 @@ describe('updateRepeatEntryDate - validation', () => {
   it('rejects bad entry_ref', async () => {
     const result = await updateRepeatEntryDate(
       makeAppDb({ lockRows: [], aliases: [], nextLockId: 1, nextAliasId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ arhead: [], capturedSql: [] }),
       {
         bankCode: 'BC010',
@@ -202,6 +209,7 @@ describe('updateRepeatEntryDate - validation', () => {
   it('rejects bad date format', async () => {
     const result = await updateRepeatEntryDate(
       makeAppDb({ lockRows: [], aliases: [], nextLockId: 1, nextAliasId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ arhead: [], capturedSql: [] }),
       {
         bankCode: 'BC010',
@@ -229,6 +237,7 @@ describe('updateRepeatEntryDate - happy path', () => {
     };
     const result = await updateRepeatEntryDate(
       makeAppDb({ lockRows: [], aliases: [], nextLockId: 1, nextAliasId: 1 }),
+      TEST_COMPANY,
       makeOperaDb(operaState),
       {
         bankCode: 'BC010',
@@ -257,6 +266,7 @@ describe('updateRepeatEntryDate - happy path', () => {
     };
     const result = await updateRepeatEntryDate(
       makeAppDb(appState),
+      TEST_COMPANY,
       makeOperaDb({
         arhead: [
           {
@@ -298,6 +308,7 @@ describe('updateRepeatEntryDate - happy path', () => {
     };
     await updateRepeatEntryDate(
       makeAppDb(appState),
+      TEST_COMPANY,
       makeOperaDb({
         arhead: [
           {
@@ -323,6 +334,7 @@ describe('updateRepeatEntryDate - happy path', () => {
   it('returns error when entry not found', async () => {
     const result = await updateRepeatEntryDate(
       makeAppDb({ lockRows: [], aliases: [], nextLockId: 1, nextAliasId: 1 }),
+      TEST_COMPANY,
       makeOperaDb({ arhead: [], capturedSql: [] }),
       {
         bankCode: 'BC010',
@@ -342,6 +354,7 @@ describe('updateRepeatEntryDate - locking', () => {
         lockRows: [
           {
             id: 1,
+            company_code: TEST_COMPANY,
             bank_code: 'BC010',
             locked_at: new Date(),
             locked_by: 'other',
@@ -353,6 +366,7 @@ describe('updateRepeatEntryDate - locking', () => {
         nextLockId: 2,
         nextAliasId: 1,
       }),
+      TEST_COMPANY,
       makeOperaDb({ arhead: [], capturedSql: [] }),
       {
         bankCode: 'BC010',

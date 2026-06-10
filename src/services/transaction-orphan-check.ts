@@ -32,6 +32,7 @@
  * Agent) without dialect-specific functions.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface OrphanedStatementLine {
   import_id: number;
@@ -143,8 +144,10 @@ async function entriesPresentInOpera(
 
 async function fetchPostedLines(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<{ imports: Map<number, ImportRow>; lines: TxRow[] }> {
+  const scope = companyScope(companyCode);
   // Pull imports for this bank that have at least one posted line.
   // Join against the transactions table to avoid loading statements
   // with nothing posted.
@@ -156,7 +159,8 @@ async function fetchPostedLines(
       'opening_balance',
       'closing_balance',
     )
-    .where('bank_code', bankCode)) as unknown as ImportRow[];
+    .where(scope)
+    .andWhere('bank_code', bankCode)) as unknown as ImportRow[];
   const importMap = new Map<number, ImportRow>();
   for (const r of imports) importMap.set(r.id, r);
 
@@ -172,6 +176,7 @@ async function fetchPostedLines(
       'amount',
       'posted_entry_number',
     )
+    .where(scope)
     .whereIn('import_id', Array.from(importMap.keys()))
     .whereNotNull('posted_entry_number')
     .andWhereRaw("TRIM(posted_entry_number) <> ''")) as unknown as TxRow[];
@@ -236,6 +241,7 @@ function buildOrphanResult(
 export async function checkOrphanedTransactions(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<TransactionOrphanCheckResult> {
   const code = (bankCode ?? '').trim();
@@ -250,7 +256,7 @@ export async function checkOrphanedTransactions(
     };
   }
   try {
-    const { imports, lines } = await fetchPostedLines(appDb, code);
+    const { imports, lines } = await fetchPostedLines(appDb, companyCode, code);
     if (lines.length === 0) {
       return {
         success: true,
@@ -303,6 +309,7 @@ export async function checkOrphanedTransactions(
 export async function recoverOrphanedTransactions(
   operaDb: Knex,
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<TransactionOrphanRecoveryResult> {
   const code = (bankCode ?? '').trim();
@@ -315,8 +322,9 @@ export async function recoverOrphanedTransactions(
       error: 'bank_code required',
     };
   }
+  const scope = companyScope(companyCode);
   try {
-    const detection = await checkOrphanedTransactions(operaDb, appDb, code);
+    const detection = await checkOrphanedTransactions(operaDb, appDb, companyCode, code);
     if (!detection.success) {
       return {
         success: false,
@@ -351,6 +359,7 @@ export async function recoverOrphanedTransactions(
     // statement looks like it's still partially posted to Opera.
     await appDb.transaction(async (trx) => {
       await trx('bank_statement_transactions')
+        .where(scope)
         .whereIn('id', txIds)
         .update({
           posted_entry_number: null,
@@ -359,13 +368,13 @@ export async function recoverOrphanedTransactions(
         });
       for (const importId of importIds) {
         const row = await trx('bank_statement_transactions')
-          .where({ import_id: importId })
+          .where({ ...scope, import_id: importId })
           .whereNotNull('posted_entry_number')
           .andWhereRaw("TRIM(posted_entry_number) <> ''")
           .count<{ c: number | string }[]>({ c: '*' })
           .first();
         const remainingPosted = Number(row?.c ?? 0);
-        await trx('bank_statement_imports').where({ id: importId }).update({
+        await trx('bank_statement_imports').where({ ...scope, id: importId }).update({
           is_reconciled: 0,
           reconciled_count: 0,
           reconciled_at: null,

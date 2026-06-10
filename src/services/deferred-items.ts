@@ -11,6 +11,7 @@
  * migration 011 alongside this file.
  */
 import type { Knex } from 'knex';
+import { companyScope } from '../_shared/get-company.js';
 
 export interface DeferredItem {
   id: number;
@@ -24,6 +25,7 @@ export interface DeferredItem {
 
 export async function recordDeferredTransaction(
   appDb: Knex,
+  companyCode: string,
   args: {
     bankCode: string;
     statementDate: string;
@@ -33,9 +35,11 @@ export async function recordDeferredTransaction(
   },
 ): Promise<{ success: boolean; id?: number; error?: string }> {
   if (!args.bankCode) return { success: false, error: 'bank_code required' };
+  const scope = companyScope(companyCode);
   try {
     const [id] = (await appDb('deferred_transactions')
       .insert({
+        ...scope,
         bank_code: args.bankCode,
         statement_date: args.statementDate,
         amount: args.amount,
@@ -53,11 +57,13 @@ export async function recordDeferredTransaction(
 
 export async function listDeferredItems(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
 ): Promise<{ success: boolean; items: DeferredItem[]; error?: string }> {
+  const scope = companyScope(companyCode);
   try {
     const rows = (await appDb('deferred_transactions')
-      .where({ bank_code: bankCode })
+      .where({ ...scope, bank_code: bankCode })
       .orderBy('deferred_at', 'desc')) as unknown as Array<{
       id: number;
       bank_code: string;
@@ -92,11 +98,13 @@ export async function listDeferredItems(
 
 export async function deleteDeferredItems(
   appDb: Knex,
+  companyCode: string,
   bankCode: string,
   ids?: number[],
 ): Promise<{ success: boolean; deleted: number; error?: string }> {
+  const scope = companyScope(companyCode);
   try {
-    let q = appDb('deferred_transactions').where({ bank_code: bankCode });
+    let q = appDb('deferred_transactions').where({ ...scope, bank_code: bankCode });
     if (ids && ids.length > 0) {
       q = q.whereIn('id', ids);
     }
@@ -131,13 +139,15 @@ export async function deleteDeferredItems(
  */
 export async function autoCleanResolvedDefers(
   appDb: Knex,
+  companyCode: string,
   operaDb: Knex | null,
   bankCode: string,
 ): Promise<number> {
   if (!bankCode || !operaDb) return 0;
+  const scope = companyScope(companyCode);
   try {
     const items = (await appDb('deferred_transactions')
-      .where({ bank_code: bankCode })
+      .where({ ...scope, bank_code: bankCode })
       .select('id', 'amount')) as unknown as Array<{
       id: number;
       amount: number | string | null;
@@ -190,7 +200,7 @@ export async function autoCleanResolvedDefers(
     }
     if (cleaned.length > 0) {
       await appDb('deferred_transactions')
-        .where({ bank_code: bankCode })
+        .where({ ...scope, bank_code: bankCode })
         .whereIn('id', cleaned)
         .delete();
       // eslint-disable-next-line no-console
