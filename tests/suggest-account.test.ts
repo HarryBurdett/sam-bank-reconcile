@@ -23,6 +23,10 @@ function makeOperaDb(state: State): any {
         if (typeof cond === 'function') cond.call(builder);
         return builder;
       },
+      andWhere: (cond: any) => {
+        if (typeof cond === 'function') cond.call(builder);
+        return builder;
+      },
       orWhereNull: () => builder,
       orderBy: () => builder,
       then: async (resolve: any) => {

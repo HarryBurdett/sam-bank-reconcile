@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { processStatement } from '../src/services/process-statement.js';
 import type { LlmService } from '../src/services/preview-from-pdf.js';
 
+const TEST_COMPANY = 'C';
+
 function makeOperaDb(): any {
   // Bank lookup + sname/pname suggestions return Acme; no duplicates.
   const tableBuilder = (table: string) => {
@@ -77,10 +79,16 @@ describe('processStatement', () => {
         },
       ],
     });
-    const result = await processStatement(makeOperaDb(), makeLlm(json), {
-      filePath: '/tmp/x.pdf',
-      bankCode: 'BC010',
-    });
+    const result = await processStatement(
+      makeOperaDb(),
+      makeLlm(json),
+      {
+        filePath: '/tmp/x.pdf',
+        bankCode: 'BC010',
+      },
+      null,
+      TEST_COMPANY,
+    );
     expect(result.success).toBe(true);
     expect(result.matched_transactions?.length).toBe(1);
     const m = result.matched_transactions?.[0];
@@ -103,10 +111,16 @@ describe('processStatement', () => {
         },
       ],
     });
-    const result = await processStatement(makeOperaDb(), makeLlm(json), {
-      filePath: '/tmp/x.pdf',
-      bankCode: 'BC010',
-    });
+    const result = await processStatement(
+      makeOperaDb(),
+      makeLlm(json),
+      {
+        filePath: '/tmp/x.pdf',
+        bankCode: 'BC010',
+      },
+      null,
+      TEST_COMPANY,
+    );
     expect(result.matched_transactions?.[0]?.action).toBe('purchase_payment');
     expect(result.matched_transactions?.[0]?.suggested_account?.code).toBe(
       'B001',
@@ -114,10 +128,16 @@ describe('processStatement', () => {
   });
 
   it('preserves preview-from-pdf errors (passthrough)', async () => {
-    const result = await processStatement(makeOperaDb(), makeLlm('not json'), {
-      filePath: '/tmp/x.pdf',
-      bankCode: 'BC010',
-    });
+    const result = await processStatement(
+      makeOperaDb(),
+      makeLlm('not json'),
+      {
+        filePath: '/tmp/x.pdf',
+        bankCode: 'BC010',
+      },
+      null,
+      TEST_COMPANY,
+    );
     expect(result.success).toBe(false);
   });
 });

@@ -46,6 +46,7 @@ function makeAppDb(): any {
       select: () => chain,
       where: () => chain,
       whereRaw: () => chain,
+      andWhereRaw: () => chain,
       orderBy: () => chain,
       first: async () => undefined,
     };

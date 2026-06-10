@@ -5,6 +5,8 @@ import {
   getStatementTransactionsForImport,
 } from '../src/services/bank-reconciliation-status.js';
 
+const TEST_COMPANY = 'C';
+
 interface NbankRow {
   bank_code: string;
   description: string;
@@ -25,14 +27,12 @@ interface State {
   }>;
   statementTransactions?: Array<{
     line_number: number;
-    transaction_date: string;
-    name: string;
-    memo: string;
+    post_date: string;
+    description: string;
     amount: number;
     transaction_type: string;
-    matched_account: string | null;
-    matched_name: string | null;
-    reconciled: boolean;
+    matched_entry: string | null;
+    is_reconciled: boolean;
   }>;
 }
 
@@ -130,6 +130,7 @@ describe('getStatementTransactionsForImport', () => {
   it('rejects invalid import_id', async () => {
     const result = await getStatementTransactionsForImport(
       makeOperaDb({ banks: [], unreconciledByBank: {} }),
+      TEST_COMPANY,
       0,
     );
     expect(result.success).toBe(false);
@@ -143,21 +144,20 @@ describe('getStatementTransactionsForImport', () => {
         statementTransactions: [
           {
             line_number: 1,
-            transaction_date: '2026-04-15',
-            name: 'Acme',
-            memo: 'memo',
+            post_date: '2026-04-15',
+            description: 'Acme memo',
             amount: 100,
             transaction_type: 'credit',
-            matched_account: 'A001',
-            matched_name: 'Acme Ltd',
-            reconciled: false,
+            matched_entry: 'A001',
+            is_reconciled: false,
           },
         ],
       }),
+      TEST_COMPANY,
       42,
     );
     expect(result.success).toBe(true);
     expect(result.transactions.length).toBe(1);
-    expect(result.transactions[0]?.matched_account).toBe('A001');
+    expect(result.transactions[0]?.matched_entry).toBe('A001');
   });
 });
