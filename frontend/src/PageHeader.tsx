@@ -4,26 +4,28 @@ import { RefreshCw } from 'lucide-react';
 /**
  * Single source of truth for the version label rendered next to
  * every page header (e.g. "Bank Statements - Live Version 1.4").
- * Bump on each release.
  *
- * 1.4 — Phase B2+B3 of per-company isolation: migration 020 +
- *       companyCode plumbed through every remaining per-company
- *       table — bank_statement_imports, bank_statement_transactions,
- *       alias_corrections, deferred_transactions, repeat_entry_aliases,
- *       import_locks (composite (company_code, bank_code) UNIQUE),
- *       ignored_bank_transactions, file_archive_log,
- *       duplicate_overrides, negative_aliases (composite UNIQUE),
- *       extraction_cache, ai_suggestions. Cross-tenant isolation
- *       is now complete across the entire plugin.
+ * The value is injected at BUILD TIME by Vite via the `define`
+ * block in vite.config.ts, which reads `package.json#version`.
+ * Future releases only need to bump package.json + manifest.json
+ * — this label updates automatically. No more three-place edits.
  *
- * 1.3 — Phase B1: migration 019 + companyCode plumbed through
- *       bank_import_drafts, match_config, and bank_import_aliases.
+ * Falls back to 'dev' when the global isn't defined (e.g. running
+ * a non-Vite test harness directly against the source).
  *
- * 1.2 — Phase A: migration 018 + companyScope fail-loud helper +
- *       companyCode plumbed through settings, folder-settings,
- *       folder-backed-storage, scan-all-banks, check-recurring-entries.
+ * Display form is `major.minor` (e.g. "1.4") to match the existing
+ * label convention. The full semver remains in __APP_VERSION__ if
+ * a more precise display is ever wanted.
  */
-export const LIVE_VERSION = '1.4';
+declare const __APP_VERSION__: string | undefined;
+
+const FULL_VERSION =
+  typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : 'dev';
+
+export const LIVE_VERSION =
+  FULL_VERSION === 'dev'
+    ? 'dev'
+    : FULL_VERSION.split('.').slice(0, 2).join('.');
 
 interface PageHeaderProps {
   icon: React.ComponentType<{ className?: string }>;
